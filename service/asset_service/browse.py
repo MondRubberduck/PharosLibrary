@@ -1234,7 +1234,19 @@ def api_meshes_packs() -> dict:
         r["slots_resolved"] = w.get("slots_resolved")
         r["wiring_ratio"] = w.get("wiring_ratio")
         r["wiring_method"] = w.get("method")
-    return {"packs": rows}
+    # merge same-name packs that appear once per source (a pack with both
+    # 'blend' and 'native' rows is ONE pack to a pack= filter caller)
+    merged: dict = {}
+    for r in rows:
+        m = merged.setdefault(r["pack"], {**r, "sources": [], "n": 0})
+        m["sources"].append(r["source"])
+        m["n"] += r["n"]
+        if r.get("tallest") and (not m.get("tallest")
+                                 or r["tallest"] > m["tallest"]):
+            m["tallest"] = r["tallest"]
+    for m in merged.values():
+        m["source"] = "+".join(sorted(set(m.pop("sources")))) or None
+    return {"packs": sorted(merged.values(), key=lambda m: m["pack"] or "")}
 
 
 def api_meshes_themes() -> dict:
@@ -1333,8 +1345,10 @@ def api_anim_clips(params: dict) -> dict:
                 rate = None
         title_tokens = [t if t not in ("f", "m") else ("female" if t == "f" else "male")
                         for t in re.split(r"[-_]+", base.rsplit(".", 1)[0])]
+        title = " ".join(title_tokens)
         items.append({"rel": r["rel"], "pack": r["pack"], "folder": folder,
-                      "title": " ".join(title_tokens),
+                      "title": title,
+                      "name": title,   # alias: every other section uses name
                       "bytes": r["bytes"], "tier": tier,
                       "preview": pv, "rate": rate, "key": key})
     items.sort(key=lambda x: (x["tier"], x["folder"], x["title"]))
@@ -2327,7 +2341,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")   # live registry data
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(body)
 
     def _html(self, body: bytes):
         self.send_response(200)
@@ -2335,14 +2350,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")   # server restarts shouldn't strand tabs
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(body)
 
     def _bytes(self, data: bytes, ctype: str):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if not getattr(self, "_head_only", False):
+            self._write(data)
+
+    def _write(self, data: bytes):
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(data)
+
+    def do_HEAD(self):
+        # link checkers and curl -I must not see 501 on previews/media
+        self._head_only = True
+        try:
+            self.do_GET()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_GET(self):
         url = urlparse(self.path)
@@ -2507,7 +2536,7 @@ class Handler(BaseHTTPRequestHandler):
                         chunk = fh.read(min(65536, remaining))
                         if not chunk:
                             break
-                        self.wfile.write(chunk)
+                        self._write(chunk)
                         remaining -= len(chunk)
             elif url.path == "/api/open_explorer":
                 # launch Windows Explorer for a folder (open) or file
@@ -2558,7 +2587,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "max-age=86400")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
-                self.wfile.write(data)
+                self._write(data)
             elif url.path.startswith("/cimg"):
                 # product images of the collection, jailed to Collected Files
                 target = (params.get("path") or [""])[0]
@@ -2578,7 +2607,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "max-age=86400")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
-                self.wfile.write(data)
+                self._write(data)
             elif url.path == "/api/packs":
                 self._json(api_packs(params))
             elif url.path == "/api/pack_files":
@@ -2619,7 +2648,7 @@ class Handler(BaseHTTPRequestHandler):
                         chunk = fh.read(65536)
                         if not chunk:
                             break
-                        self.wfile.write(chunk)
+                        self._write(chunk)
             elif url.path == "/viewer":
                 self._html(VIEWER_PAGE.encode("utf-8"))
             elif url.path.startswith("/static/"):

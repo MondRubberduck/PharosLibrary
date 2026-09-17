@@ -78,15 +78,25 @@ token cost.**
 ## 5. Scene building (agent-authored scenes)
 
 - `scene_manifest.py` — `pharos.scene/v1` JSON: assets (path, position,
-  rotation, scale, per-slot material recipe), texture sets, audio beds,
-  crowd block; validator + on-disk path checker + triangle budget report
-  (`--budget`, crowd cost estimated per body).
+  Y-up `rotation` [pitch, yaw, roll] — the builder converts to Blender's
+  Z-up), scale, per-slot material recipes, texture sets (applied as
+  ground planes), audio beds, crowd block; validator + on-disk path
+  checker + triangle budget report (`--budget` warns loudly on any
+  registry lookup miss — a mis-costed scene must never look confident).
 - `scene_builder.py` — headless Blender builder: imports FBX at manifest
-  scale (metres, Y-up), positions the true hierarchy root, ground-snaps
-  via world-space bbox corners on +Z, rebuilds Principled BSDF materials
-  from recipes incl. packed ORM channel separation, crowd as linked
-  duplicates with animation. Runs: `blender --background --python
+  scale (metres), converts Y-up rotations to Blender Z-up, positions the
+  true hierarchy root, ground-snaps via world-space bbox corners on +Z,
+  rebuilds Principled BSDF materials from recipes incl. packed ORM
+  channel separation, **emissive (additive emission) and opacity (alpha
+  blend)**, **per-slot wiring** from `recipe.slots[]` (multi-slot KitBash
+  buildings keep their slots), **repoints dead KitBash texture
+  references** at the shipped `.png.2k` folder, applies
+  `manifest.textures[]` as ground planes, places crowd with real
+  per-instance animation stagger. Runs: `blender --background --python
   scene_builder.py -- manifest.json`.
+- `verify_importable.py` — one-file-per-process Blender import probe: an
+  FBX that hard-crashes Blender's importer (exit 0xC0000005) becomes a
+  five-second answer instead of a debugging session.
 
 ## 6. Configuration contract
 

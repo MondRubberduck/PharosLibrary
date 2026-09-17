@@ -144,12 +144,21 @@ material wiring: `slots[].maps[]` with `role`/`file`/`channels`) ·
 `dim_suspect` (dims withheld as unreliable) · `tier`/`mode`/`exact`
 (search-quality disclosure).
 
+**Dimension provenance** (they are NOT all measured the same way):
+`leartes` — exporter-reported per-mesh boxes (metres, trustworthy);
+`kitbash3d` — Blender world-space AABB over the placed assembly (axis
+order differs from the FBX file's own header); `scan` — file-level
+extents from the raw FBX/OBJ (multi-object files report one box over
+everything, no per-object transforms). Don't mix provenances in one
+comparison.
+
 ## C. Files, previews, OS integration (GET)
 
 `/file?path=` FBX/BVH bytes · `/timg?path=` `/cimg?path=` images ·
 `/audiofile?path=` audio with HTTP Range · `/preview/<key>.webm`
-animation preview · `/api/open_explorer?path=&dry=1` resolve/show in
-Explorer (relative paths resolve against the section roots).
+animation preview (HEAD works for link checks) ·
+`/api/open_explorer?path=&dry=1` resolve/show in Explorer (relative
+paths resolve against the section roots).
 
 ## D. Search semantics (all item endpoints)
 
@@ -162,7 +171,8 @@ Explorer (relative paths resolve against the section roots).
   3 = OR fallback. 0 = no query.
 - Short tokens match on word boundaries (`lamp` ≠ `clamp`); tokens ≥5
   chars match as substrings.
-- Percent-encode spaces: `?q=brick%20wall`.
+- Percent-encode spaces: `?q=brick%20wall`. `size` clamps to 8–500 on
+  every list endpoint (a floor of 8 always applies).
 
 ## E. POST endpoints (mutations — explicit instruction only)
 

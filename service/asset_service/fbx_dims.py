@@ -171,10 +171,14 @@ def fbx_file_info(path: str | Path) -> dict | None:
 
     usf = None
     for props, _ in _walk(top, "P"):
-        # P layout: (name:S, type:S, typeFlag:S, value, ...)
-        if (len(props) >= 4 and props[0] == b"UnitScaleFactor"
-                and isinstance(props[3], float)):
-            usf = props[3]
+        # P layout varies by exporter: [name, type, label, flags, value]
+        # (value at 4) or [name, type, flags, value] (value at 3). The
+        # first FLOAT after the name wins -- type/label/flags are bytes.
+        if len(props) >= 4 and props[0] == b"UnitScaleFactor":
+            for v in props[3:]:
+                if isinstance(v, float):
+                    usf = v
+                    break
             break
     return {"bbox_min": lo, "bbox_max": hi, "polygons": polys,
             "triangles": tris, "vertices": verts,

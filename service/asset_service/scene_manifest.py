@@ -9,7 +9,9 @@ Schema (pharos.scene/v1; kiosk.scene/v1 accepted):
 {
   "scene": "My Square",              # human-readable name
   "units": "meters",                  # enforced
-  "up_axis": "Y",                     # enforced (FBX exports are Y-up)
+  "up_axis": "Y",                     # enforced; rotations are Y-up euler
+                                     # [pitch, yaw, roll] -- the builder
+                                     # converts to Blender's Z-up space
   "ground_y": 0.0,                    # ground plane height for snapping
   "assets": [
     {
@@ -55,6 +57,8 @@ Schema (pharos.scene/v1; kiosk.scene/v1 accepted):
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -184,13 +188,27 @@ def budget_check(data: dict, meshes_db: Optional[str] = None) -> dict:
         fbx = a.get("fbx", "")
         tri = 0
         if conn:
+            # manifests are authored with forward slashes, the registry may
+            # store backslashes (or vice versa) -- normalise BOTH sides or
+            # every lookup silently misses and the budget under-reports
             row = conn.execute(
-                "SELECT triangles FROM meshes WHERE fbx = ?", (fbx,)).fetchone()
+                "SELECT triangles FROM meshes WHERE fbx = ?",
+                (os.path.normpath(fbx),)).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT triangles FROM meshes WHERE"
+                    " REPLACE(fbx, '\\', '/') = ?",
+                    (fbx.replace("\\", "/"),)).fetchone()
             if row:
                 tri = row["triangles"] or 0
+            else:
+                print(f"  WARNING: budget lookup missed '{fbx}' -- not in "
+                      "the registry; its triangles are NOT counted",
+                      file=sys.stderr)
         scale = a.get("scale", 1.0)
         total_tri += int(tri * scale * scale)  # approximate scaled cost
-        per_asset.append({"id": a.get("id", "?"), "triangles": tri})
+        per_asset.append({"id": a.get("id", "?"), "triangles": tri,
+                          "matched": tri > 0 or not conn})
 
     for c in data.get("crowd", []):
         count = c.get("count", 1)

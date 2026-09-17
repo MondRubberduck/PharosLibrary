@@ -23,6 +23,7 @@ The builder does NOT:
 import bpy
 import json
 import math
+import re
 import sys
 from pathlib import Path
 import mathutils
@@ -52,10 +53,17 @@ def build(manifest_path: str, save_path: str = None, preview: bool = False):
     # --- import assets ---
     for i, asset in enumerate(manifest.get("assets", [])):
         _import_asset(asset, ground_y, i)
+        sys.stdout.flush()      # a crash mid-build must not lose the log
+                               # (Blender buffers stdout in --background)
+
+    # --- ground-covering texture sets (manifest.textures[]) ---
+    if manifest.get("textures"):
+        _apply_ground_textures(manifest, ground_y)
 
     # --- crowd ---
     for group in manifest.get("crowd", []):
         _build_crowd(group, ground_y)
+        sys.stdout.flush()
 
     # --- audio (D08: process or warn, never silently drop) ---
     audio_entries = manifest.get("audio", [])
@@ -74,8 +82,9 @@ def build(manifest_path: str, save_path: str = None, preview: bool = False):
     if not save_path:
         save_path = Path(manifest_path).with_suffix(".blend")
     bpy.ops.wm.save_as_mainfile(filepath=str(save_path))
-    print(f"\\nSaved: {save_path}")
+    print(f"\nSaved: {save_path}")
     print(f"Objects in scene: {len(bpy.data.objects)}")
+    sys.stdout.flush()
     return save_path
 
 
@@ -130,9 +139,17 @@ def _import_asset(asset, ground_y, index):
     pos = asset.get("position", [0, 0, 0])
     root.location = Vector(pos)
 
-    # rotation (radians to degrees)
+    # rotation: the manifest declares Y-up euler [pitch, yaw, roll]
+    # (pharos.scene/v1 contract); Blender is Z-up. Convert the rotation
+    # into Blender's frame exactly: R_blender = Rx(+90°) · R_manifest.
+    # Single-axis check: pitch→X, yaw→Z, roll→−Y, exactly as a Y-up
+    # author expects (V5 cross-validation D3: applying the raw euler
+    # turned yaw into roll and buried assets in the ground).
     rot = asset.get("rotation", [0, 0, 0])
-    root.rotation_euler = Vector(rot)
+    r_mat = mathutils.Euler((rot[0], rot[1], rot[2]), 'XYZ') \
+        .to_matrix().to_4x4()
+    conv = mathutils.Matrix.Rotation(math.radians(90.0), 4, 'X')
+    root.rotation_euler = (conv @ r_mat).to_euler('XYZ')
 
     # uniform scale — MULTIPLY, don't overwrite: Blender's FBX importer
     # sets object scale to 0.01 for cm-authored files (cm→m normalisation).
@@ -169,16 +186,34 @@ def _import_asset(asset, ground_y, index):
     # rebuild material if recipe provided
     mats = asset.get("materials")
     if mats:
-        _build_material(root, mats, aid)
+        if mats.get("slots"):
+            # per-slot recipes (API recipe.slots[]): one material per slot
+            # name, assigned in place -- a 33-slot KitBash building keeps
+            # its 33 materials instead of collapsing to one representative
+            # hero pick (V5 D8)
+            _apply_recipe_slots(root, mats["slots"], aid)
+        else:
+            _build_material(root, mats, aid)
+            multi = sum(len(m.data.materials) for m in _all_meshes(root))
+            if multi > 1:
+                print(f"    WARNING: hero recipe is representative "
+                      f"({multi} existing slots kept hero material only; "
+                      f"pass recipe 'slots[]' for per-slot wiring)")
     else:
         print(f"    (no material recipe — placeholder materials remain)")
+
+    # repoint dead KitBash texture references (the FBX files point at an
+    # empty 'kb3d_*.blender.native/KB3DTextures/4k' folder; the real
+    # textures live in the sibling 'kb3d_*.png.2k' folder)
+    _remap_dead_kb3d_images()
 
     # deselect for next import
     bpy.ops.object.select_all(action='DESELECT')
 
 
-def _build_material(obj, recipe, name):
-    """Build a Principled BSDF material from a Pharos hero_textures recipe."""
+def _make_material(name, recipe):
+    """Build a Principled BSDF material from a recipe dict
+    (hero_textures shape or a per-slot maps dict). Returns the material."""
     mat = bpy.data.materials.new(f"M_{name}")
     mat.use_nodes = True
     nodes = mat.node_tree.nodes
@@ -240,11 +275,78 @@ def _build_material(obj, recipe, name):
                     links.new(out, bsdf.inputs["Metallic"])
         print(f"    material: packed map with channels {ch_map}")
 
-    # apply to all mesh children
+    # emissive -> additive Emission shader (V5 D4: neon/signage/screens
+    # rendered dark and dead without it)
+    emi = load_tex(recipe.get("emissive"))
+    if emi:
+        emish = nodes.new("ShaderNodeEmission")
+        emish.inputs["Strength"].default_value = float(
+            recipe.get("emissive_strength", 3.0))
+        links.new(emi.outputs["Color"], emish.inputs["Color"])
+        mix = nodes.new("ShaderNodeAddShader")
+        links.new(bsdf.outputs["BSDF"], mix.inputs[0])
+        links.new(emish.outputs["Emission"], mix.inputs[1])
+        links.new(mix.outputs["Shader"], output.inputs["Surface"])
+
+    # opacity/alpha -> Principled Alpha + blend
+    opa = load_tex(recipe.get("opacity") or recipe.get("alpha"),
+                   non_color=True)
+    if opa:
+        links.new(opa.outputs["Color"], bsdf.inputs["Alpha"])
+        try:
+            mat.blend_method = 'BLEND'
+        except Exception:
+            pass                      # API renamed in newer Blender
+    return mat
+
+
+def _build_material(obj, recipe, name):
+    """Make a hero-textures material and assign it to every mesh slot."""
+    mat = _make_material(name, recipe)
     for child in _all_meshes(obj):
         if child.data.materials:
             child.data.materials.clear()
         child.data.materials.append(mat)
+
+
+def _apply_recipe_slots(root, slots, aid):
+    """Per-slot material wiring (API recipe.slots[]): build one material
+    per slot and replace existing slots BY NAME, leaving unmatched slots
+    untouched (never collapse a 33-slot building to one material)."""
+    # slot shape: {slot, material, base, maps: [{role, param, file, channels}]}
+    built = {}
+    for s in slots:
+        maps = {m.get("role"): m.get("file")
+                for m in (s.get("maps") or []) if m.get("file")}
+        # collapse packed-channel info for the first packed map
+        for m in (s.get("maps") or []):
+            if (m.get("role") or "").startswith("packed"):
+                maps["packed"] = m.get("file")
+                if m.get("channels"):
+                    maps["packed_channels"] = {
+                        k: v for k, v in m["channels"].items()}
+        if not maps:
+            continue
+        slot_name = s.get("material") or s.get("slot") or ""
+        built[slot_name] = _make_material(f"{aid}_{slot_name}"[:60], maps)
+    replaced = 0
+    for child in _all_meshes(root):
+        for i, existing in enumerate(child.data.materials):
+            if existing is None:
+                continue
+            key = existing.name
+            # importers may prefix/suffix; match loosely by containment
+            match = built.get(key)
+            if match is None:
+                for bname, bmat in built.items():
+                    if bname and (bname in key or key in bname):
+                        match = bmat
+                        break
+            if match is not None:
+                child.data.materials[i] = match
+                replaced += 1
+    print(f"    per-slot materials: {len(built)} built, {replaced} slots "
+          f"replaced (unmatched slots kept their import materials)")
 
 
 def _all_meshes(obj):
@@ -257,6 +359,90 @@ def _all_meshes(obj):
     return result
 
 
+_KB3D_DEAD = re.compile(
+    r"kb3d_[^\\/]+\.blender\.native[\\/]KB3DTextures[\\/][^\\/]*[\\/]",
+    re.IGNORECASE)
+
+
+def _remap_dead_kb3d_images():
+    """KitBash FBX files reference an EMPTY
+    'kb3d_<kit>.blender.native/KB3DTextures/4k' folder; the shipped
+    textures live in the sibling 'kb3d_<kit>.png.2k' folder. Repoint any
+    missing image whose path matches the dead pattern (V5 D8)."""
+    fixed = 0
+    for img in bpy.data.images:
+        src = bpy.path.abspath(img.filepath)
+        if not src or Path(src).is_file():
+            continue
+        p = Path(src.replace("\\", "/"))
+        # ancestor index of the 'kb3d_<kit>.blender.native' segment
+        seg = next((i for i, anc in enumerate(p.parents)
+                    if anc.name.lower().startswith("kb3d_")
+                    and ".blender.native" in anc.name.lower()), None)
+        if seg is None:
+            continue
+        kit_dir = p.parents[seg + 1] if seg + 1 < len(p.parents) else None
+        kit = p.parents[seg].name.split(".blender.native")[0]
+        if kit_dir is None:
+            continue
+        cand = kit_dir / f"{kit}.png.2k" / p.name
+        if cand.is_file():
+            img.filepath = str(cand)
+            fixed += 1
+    if fixed:
+        print(f"    remapped {fixed} dead KitBash texture reference(s) "
+              f"to the shipped .png.2k folder")
+
+
+def _apply_ground_textures(manifest, ground_y):
+    """manifest.textures[] — apply each set as a ground plane (V5 D5: the
+    block was validated but never did anything). Entry: {folder, set,
+    apply_to ('ground'|'ground_plane'|omit), size (m, default 20)}."""
+    for tex in manifest.get("textures", []) or []:
+        apply_to = (tex.get("apply_to") or "ground").lower()
+        if apply_to not in ("ground", "ground_plane", "floor"):
+            continue                     # e.g. apply_to: asset-specific
+        folder = Path(tex.get("folder") or "")
+        setname = tex.get("set") or ""
+        if not folder.is_dir():
+            print(f"    WARNING: texture folder missing: {folder}")
+            continue
+        files = [p for p in sorted(folder.rglob("*"))
+                 if p.is_file() and p.suffix.lower()
+                 in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp")]
+        if setname:
+            files = [p for p in files if setname.lower() in p.name.lower()]
+        recipe = {}
+        for p in files:
+            n = p.name.lower()
+            if "albedo" in n or "basecolor" in n or "base_color" in n or \
+                    "diffuse" in n or "_alb" in n or "_d." in n:
+                recipe.setdefault("albedo", str(p))
+            elif "normal" in n or "_nrm" in n or "_n." in n:
+                recipe.setdefault("normal", str(p))
+            elif "roughness" in n or "_rgh" in n or "_r." in n:
+                recipe.setdefault("roughness", str(p))
+            elif "metallic" in n or "_met" in n or "_m." in n:
+                recipe.setdefault("metallic", str(p))
+        if not recipe:
+            print(f"    WARNING: no map channels recognised in {folder} "
+                  f"(set {setname!r})")
+            continue
+        size = float(tex.get("size", 20.0))
+        bpy.ops.mesh.primitive_plane_add(size=size, location=(
+            tex.get("position", [0, 0, 0])[0],
+            tex.get("position", [0, 0, 0])[1],
+            ground_y - 0.002))
+        plane = bpy.context.active_object
+        plane.name = f"ground_{setname or 'tex'}"[:60]
+        mat = _make_material(plane.name, recipe)
+        if plane.data.materials:
+            plane.data.materials.clear()
+        plane.data.materials.append(mat)
+        print(f"    ground plane '{plane.name}' {size}x{size}m: "
+              f"{sorted(recipe.keys())}")
+
+
 def _build_crowd(group, ground_y):
     """Import a body + animation, duplicate with spacing."""
     body_fbx = group["body_fbx"]
@@ -267,6 +453,7 @@ def _build_crowd(group, ground_y):
     anim_offset = group.get("animation_offset", 0.0)
 
     print(f"  [crowd] {count} instances, spacing {spacing}m")
+    sys.stdout.flush()
 
     # import the body once
     bpy.ops.import_scene.fbx(filepath=body_fbx, global_scale=1.0)
@@ -276,16 +463,54 @@ def _build_crowd(group, ground_y):
         return
     body_root = body_objs[0]
 
-    # import the animation
+    # import the animation, take its action, then DELETE the animation
+    # import's own objects -- otherwise a ghost armature stays parked at
+    # the origin (V5 D6: 5-instance crowd produced 6 armatures)
     bpy.ops.import_scene.fbx(filepath=anim_fbx, global_scale=1.0)
-    anim_objs = bpy.context.selected_objects
-
-    # find animation actions
-    actions = [a for a in bpy.data.actions if a.users > 0]
-    if not actions:
+    anim_objs = list(bpy.context.selected_objects)
+    action = None
+    for a in reversed(bpy.data.actions):
+        if a.users > 0:
+            action = a
+            break
+    if action is None:
         print(f"    WARNING: no animation found in {anim_fbx}")
-    else:
-        action = actions[-1]  # most recently imported
+    bpy.ops.object.select_all(action='DESELECT')
+    for o in anim_objs:
+        if o.name in bpy.data.objects:
+            o.select_set(True)
+    if bpy.context.selected_objects:
+        bpy.ops.object.delete()
+
+    def _offset_action(src, frames):
+        """Copy an action with keyframes shifted — linked duplicates share
+        one action, so per-instance stagger needs per-instance copies
+        (V5 D6: documented stagger resolved to 0 for every instance)."""
+        new = src.copy()
+
+        def fcurves_of(act):
+            if hasattr(act, "fcurves"):          # pre-4.4 legacy API
+                return list(act.fcurves)
+            out = []                             # slotted actions (4.4+)
+            for layer in act.layers:
+                for strip in layer.strips:
+                    get_bag = (getattr(strip, "channel_bag", None)
+                               or getattr(strip, "channelbag", None))
+                    if get_bag is None:
+                        continue
+                    for slot in act.slots:
+                        bag = get_bag(slot)
+                        if bag:
+                            out.extend(bag.fcurves)
+            return out
+
+        for fc in fcurves_of(new):
+            for kp in fc.keyframe_points:
+                kp.co.x += frames
+                kp.handle_left.x += frames
+                kp.handle_right.x += frames
+        new.name = f"{src.name}_+{frames}f"
+        return new
 
     # place instances
     for i in range(count):
@@ -307,13 +532,17 @@ def _build_crowd(group, ground_y):
             base_pos[2] + math.sin(angle) * radius,
         ))
 
-        # assign animation with offset
-        if actions:
-            for obj in _all_meshes(inst):
-                if obj.animation_data:
-                    obj.animation_data.action = action
-                    # offset playback
-                    obj.animation_data.action_frame_start = int(anim_offset * 24)
+        # assign animation to the ARMATURE with a real per-instance offset
+        if action:
+            arm = inst if inst.type == 'ARMATURE' else next(
+                (o for o in inst.children_recursive
+                 if o.type == 'ARMATURE'), None)
+            if arm:
+                if not arm.animation_data:
+                    arm.animation_data_create()
+                arm.animation_data.action = (
+                    action if anim_offset == 0
+                    else _offset_action(action, int(anim_offset * i * 24)))
 
     bpy.ops.object.select_all(action='DESELECT')
 
