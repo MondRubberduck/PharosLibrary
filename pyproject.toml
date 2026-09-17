@@ -10,9 +10,6 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Pharos Contributors" }]
-dependencies = [
-    "pyyaml>=6.0",
-]
 
 [project.optional-dependencies]
 # preview/image tooling for the classifier (optional, off by default)
