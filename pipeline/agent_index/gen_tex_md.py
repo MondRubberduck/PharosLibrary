@@ -1,4 +1,6 @@
+from pathlib import Path
 import os, json
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import section_root
 ROOT = section_root("textures", "AGENT_TEX_ROOT")
 idx = json.load(open(os.path.join(ROOT, "library_index.json"), encoding="utf-8"))

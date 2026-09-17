@@ -1,3 +1,5 @@
+import sys
+from pathlib import Path
 """Fold the KitBash3D kit exports into the agent-facing model index.
 
 One record per group assembly, matching the models.jsonl schema so an agent can
@@ -7,8 +9,12 @@ Writes <library_root>/_Agent_Files/kb3d_models.jsonl
 """
 import io, os, glob, json, datetime
 
-AGENT = r"D:\3D_Assets\_Agent_Files"
-ROOT = r"D:\3D_Assets\KitbashOrdner"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _config import agent_files
+AGENT = agent_files()
+from _config import section_root
+ROOT = section_root("kitbash", "PHAROS_KB3D_ROOT")
+os.makedirs(AGENT, exist_ok=True)
 OUT = os.path.join(AGENT, "kb3d_models.jsonl")
 
 rows = []

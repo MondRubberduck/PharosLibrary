@@ -1,3 +1,5 @@
+import sys
+from pathlib import Path
 """
 FIX: promote the .blend object enumeration into the agent-facing native index.
 
@@ -19,7 +21,9 @@ records an earlier read-only pass already produced.
 import io, os, json, collections
 
 T = str(Path(__file__).resolve().parent)
-AGENT = r"D:\3D_Assets\_Agent_Files"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _config import agent_files
+AGENT = agent_files()
 BLENDS = os.path.join(T, "native_index_blends.jsonl")
 NATIVE = os.path.join(AGENT, "native_models.jsonl")
 LIB = r"D:\3D_Assets"

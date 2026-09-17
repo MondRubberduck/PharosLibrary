@@ -1,3 +1,4 @@
+from pathlib import Path
 """
 build_agent_index.py -- the agent-facing layer for the asset library.
 
@@ -16,6 +17,7 @@ Re-runnable at any time; safe to run while a conversion batch is in progress
 import io, os, json, datetime, collections
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import library_root
 LIB = library_root() or "."
 AGENT = os.path.join(LIB, "_Agent_Files")

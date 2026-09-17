@@ -1,5 +1,7 @@
-import os, sys, json, collections, datetime
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+import os, sys, json, collections, datetime, struct, wave
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))          # classify
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))      # _config
 import classify as C
 
 # Root of the audio library.  Overridable, but it MUST exist -- a wrong root
@@ -9,7 +11,42 @@ AA = section_root("audio", "AGENT_AUDIO_ROOT")
 TMP = os.path.dirname(os.path.abspath(__file__))
 if not os.path.isdir(AA):
     raise SystemExit("FATAL: audio root does not exist: %s" % AA)
-meta = json.load(open(os.path.join(TMP, "aa_meta.json"), encoding="utf-8"))
+
+
+def _wav_stats(path):
+    """duration/samplerate/channels from a WAV header, best effort."""
+    try:
+        with wave.open(path, "rb") as w:
+            return (round(w.getnframes() / max(w.getframerate(), 1), 3),
+                    w.getframerate(), w.getnchannels())
+    except Exception:
+        return None, None, None
+
+
+def _scan_audio_root():
+    """Build the aa_meta cache from disk (fresh installs have no cache):
+    walk via classify.walk_audio, cat/sub via the taxonomy rules."""
+    C.ROOT = AA            # classify's ROOT is env-only; config wins here
+    out = []
+    for rel in C.walk_audio():
+        full = os.path.join(C.ROOT, rel)
+        (cat, sub), _score = C.classify(rel)
+        dur, sr, ch = _wav_stats(full)
+        out.append({"path": full, "rel": rel.replace(os.sep, "/"),
+                    "cat": cat, "sub": sub,
+                    "name": os.path.basename(rel),
+                    "bytes": os.path.getsize(full),
+                    "dur": dur, "sr": sr, "ch": ch})
+    return out
+
+
+_meta_path = os.path.join(TMP, "aa_meta.json")
+if os.path.isfile(_meta_path):
+    meta = json.load(open(_meta_path, encoding="utf-8"))
+else:
+    print("no aa_meta.json cache -- scanning %s (cached for next run)" % AA)
+    meta = _scan_audio_root()
+    json.dump(meta, open(_meta_path, "w", encoding="utf-8"))
 
 DESC = {
     "Alarms": "Alarms, sirens, warnings, buzzers and emergency tones.",

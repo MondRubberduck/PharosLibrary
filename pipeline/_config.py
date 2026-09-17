@@ -44,12 +44,13 @@ def section_root(section: str, env_var: str = "") -> str:
     cfg = load()
     if cfg.get(f"{section}_root"):
         return cfg[f"{section}_root"]
-    lib = cfg.get("library_root") or ""
+    lib = library_root()
     rel = (cfg.get("sections") or {}).get(section, "")
     return f"{lib}/{rel}" if lib and rel else ""
 
 
 def agent_files() -> str:
-    cfg = load()
-    lib = cfg.get("library_root") or ""
-    return f"{lib}/{cfg.get('agent_files', '_Agent_Files')}" if lib else ""
+    lib = library_root()
+    if not lib:
+        return ""
+    return f"{lib}/{load().get('agent_files', '_Agent_Files')}"

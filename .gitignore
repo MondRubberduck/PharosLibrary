@@ -32,3 +32,4 @@ docs/environment-notes.md
 Thumbs.db
 desktop.ini
 .DS_Store
+pipeline/agent_index/aa_meta.json

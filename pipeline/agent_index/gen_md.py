@@ -1,5 +1,7 @@
+from pathlib import Path
 import os, json
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import section_root
 AA = section_root("audio", "AGENT_AUDIO_ROOT")
 if not os.path.isdir(AA):

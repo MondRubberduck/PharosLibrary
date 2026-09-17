@@ -1,3 +1,5 @@
+import sys
+from pathlib import Path
 """
 TASK 2 -- promote the native geometry records into the agent index.
 
@@ -12,9 +14,12 @@ kits are already covered assembly-by-assembly by kb3d_models.jsonl.
 """
 import io, os, json, glob, collections
 
-AGENT = r"D:\3D_Assets\_Agent_Files"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _config import agent_files
+AGENT = agent_files()
 T = str(Path(__file__).resolve().parent)
 SRC = os.path.join(T, "native_index_20260915-172648.jsonl")
+os.makedirs(AGENT, exist_ok=True)
 OUT = os.path.join(AGENT, "native_models.jsonl")
 
 rows = []
