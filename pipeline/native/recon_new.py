@@ -22,6 +22,17 @@ def converted_section() -> str:
     return ""
 
 
+def kit_section() -> str:
+    """The section that holds the KIT layout -- its children carry
+    Exports/kit_manifest.json (converted packs carry Exports/manifest.json).
+    Derived from the library instead of a hardcoded folder name.
+    """
+    for top in sorted(os.listdir(LIB)):
+        if glob.glob(os.path.join(LIB, top, "*", "Exports", "kit_manifest.json")):
+            return os.path.join(LIB, top)
+    return ""
+
+
 # PHAROS_CONVERTED_ROOT overrides the derived section (needed only when a
 # library holds more than one converted section).
 CONV = os.environ.get("PHAROS_CONVERTED_ROOT") or converted_section()
@@ -59,7 +70,10 @@ for n in new_packs:
     print("   " + n)
 
 print("\n=== .blend kits now on disk ===")
-kb = section_root("kitbash", "PHAROS_KB3D_ROOT") or os.path.join(LIB, "KitbashOrdner")
+kb = section_root("kitbash", "PHAROS_KB3D_ROOT") or kit_section()
+if not os.path.isdir(kb):
+    print("   kit section not found -- set `kitbash_root` in pharos_config.json "
+          "or PHAROS_KB3D_ROOT (see pipeline/README.md)")
 kb_dirs = sorted(os.listdir(kb)) if os.path.isdir(kb) else []
 for d in kb_dirs:
     p = os.path.join(kb, d)
@@ -74,9 +88,13 @@ for d in kb_dirs:
                 except OSError: pass
     print("   %-34s model files=%-6d %.2f GB" % (d[:34], n, sz / 2**30))
 
-print("\n=== Dark Medieval Environment Megapack Unity ===")
-u = os.path.join(LEA, "Dark Medieval Environment Megapack Unity")
-print("   still present:", os.path.isdir(u))
+# Leftover check: is a pack that was supposed to have been removed from the
+# converted section still on disk? Name it explicitly rather than hardcoding
+# one library's product: PHAROS_RECON_LEFTOVER=<folder name>. Skipped when unset.
+LEFTOVER = os.environ.get("PHAROS_RECON_LEFTOVER", "").strip()
+if LEFTOVER:
+    print("\n=== leftover check: %s ===" % LEFTOVER)
+    print("   still present:", os.path.isdir(os.path.join(CONV, LEFTOVER)))
 
 print("\n=== converted section summary ===")
 allf = sum(len(fn) for _, _, fn in os.walk(CONV)) if os.path.isdir(CONV) else 0

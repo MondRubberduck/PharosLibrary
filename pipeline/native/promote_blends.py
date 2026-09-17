@@ -15,18 +15,35 @@ Writes the extra records into native_models.jsonl (one native index, not two).
 READ-ONLY on every .blend - nothing is opened or modified, this only re-files
 records an earlier read-only pass already produced.
 """
-import collections, io, json, os, sys
+import collections, glob, io, json, os, sys
 from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import agent_files, library_root
+from _config import agent_files, library_root, section_root
 AGENT = agent_files()
 BLENDS = os.path.join(T, "native_index_blends.jsonl")
 NATIVE = os.path.join(AGENT, "native_models.jsonl")
 LIB = library_root() or "."
 
-EXCLUDE_SECTIONS = {"KitbashOrdner"}   # already covered by kb3d_models.jsonl
+
+def _covered_section() -> str:
+    """The section already covered assembly-by-assembly by kb3d_models.jsonl,
+    i.e. the one holding kit exports. That is exactly the condition
+    build_kb3d_index.py uses to fill kb3d_models.jsonl, so the exclusion cannot
+    drift from the coverage it exists to avoid double-counting. Taken from the
+    configured kitbash root, else derived from the library -- never hardcoded.
+    """
+    root = section_root("kitbash", "PHAROS_KB3D_ROOT")
+    if not root and os.path.isdir(LIB):
+        for top in sorted(os.listdir(LIB)):
+            if glob.glob(os.path.join(LIB, top, "*", "Exports", "kit_manifest.json")):
+                root = os.path.join(LIB, top)
+                break
+    return os.path.basename(root.rstrip("/\\")) if root else ""
+
+
+EXCLUDE_SECTIONS = {s for s in (_covered_section(),) if s}
 
 if not os.path.isfile(BLENDS):
     print("no blend index found to promote: %s (run run_blends.py first)" % BLENDS)
@@ -92,6 +109,7 @@ with io.open(NATIVE, "w", encoding="utf-8") as fh:
 
 print("native_models.jsonl: %d -> %d  (+%d blend objects, %d dupes skipped)"
       % (before, len(rows), added, skipped_dup))
+print("excluded sections:", sorted(EXCLUDE_SECTIONS) or "(none -- no kit exports found)")
 print("added by section:", dict(by_section))
 print("by kind now:", dict(collections.Counter(r.get("kind") for r in rows).most_common()))
 
