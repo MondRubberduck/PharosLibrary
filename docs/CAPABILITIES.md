@@ -108,9 +108,12 @@ One JSON file (`pharos_config.json`, created by init or copied from
 `previews_dir`, `sections` (folder names per section), `agent_files`,
 `thumb_cache_dirs`, `extension_status_file`, `indexer_skip_dirs`,
 `manifest_roots`, `collection_csv`, `network`, `dashboard` curation.
-No machine-specific path exists anywhere in the code; the registry and
-previews default to `~/.pharos/` and nothing is ever written inside the
-asset library.
+No machine-specific path exists anywhere in the code; `python pharos.py
+init` defaults the registry and previews to `~/.pharos/`. Asset files are
+never written: the only writes inside the library root are generated index
+files (`<agent_files>/`, plus `library_index.json` / `library_files.jsonl`
+in the audio and texture roots) and the `Exports/` folders the conversion
+pipelines own.
 
 ## 7. Limits (honest list)
 
@@ -127,6 +130,28 @@ asset library.
 - Single-user, localhost-only, no auth, no TLS — by design.
 - Animation previews are rendered by a browser once per clip (the server
   only caches webm files); headless servers never render previews.
+- The `pipeline/` index writers refuse to overwrite a live index with a
+  near-empty one: `build_agent_index.py` (`packs.json` and `models.jsonl`),
+  `build_availability_catalog.py`, `build_kb3d_index.py`, `gen_index.py`,
+  `gen_tex_index.py`, `promote_native.py` and `promote_blends.py` all stop
+  with `FATAL: only N records -- refusing to overwrite a live index` when
+  they would write **fewer than 10 records**. The threshold is uniform:
+  10, not a percentage. The guard is deliberate (a wrong root once
+  overwrote a real library's index with fixture data), and it has a real
+  cost: a library whose section holds fewer than 10 meshes, owned
+  products, kits or native containers cannot build that index with those
+  scripts until it grows. The server-side importers have no such floor and
+  always run, so `init` / `serve` / `scanner.py` and the API are
+  unaffected.
+- The audio taxonomy cannot be overridden: `classify.OVERRIDES` in
+  `pipeline/agent_index/classify.py` carries hand-checked
+  re-categorisations of known misfiles, but `classify()` consults only its
+  RULES table, so no entry there reaches a published category.
+- Two servers on one port: `python pharos.py serve` does not detect an
+  already-running instance. The stdlib server allows address reuse, so on
+  Windows a second run binds 8765 successfully (observed: two processes
+  LISTENING on 8765 at the same time) and which one answers a request is
+  not deterministic. Stop the old server first.
 
 ## 8. Regenerating everything
 

@@ -135,8 +135,9 @@ its engine) serves empty results, never errors.
 - Search semantics: AND-first with ranked OR fallback, rarity-ranked,
   tier/mode/exact disclosed per response; short tokens match on word
   boundaries; all-dropped-token queries return zero, never everything
-- Safety: file routes path-jailed to configured roots; the library on
-  disk is never modified by the app
+- Safety: file routes path-jailed to configured roots; asset files are
+  never modified — the only writes into a library are generated index
+  files (see `docs/CAPABILITIES.md` §6)
 
 ## Requirements
 

@@ -84,6 +84,9 @@ python gen_tex_index.py && python gen_tex_md.py     # textures
 Audio/texture roots come from the config sections
 (`AGENT_AUDIO_ROOT` / `AGENT_TEX_ROOT` override). After any of these:
 restart the app — importers rebuild the registry from the new files.
+Every writer here refuses to overwrite a live index with fewer than 10
+records (`FATAL: only N records ...`); that guard is deliberate — see
+`docs/CAPABILITIES.md` §7 for what it means for a small library.
 
 ## Order of operations for brand-new downloads
 
