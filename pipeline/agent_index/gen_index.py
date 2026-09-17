@@ -47,6 +47,13 @@ else:
     print("no aa_meta.json cache -- scanning %s (cached for next run)" % AA)
     meta = _scan_audio_root()
     json.dump(meta, open(_meta_path, "w", encoding="utf-8"))
+# LOUD target: these outputs are LIVE index files; a wrong root here once
+# silently overwrote a real library's index with fixture data
+print("WRITE TARGET: %s (library_files.jsonl + library_index.json)" % AA)
+if len(meta) < 10:
+    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
+                     "live index with a near-empty scan (wrong root?)"
+                     % len(meta))
 
 DESC = {
     "Alarms": "Alarms, sirens, warnings, buzzers and emergency tones.",

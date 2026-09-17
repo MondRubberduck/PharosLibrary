@@ -239,9 +239,14 @@ index = {
         "layout": "Files are physically unchanged (NOT reorganised). This index provides virtual tags; texture/PBR sets must stay together for project references.",
         "biggest_folder": "4K_Textures_Gumroad holds the bulk (PBR sets, ~2K after an earlier downsize).",
         "heuristic": "Categories come from folder/filename keywords; 'set' grouping and 'maps' are heuristic.",
-        "possible_duplicate": "Verified 2026-09-15: the suspected second copy at D:\\Assets_Blender\\Textures_Materials\\4K_Textures_Gumroad does NOT exist. No duplicate present.",
     },
 }
+# LOUD target + refusal: a wrong root once overwrote live index files
+print("WRITE TARGET: %s (library_index/files/material_sets)" % ROOT)
+if len(rows) < 10:
+    raise SystemExit("FATAL: only %d texture files -- refusing to "
+                     "overwrite a live index with a near-empty scan "
+                     "(wrong root?)" % len(rows))
 json.dump(index, open(os.path.join(ROOT, "library_index.json"), "w", encoding="utf-8"), ensure_ascii=True, indent=1)
 
 with open(os.path.join(ROOT, "library_files.jsonl"), "w", encoding="utf-8") as fh:
