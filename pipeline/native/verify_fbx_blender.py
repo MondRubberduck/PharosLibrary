@@ -1,14 +1,26 @@
+"""Round-trip probe: re-import a few FBX from a directory and report what
+Blender actually loaded (objects, triangles, materials, measured size).
+
+Run it by hand -- nothing in the repo drives it:
+    blender -b --factory-startup --python verify_fbx_blender.py -- <fbx dir>
+"""
 import bpy, os, glob, random, json, sys
 
-OUT = sys.argv[1] if len(sys.argv) > 1 else "."
-if not os.path.isdir(OUT):
-    print("FBX directory not found: %s" % OUT)
-    sys.exit(0)
+# Blender hands this script ITS OWN argv, so the directory has to come after
+# "--" (sys.argv[1] would be "-b").  PHAROS_FBX_DIR is the env fallback.
+_args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+OUT = _args[0] if _args else os.environ.get("PHAROS_FBX_DIR", "")
+if not OUT or not os.path.isdir(OUT):
+    print("usage: blender -b --factory-startup --python verify_fbx_blender.py "
+          "-- <fbx dir>   (or set PHAROS_FBX_DIR)")
+    print("FBX directory not found: %s" % (OUT or "<none>"))
+    sys.exit(2)
 
 files = sorted(glob.glob(os.path.join(OUT, "**", "*.fbx"), recursive=True))
 print("TOTAL_FBX_FOUND=%d" % len(files))
 if not files:
-    sys.exit(0)
+    print("no .fbx under %s" % OUT)
+    sys.exit(2)
 
 random.seed(20260915)
 pick = random.sample(files, min(len(files), 5))

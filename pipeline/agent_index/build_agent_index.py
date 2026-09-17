@@ -141,6 +141,12 @@ for name in sorted(os.listdir(LIB)):
             }
         packs.append(rec)
 
+# packs.json is a LIVE index too: refuse BEFORE writing it, so a wrong root
+# cannot leave an empty pack list behind for the app to read
+if len(packs) < 10:
+    raise SystemExit("FATAL: only %d packs -- refusing to overwrite a live "
+                     "index with a near-empty scan (wrong root?)" % len(packs))
+
 io.open(os.path.join(AGENT, "packs.json"), "w", encoding="utf-8").write(
     json.dumps({"schema": "pharos.agent.packs/v1", "generated": now,
                 "root": LIB, "packs": packs}, indent=1, ensure_ascii=False))
