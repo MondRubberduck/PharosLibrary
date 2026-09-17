@@ -187,6 +187,13 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
     if current < 5:
         # kiosk_* -> host_*: drop the old-name FTS/triggers first (their SQL
         # text names both tables' columns), rename, recreate, rebuild index
+        #
+        # The kiosk_* identifiers below are the PRE-RENAME column names, read
+        # from and written back to databases that were created before the
+        # rename: the PRAGMA check and the three ALTERs must spell the old name
+        # or the migration silently skips the columns an existing registry
+        # still has. This is a required legacy-migration identifier -- an
+        # allowed exception to the no-kiosk-names rule. Do not "clean" them.
         acols = {r[1] for r in conn.execute("PRAGMA table_info(assets)")}
         if "kiosk_tags" in acols:
             conn.executescript("""

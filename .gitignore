@@ -21,7 +21,10 @@ previews/
 
 # kept on disk for the owner, deliberately out of the public repo:
 # host-app bridge + its deploy/test tooling, environment probe, generated
-# reports, and the private engineering history
+# reports, and the private engineering history.
+# Exception to the no-kiosk-names rule: the "kiosk" names below are on-disk
+# filenames, not labels we chose -- renaming an ignore line would un-ignore
+# the real file on disk, so the ignore entries must keep matching them.
 extensions/
 reports/
 tools/deploy_kiosk.py
