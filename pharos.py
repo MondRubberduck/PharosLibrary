@@ -2,6 +2,7 @@
 
     python pharos.py init [ROOT]   detect asset folders, write pharos_config.json
     python pharos.py serve         start the dashboard + API on 127.0.0.1:8765
+    python pharos.py docs          regenerate the agent entry files (_Agent_Files)
 """
 
 import sys
