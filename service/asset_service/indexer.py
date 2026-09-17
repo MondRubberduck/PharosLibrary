@@ -7,7 +7,7 @@ auto-classifier and upserts everything into the SQLite registry.
 Pack rule (v1): a top-level folder that directly contains asset files is one
 pack; a top-level folder with no direct asset files splits into one pack per
 child folder that contains asset files anywhere below it. This matches
-marketplace layouts (Leartes -> AlbertMansion / ChineseAlley / ...,
+marketplace layouts (a converted-pack section -> one pack per pack folder,
 Animation -> Actor / daily-activities) without ever touching the disk layout.
 
 Safety: files are opened 'rb' only; the only writes are to the registry
@@ -321,7 +321,7 @@ def index_root(root: Path, db_path: Path, limit: int = 0, dry_run: bool = False,
     elapsed = time.perf_counter() - t0
     print(f"\n{indexed} packs classified in {elapsed:.1f}s")
     # handover 2026-09-15 §7.1: drop registry rows for packs whose folder
-    # no longer exists (e.g. the deleted Dark Medieval Unity megapack)
+    # no longer exists (e.g. a pack the owner deleted from the library)
     if not dry_run and conn is not None:
         stale = [r["id"] for r in conn.execute(
             "SELECT id, hero_file_path FROM assets")

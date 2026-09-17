@@ -145,7 +145,7 @@ _SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _tokens(text: str) -> set[str]:
-    text = _CAMEL_RE.sub(" ", text).lower()          # KitbashOrdner -> kitbash ordner
+    text = _CAMEL_RE.sub(" ", text).lower()          # PackName -> pack name
     return {t for t in _SPLIT_RE.split(text) if len(t) > 2 and t not in STOPWORDS}
 
 
