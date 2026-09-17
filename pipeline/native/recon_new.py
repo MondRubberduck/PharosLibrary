@@ -1,13 +1,21 @@
-import os, io, json, collections
+import io, json, os, sys
+from pathlib import Path
 
-LIB = r"D:\3D_Assets"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _config import library_root, section_root
+LIB = library_root() or "."
 LEA = os.path.join(LIB, "Leartes Env_ gumroad")
 MODEL_EXT = {".fbx", ".obj", ".usd", ".usda", ".usdc", ".blend", ".max"}
+
+if not os.path.isdir(LIB):
+    print("library root not found: %s" % LIB)
+    sys.exit(0)
 
 print("=== LEARTES packs: uassets vs existing Exports ===")
 tot_new = 0
 new_packs = []
-for d in sorted(os.listdir(LEA)):
+lea_dirs = sorted(os.listdir(LEA)) if os.path.isdir(LEA) else []
+for d in lea_dirs:
     p = os.path.join(LEA, d)
     if not os.path.isdir(p) or d.startswith("."):
         continue
@@ -36,8 +44,9 @@ for n in new_packs:
     print("   " + n)
 
 print("\n=== KITBASHORDNER kits now on disk ===")
-kb = os.path.join(LIB, "KitbashOrdner")
-for d in sorted(os.listdir(kb)):
+kb = section_root("kitbash", "PHAROS_KB3D_ROOT") or os.path.join(LIB, "KitbashOrdner")
+kb_dirs = sorted(os.listdir(kb)) if os.path.isdir(kb) else []
+for d in kb_dirs:
     p = os.path.join(kb, d)
     if not os.path.isdir(p):
         continue
@@ -55,5 +64,5 @@ u = os.path.join(LEA, "Dark Medieval Environment Megapack Unity")
 print("   still present:", os.path.isdir(u))
 
 print("\n=== Leartes folder summary ===")
-allf = sum(len(fn) for _, _, fn in os.walk(LEA))
+allf = sum(len(fn) for _, _, fn in os.walk(LEA)) if os.path.isdir(LEA) else 0
 print("   total files:", allf)

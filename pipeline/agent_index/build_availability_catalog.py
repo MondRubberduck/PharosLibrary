@@ -12,12 +12,12 @@ Reads the human app's registry READ-ONLY. Writes only into _Agent_Files.
 """
 import sqlite3, os, re, io, json, collections, datetime
 
-DB = r"D:\Pipeline\kiosk\registry\assets.sqlite"
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import library_root
+from _config import library_root, db_path
 LIB = library_root() or "."
+DB = os.environ.get("PHAROS_DB") or db_path() or "assets.sqlite"
 AGENT = os.path.join(LIB, "_Agent_Files")
 MODEL_EXT = {".fbx", ".obj", ".usd", ".usda", ".usdc", ".blend", ".max"}
 IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
@@ -47,6 +47,8 @@ ALIAS = {
 
 def scan_disk():
     sections = {}
+    if not os.path.isdir(LIB):
+        return sections
     for top in sorted(os.listdir(LIB)):
         root = os.path.join(LIB, top)
         if not os.path.isdir(root) or top.startswith("."):
@@ -101,6 +103,9 @@ def match_on_disk(name, sections):
 
 
 sections = scan_disk()
+if not os.path.isfile(DB):
+    print("registry database not found: %s" % DB)
+    sys.exit(0)
 c = sqlite3.connect("file:%s?mode=ro" % DB, uri=True)
 cur = c.cursor()
 cur.execute("""select name, store, type_group, type_raw, seller, price, purchased,

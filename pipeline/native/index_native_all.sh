@@ -6,7 +6,7 @@
 set -u
 
 T="$(cd "$(dirname "$0")" && pwd)"
-BLENDER="C:/Program Files/Blender Foundation/Blender 5.1/blender.exe"
+BLENDER="${BLENDER:-C:/Program Files/Blender Foundation/Blender 5.1/blender.exe}"
 LIST="$T/native_manifest.json"
 BLENDS="$T/native_blends.txt"
 STAMP="$(date +%Y%m%d-%H%M%S)"

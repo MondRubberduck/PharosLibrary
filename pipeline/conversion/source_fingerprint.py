@@ -17,7 +17,7 @@ Two modes:
       Report added / removed / changed files and the overall verdict.
 
 Usage:
-  python source_fingerprint.py --root "D:/3D_Assets/..." --out before.json
+  python source_fingerprint.py --root "C:/path/to/assets/..." --out before.json
   python source_fingerprint.py --compare before.json after.json
 """
 

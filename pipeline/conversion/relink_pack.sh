@@ -7,13 +7,13 @@
 # two things:
 #   <pack>\Exports\manifest.json     rewritten in place (schema v2)
 #   <pack>\Exports\manifest.v1.bak   pristine copy of what was there before
-# Nothing else under D:\3D_Assets is touched: no FBX, no texture, no .uasset.
+# Nothing else under the assets root is touched: no FBX, no texture, no .uasset.
 #
 # Usage:
-#   relink_pack.sh --pack "AlbertMansion_5.0" [options]
+#   relink_pack.sh --pack "MyPack" [options]
 #
 # Options:
-#   --assets-root DIR   default "D:/3D_Assets/Leartes Env_ gumroad"
+#   --assets-root DIR   default: $ASSETS_ROOT env var
 #   --label NAME        tags logs (default: relink)
 #   --dry-run           resolve everything, rewrite nothing
 #   --preview           dry run that ALSO writes the patched manifest to
@@ -29,7 +29,7 @@
 #             5 engine run produced no result, 6 verification failed
 set -uo pipefail
 
-UE_EXE="${UE_EXE:-}"   # e.g. /e/Epic/Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe
+UE_EXE="${UE_EXE:-}"   # e.g. "/c/Program Files/Epic Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
 CONV_ROOT="$(cd "$(dirname "$0")" && pwd)"
 TOOLS="$CONV_ROOT/tools"
 SANDBOX="$CONV_ROOT/sandbox"

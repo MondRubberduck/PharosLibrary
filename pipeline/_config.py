@@ -54,3 +54,13 @@ def agent_files() -> str:
     if not lib:
         return ""
     return f"{lib}/{load().get('agent_files', '_Agent_Files')}"
+
+
+def db_path() -> str:
+    env = os.environ.get("PHAROS_DB")
+    if env:
+        return env
+    reg = os.environ.get("PHAROS_REGISTRY_DIR") or load().get("registry_dir") or ""
+    if reg:
+        return str(Path(reg) / "assets.sqlite")
+    return ""

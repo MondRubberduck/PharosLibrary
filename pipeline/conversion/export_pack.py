@@ -1,5 +1,5 @@
 """
-export_pack.py -- headless Unreal Editor driver: Leartes .uasset -> .fbx/.png + manifest.json.
+export_pack.py -- headless Unreal Editor driver: Unreal .uasset -> .fbx/.png + manifest.json.
 
 Runs INSIDE UnrealEditor (via -ExecutePythonScript).  Never writes to the source pack:
 it only reads the sandbox copy of the assets and writes to the configured output dirs.
@@ -7,16 +7,16 @@ it only reads the sandbox copy of the assets and writes to the configured output
 Job description is passed as JSON in the environment variable AMCONV_JOB:
 
 {
-  "pack_name":    "Oriantel Building",
-  "pack_dir":     "D:/3D_Assets/Leartes Env_ gumroad/Oriantel Building",
-  "content_root": "D:/3D_Assets/Leartes Env_ gumroad/Oriantel Building/Content",
-  "project_name": "OriantelBuilding",
-  "game_root":    "/Game/OriantalBuilding",   # primary, for the manifest
-  "game_roots":   ["/Game/OriantalBuilding"], # every discovered top-level /Game path
+  "pack_name":    "MyPack",
+  "pack_dir":     "C:/path/to/assets/MyPack",
+  "content_root": "C:/path/to/assets/MyPack/Content",
+  "project_name": "MyPack",
+  "game_root":    "/Game/MyPack",             # primary, for the manifest
+  "game_roots":   ["/Game/MyPack"],           # every discovered top-level /Game path
   "fbx_out":      "<pack_dir>/Exports/FBX",
   "tex_out":      "<pack_dir>/Exports/Textures",
   "manifest":     "<pack_dir>/Exports/manifest.json",
-  "report":       "D:/Pipeline/kiosk/conversion/logs/run.json",
+  "report":       "C:/path/to/logs/run.json",
   "exclude_dirs": ["EpicContent"],            # path-segment match, case-insensitive
   "limit_meshes":   5,      # 0 = unlimited
   "limit_skel":     1,

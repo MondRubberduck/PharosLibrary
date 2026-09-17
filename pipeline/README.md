@@ -34,7 +34,7 @@ round-trip check), Git Bash.**
 | `batch_packs.sh`, `convert_all.sh` | batch drivers over a pack root |
 
 ```bash
-export UE_EXE="/e/Epic/Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
+export UE_EXE="/c/Program Files/Epic Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
 export ASSETS_ROOT="D:/path/to/packs"          # children = packs
 cd pipeline/conversion
 bash ./convert_packs.sh --pack "MyPack"        # adds --skip-meshes NAME for

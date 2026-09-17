@@ -5,7 +5,7 @@
 set -u
 
 T="$(cd "$(dirname "$0")" && pwd)"
-BLENDER="C:/Program Files/Blender Foundation/Blender 5.1/blender.exe"
+BLENDER="${BLENDER:-C:/Program Files/Blender Foundation/Blender 5.1/blender.exe}"
 BLENDS="$T/native_blends.txt"
 OUT="$T/native_index_blends.jsonl"
 

@@ -164,7 +164,7 @@ index = {
         "duplicates": "Exact duplicates were removed (kept newest pack); see _sort_logs/dedupe_plan.csv.",
         "non_audio": "Only audio files were moved here; PDFs/videos/instruments remained in their source folders.",
     },
-    "related_logs": r"D:\Audio_Foley_FX\_sort_logs",
+    "related_logs": "_sort_logs",
 }
 json.dump(index, open(os.path.join(AA, "library_index.json"), "w", encoding="utf-8"),
           ensure_ascii=True, indent=1)

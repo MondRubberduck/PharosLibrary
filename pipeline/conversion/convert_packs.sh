@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# convert_packs.sh -- convert ONE Unreal pack under D:\3D_Assets into
+# convert_packs.sh -- convert ONE Unreal pack under the assets root into
 # <pack>\Exports\{FBX,Textures}\... plus <pack>\Exports\manifest.json.
 #
 # Writes only inside the pack's new `Exports` folder.  The .uasset sources are
 # never opened for writing: the engine works on a copy in ../sandbox/Content.
 #
 # Usage:
-#   convert_packs.sh --pack "Oriantel Building" [options]
+#   convert_packs.sh --pack "MyPack" [options]
 #
 # Options:
-#   --assets-root DIR   default "D:/3D_Assets/Leartes Env_ gumroad"
+#   --assets-root DIR   default: $ASSETS_ROOT env var
 #   --label NAME        tags logs (default: full)
 #   --limit-meshes N    smoke-test only
 #   --limit-textures N
@@ -33,7 +33,7 @@
 #             6 verification failed
 set -uo pipefail
 
-UE_EXE="${UE_EXE:-}"   # e.g. /e/Epic/Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe
+UE_EXE="${UE_EXE:-}"   # e.g. "/c/Program Files/Epic Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
 BLENDER_EXE="${BLENDER_EXE:-}"   # e.g. "/c/Program Files/Blender Foundation/Blender 5.1/blender.exe"
 CONV_ROOT="$(cd "$(dirname "$0")" && pwd)"
 TOOLS="$CONV_ROOT/tools"

@@ -52,15 +52,15 @@ WHY IT CANNOT DAMAGE THE PIPELINE
 Job description (AMCONV_JOB):
 
 {
-  "pack_name":     "AlbertMansion_5.0",
-  "pack_dir":      "D:/3D_Assets/Leartes Env_ gumroad/AlbertMansion_5.0",
+  "pack_name":     "MyPack",
+  "pack_dir":      "C:/path/to/assets/MyPack",
   "manifest":      "<pack_dir>/Exports/manifest.json",   # REQUIRED: read + rewritten
-  "report":        "D:/Pipeline/kiosk/conversion/logs/relink_<slug>.json",
-  "wiring_report": "D:/Pipeline/kiosk/conversion/logs/wiring_<slug>.json",  # full detail
-  "game_roots":    ["/Game/AlbertMansion"],   # from pack_discovery.py; cross-check only
+  "report":        "C:/path/to/logs/relink_<slug>.json",
+  "wiring_report": "C:/path/to/logs/wiring_<slug>.json",  # full detail
+  "game_roots":    ["/Game/MyPack"],          # from pack_discovery.py; cross-check only
   "exclude_dirs":  ["EpicContent"],           # used to explain a null `file` in a note
   "apply":         true,     # false = dry run: resolve everything, write nothing
-  "manifest_out":  "D:/Pipeline/kiosk/conversion/logs/preview_<slug>.json",
+  "manifest_out":  "C:/path/to/logs/preview_<slug>.json",
                              # dry run only: write the fully patched manifest HERE
                              # (never at the live path) so it can be verified first
   "backup_name":   "manifest.v1.bak",       # beside manifest.json; never overwritten
