@@ -53,7 +53,7 @@ token cost.**
 
 | Content | Ingestion path | Notes |
 |---|---|---|
-| Any mesh folder (FBX/OBJ/GLB/STL/BLEND) | `python service/asset_service/scanner.py <folder>` | OBJ gets real bboxes+triangles from vertex parsing; GLB/STL via trimesh if installed; FBX indexed with name/path/size (geometry stats need the conversion pipeline or crawler); .blend indexed as name+path placeholder |
+| Any mesh folder (FBX/OBJ/GLB/STL/BLEND) | `python service/asset_service/scanner.py <folder>` | FBX: real bbox in metres + exact triangle/vertex counts via the stdlib binary walker (`fbx_dims.py`, ground-truth verified vs Blender measurements, 197/200 within 5%); OBJ parses vertices; GLB/STL via trimesh if installed; .blend indexed as name+path placeholder |
 | Texture folders (PBR sets, loose map families) | `textures_import` at server start, or scanner | sets grouped per leaf folder / stripped map-channel suffixes |
 | Audio folders | `scanner.py` (WAV duration from header) or crawler `library_files.jsonl` | jsonl path additionally brings categories, keywords, sample rates |
 | Animation clip packs (FBX/BVH) | `indexer.py --root <library_root>` | builds the pack grid; previews are rendered once by the browser |
@@ -100,9 +100,9 @@ asset library.
 
 ## 7. Limits (honest list)
 
-- FBX bounding boxes/triangles come from the conversion pipeline or
-  crawler, not from raw FBX parsing; scanner-indexed FBX rows carry
-  paths but not geometry stats.
+- Triangle/vertex counts from raw FBX are fan-triangulation exact for
+  triangle/quad meshes; per-material recipes still require the conversion
+  pipeline's manifests (UE) or crawler output.
 - `.blend` files are indexed (name/path/container) but not measured;
   `.max` is unreadable.
 - Material recipes exist only where manifests joined (~75% of a fully
