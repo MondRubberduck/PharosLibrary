@@ -1,5 +1,5 @@
 """Verify an exported group FBX kept its assembly: parent + submeshes."""
-import bpy, os, json, sys
+import bpy, os, json
 
 src = os.environ.get("KB3D_VERIFY", "")
 bpy.ops.wm.read_factory_settings(use_empty=True)

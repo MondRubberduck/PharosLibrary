@@ -367,11 +367,6 @@ def _all_meshes(obj):
     return result
 
 
-_KB3D_DEAD = re.compile(
-    r"kb3d_[^\\/]+\.blender\.native[\\/]KB3DTextures[\\/][^\\/]*[\\/]",
-    re.IGNORECASE)
-
-
 def _remap_dead_kb3d_images():
     """KitBash FBX files reference an EMPTY
     'kb3d_<kit>.blender.native/KB3DTextures/4k' folder; the shipped

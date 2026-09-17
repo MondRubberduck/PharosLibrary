@@ -7,7 +7,6 @@ ROOT = section_root("textures", "AGENT_TEX_ROOT")
 idx = json.load(open(os.path.join(ROOT, "library_index.json"), encoding="utf-8"))
 T = idx["totals"]
 
-def gb(n): return f"{n/1e9:.2f} GB"
 L = []
 A = L.append
 A("# Textures & Materials Library - Agent Index (READ ME FIRST)")

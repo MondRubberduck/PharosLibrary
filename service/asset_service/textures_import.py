@@ -57,7 +57,6 @@ CHANNEL_TOKENS = {
     "basecolor", "diffuse", "alpha", "opacity", "mask", "masked", "overlay",
     "mirror", "nrm", "occ", "s", "m", "b", "seamless", "raw", "toplayer",
 }
-RES_TOKENS = {"1k", "2k", "4k", "512", "1024", "2048"}
 
 TEX_THEMES = {
     "walls": ["wall", "brick", "plaster", "stucco", "facade", "concrete",

@@ -454,11 +454,6 @@ def _role_for_single_map(param):
     return "other"
 
 
-def role_for(param):
-    """Role for a UE texture parameter name (single-map rules + `packed`)."""
-    return classify_param(param)[0]
-
-
 # --------------------------------------------------------------------------- #
 # engine-side reading
 # --------------------------------------------------------------------------- #

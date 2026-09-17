@@ -3,11 +3,10 @@ Two modes:
   * batch  - AMNATIVE_LIST points at the manifest; import every file in turn.
   * blend  - a .blend was passed on the command line; index whatever loaded.
 Emits one JSON line per MESH object with real-world size in metres."""
-import bpy, os, json, sys, mathutils
+import bpy, os, json, mathutils
 
 LIST = os.environ.get("AMNATIVE_LIST", "")
 OUT = os.environ.get("AMNATIVE_OUT", "")
-LABEL = os.environ.get("AMNATIVE_LABEL", "")
 SECTION = os.environ.get("AMNATIVE_SECTION", "")
 
 fh = open(OUT, "a", encoding="utf-8")
