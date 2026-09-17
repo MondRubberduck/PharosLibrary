@@ -85,7 +85,7 @@ def _name_hit(tok: str, name_l: str) -> bool:
     longer tokens may substring ('hologram' in 'holograms02')."""
     if len(tok) >= 5:
         return tok in name_l
-    return re.search(r"" + re.escape(tok), name_l) is not None
+    return re.search(r"\b" + re.escape(tok), name_l) is not None
 
 
 SYNONYMS = {
@@ -266,6 +266,13 @@ _DB_PATH = DEFAULT_DB
 def api_stats() -> dict:
     conn = db.connect(_DB_PATH)
     stats = db.db_stats(conn)
+    sections = {}
+    for tbl in ("meshes", "textures", "audio", "collection"):
+        try:
+            sections[tbl] = conn.execute(
+                f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+        except sqlite3.OperationalError:
+            sections[tbl] = 0      # table not created yet (importer skipped)
     row = conn.execute(
         "SELECT MAX(updated_at) AS last, COUNT(*) AS n FROM assets").fetchone()
     conn.close()
@@ -276,7 +283,7 @@ def api_stats() -> dict:
             status = json.loads(STATUS_FILE.read_text(encoding="utf-8"))[:5]
     except (OSError, ValueError):
         status = None
-    return {"stats": stats, "extension_status": status,
+    return {"stats": stats, "sections": sections, "extension_status": status,
             "domains": list(DOMAINS), "styles": list(STYLES)}
 
 
@@ -1076,7 +1083,7 @@ def api_meshes(params: dict) -> dict:
     except ValueError:
         page = 1
     try:
-        size = min(200, max(8, int((params.get("size") or ["50"])[0])))
+        size = min(500, max(8, int((params.get("size") or ["50"])[0])))
     except ValueError:
         size = 50
 
@@ -1140,8 +1147,16 @@ def api_meshes(params: dict) -> dict:
             "tier": q_tier if qstems else 0,
         })
     if not items and or_items and qstems:
-        # OR fallback: rank by how many query tokens each record hits
+        # OR fallback, ranked by token RARITY (inverse frequency among the
+        # fallback rows): a row hitting the selective token ('cobblestone',
+        # ~24 rows) outranks one hitting only the broad token ('medieval',
+        # ~1400 rows). Name hits count double.
         for r in or_items:
+            name_l = (r["name"] or "").lower()
+            searchable = set(r["tags"]) | set(r["meta"].get("stems") or []) \
+                | set(r["meta"].get("themes") or [])
+            toks = {x for x in qstems
+                    if _name_hit(x, name_l) or x in searchable}
             items.append({
                 "id": r["id"], "name": r["name"], "pack": r["pack"],
                 "source": r["source"], "kind": r["kind"], "fbx": r["fbx"],
@@ -1154,12 +1169,17 @@ def api_meshes(params: dict) -> dict:
                 "themes": r["meta"].get("themes") or [],
                 **_mesh_extras(r),
                 "tier": 3,
-                "_hits": sum(1 for x in qstems
-                             if _name_hit(x, (r["name"] or "").lower())),
+                "_toks": toks,
             })
-        or_items.sort(key=lambda e: -e.get("_hits", 0))
-        for e in or_items:
-            e.pop("_hits", None)
+        freq: dict = {}
+        for e in items:
+            for t in e["_toks"]:
+                freq[t] = freq.get(t, 0) + 1
+        items.sort(key=lambda e: -sum(
+            (2.0 if _name_hit(t, e["name"].lower()) else 1.0) / freq[t]
+            for t in e["_toks"]))
+        for e in items:
+            e.pop("_toks", None)
     if sort == "max_dim":
         items.sort(key=lambda x: -(x["max_dim_m"] or 0))
     elif sort == "triangles":

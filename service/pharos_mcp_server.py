@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # .../service
 from asset_service import config  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP
