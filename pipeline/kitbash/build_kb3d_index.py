@@ -7,7 +7,7 @@ query kits and Leartes packs the same way.
 
 Writes <library_root>/_Agent_Files/kb3d_models.jsonl
 """
-import io, os, glob, json, datetime
+import glob, io, json, os
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import agent_files
@@ -50,6 +50,10 @@ for man_path in sorted(glob.glob(os.path.join(ROOT, "*", "Exports", "kit_manifes
         })
 
 rows.sort(key=lambda r: (r["pack"], r["name"] or ""))
+if len(rows) < 10:
+    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
+                     "live index with a near-empty scan (wrong root?)"
+                     % len(rows))
 with io.open(OUT, "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")

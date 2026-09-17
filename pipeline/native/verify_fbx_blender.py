@@ -1,11 +1,17 @@
 import bpy, os, glob, random, json, sys
 
-OUT = r"D:\Pipeline\kiosk\exports\AlbertMansion_5.0\FBX"
+OUT = sys.argv[1] if len(sys.argv) > 1 else "."
+if not os.path.isdir(OUT):
+    print("FBX directory not found: %s" % OUT)
+    sys.exit(0)
+
 files = sorted(glob.glob(os.path.join(OUT, "**", "*.fbx"), recursive=True))
 print("TOTAL_FBX_FOUND=%d" % len(files))
+if not files:
+    sys.exit(0)
 
 random.seed(20260915)
-pick = random.sample(files, 5)
+pick = random.sample(files, min(len(files), 5))
 report = []
 for p in pick:
     bpy.ops.wm.read_factory_settings(use_empty=True)

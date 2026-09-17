@@ -147,6 +147,11 @@ local_only = [{"name": s, "availability": "local", "folders": len(fs),
               for s, fs in sections.items()
               if sum(f["model_files"] for f in fs) > 0]
 
+if len(records) < 10:
+    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
+                     "live index with a near-empty scan (wrong root?)"
+                     % len(records))
+
 json.dump({"schema": "pharos.agent.availability/v1", "generated": now, "root": LIB,
            "note": ("availability is the key field: 'local' = usable now; "
                     "'owned-not-downloaded' = owned with gallery + product URL, "

@@ -22,16 +22,20 @@ import io, os, json, collections
 
 T = str(Path(__file__).resolve().parent)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import agent_files
+from _config import agent_files, library_root
 AGENT = agent_files()
 BLENDS = os.path.join(T, "native_index_blends.jsonl")
 NATIVE = os.path.join(AGENT, "native_models.jsonl")
-LIB = r"D:\3D_Assets"
+LIB = library_root() or "."
 
 EXCLUDE_SECTIONS = {"KitbashOrdner"}   # already covered by kb3d_models.jsonl
 
+if not os.path.isfile(BLENDS):
+    print("no blend index found to promote: %s (run run_blends.py first)" % BLENDS)
+    sys.exit(0)
+
 # 1. read the existing native records
-rows = [json.loads(l) for l in io.open(NATIVE, encoding="utf-8") if l.strip()]
+rows = [json.loads(l) for l in io.open(NATIVE, encoding="utf-8") if l.strip()] if os.path.isfile(NATIVE) else []
 before = len(rows)
 have = {(r.get("pack"), r.get("name")) for r in rows}
 
@@ -80,6 +84,10 @@ for line in io.open(BLENDS, encoding="utf-8"):
     by_section[sec] += 1
 
 rows.sort(key=lambda x: (x["pack"] or "", x["name"] or ""))
+if len(rows) < 10:
+    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
+                     "live index with a near-empty scan"
+                     % len(rows))
 with io.open(NATIVE, "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -91,10 +99,11 @@ print("by kind now:", dict(collections.Counter(r.get("kind") for r in rows).most
 
 # 3. .max files are a separate, real gap - flag them
 maxf = []
-for dp, dn, fn in os.walk(LIB):
-    for f in fn:
-        if f.lower().endswith(".max"):
-            maxf.append(os.path.join(dp, f))
+if os.path.isdir(LIB):
+    for dp, dn, fn in os.walk(LIB):
+        for f in fn:
+            if f.lower().endswith(".max"):
+                maxf.append(os.path.join(dp, f))
 print("\n.max files on disk (NOT readable by Blender or this pipeline): %d" % len(maxf))
 total = sum(os.path.getsize(p) for p in maxf)
 print("   total size: %.1f GB" % (total / 2**30))

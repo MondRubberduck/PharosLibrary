@@ -23,7 +23,6 @@ from _config import library_root
 LIB = library_root() or "."
 AGENT = os.path.join(LIB, "_Agent_Files")
 os.makedirs(AGENT, exist_ok=True)
-LEARTES = os.path.join(LIB, "Leartes Env_ gumroad")
 
 MODEL_EXT = {".fbx", ".obj", ".blend", ".usd", ".usda", ".usdc", ".abc",
              ".glb", ".gltf", ".dae", ".max", ".ma", ".mb", ".stl", ".ply"}
@@ -185,6 +184,10 @@ for pack, ex in manifest_dirs:
         })
 
 rows.sort(key=lambda r: (r["pack"], r["name"] or ""))
+if len(rows) < 10:
+    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
+                     "live index with a near-empty scan (wrong root?)"
+                     % len(rows))
 with io.open(os.path.join(AGENT, "models.jsonl"), "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -237,7 +240,8 @@ if by_pack:
     for pack, rs in sorted(by_pack.items()):
         tris = sum(r["triangles"] or 0 for r in rs)
         big = max((r["max_dim_m"] or 0) for r in rs)
-        ex = os.path.join(LEARTES, pack, "Exports")
+        pack_root = next((p["path"] for p in packs if p["pack"] == pack), "")
+        ex = os.path.join(pack_root, "Exports") if pack_root else "Exports"
         A("| **%s** | %d | %s | %.2f | `%s` |" % (pack, len(rs), "{:,}".format(tris), big, ex))
 else:
     A("_Nothing converted yet._")

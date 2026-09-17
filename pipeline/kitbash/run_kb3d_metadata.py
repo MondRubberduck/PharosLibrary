@@ -1,12 +1,12 @@
 """Drive the KitBash3D material/texture metadata pass over all 11 kits."""
-import subprocess, os, json, io, glob
+import glob, os, subprocess, sys
+from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
-BLENDER = r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe"
-SCRIPT = os.path.join(T, "kb3d_metadata.py")
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import section_root
+BLENDER = os.environ.get("BLENDER_EXE", r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe")
+SCRIPT = os.path.join(T, "kb3d_metadata.py")
 ROOT = section_root("kitbash", "PHAROS_KB3D_ROOT")
 
 kits = sorted(glob.glob(os.path.join(ROOT, "*", "*", "*.blend"))) + \

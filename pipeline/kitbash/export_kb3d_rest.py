@@ -1,12 +1,15 @@
 """Second pass: the three KitBash3D kits that use the OLDER packaging, where the
 .blend sits directly in the kit folder rather than in a .blender.native subfolder.
 Re-runnable; skips kits that already have Exports/kit_manifest.json."""
-import subprocess, os, json, io, glob
+import glob, os, subprocess, sys
+from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
-BLENDER = r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _config import section_root
+BLENDER = os.environ.get("BLENDER_EXE", r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe")
 SCRIPT = os.path.join(T, "export_kb3d.py")
-ROOT = r"D:\3D_Assets\KitbashOrdner"
+ROOT = section_root("kitbash", "PHAROS_KB3D_ROOT")
 
 # every .blend under KitbashOrdner, at any depth
 allb = sorted(glob.glob(os.path.join(ROOT, "**", "*.blend"), recursive=True))

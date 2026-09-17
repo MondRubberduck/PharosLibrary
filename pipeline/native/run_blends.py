@@ -1,15 +1,20 @@
 """Drive Blender directly (no bash/MSYS) to index each .blend kit.
 Windows paths are passed as-is; nothing can mangle them."""
-import subprocess, os, json, sys, io
+import io, json, os, subprocess, sys
+from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
-BLENDER = r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe"
+BLENDER = os.environ.get("BLENDER_EXE", r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe")
 SCRIPT = os.path.join(T, "index_native.py")
 MAN = os.path.join(T, "native_manifest.json")
 OUT = os.path.join(T, "native_index_blends.jsonl")
 
+if not os.path.isfile(MAN):
+    print("manifest not found: %s (run make_native_manifest2.py first)" % MAN)
+    sys.exit(0)
+
 man = json.load(io.open(MAN, encoding="utf-8"))
-kits = man["blend_files"]
+kits = man.get("blend_files", [])
 print("kits to index:", len(kits), flush=True)
 
 ok = fail = 0

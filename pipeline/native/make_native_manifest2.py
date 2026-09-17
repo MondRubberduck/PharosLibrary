@@ -1,12 +1,21 @@
-import io, os, json
+import io, json, os, sys
+from collections import Counter
+from pathlib import Path
 
-LIB = r"D:\3D_Assets"
 T = str(Path(__file__).resolve().parent)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _config import library_root, load
+LIB = library_root() or "."
 OUT = os.path.join(T, "native_manifest.json")
 BLENDS = os.path.join(T, "native_blends.txt")
 
-SKIP_TOP = {"Leartes Env_ gumroad", "Animation", "_Agent_Files", "kiosk_data", "Kiosk_zCode"}
+_cfg = load()
+SKIP_TOP = {"Animation", "_Agent_Files"} | set(_cfg.get("indexer_skip_dirs") or [])
 MODEL_EXT = {".fbx", ".obj", ".usd", ".usda", ".usdc", ".blend", ".max"}
+
+if not os.path.isdir(LIB):
+    print("library root not found: %s" % LIB)
+    sys.exit(0)
 
 items = []
 for top in sorted(os.listdir(LIB)):
@@ -36,7 +45,6 @@ with io.open(BLENDS, "w", encoding="utf-8") as fh:
         fh.write(b["path"] + "\n")
         fh.write(b["section"] + "\n")
 
-from collections import Counter
 print("importable:", len(others), " blend kits:", len(blends))
 print("blend kits by section:", dict(Counter(b["section"] for b in blends)))
 print("importable by section:", dict(Counter(i["section"] for i in others)))

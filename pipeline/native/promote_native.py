@@ -12,13 +12,25 @@ Deliberately EXCLUDED: the .blend object enumeration (native_index_blends.jsonl)
 the owner's standing instruction is to leave .blend files alone, and the KitBash3D
 kits are already covered assembly-by-assembly by kb3d_models.jsonl.
 """
-import io, os, json, glob, collections
+import collections, io, json, os
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import agent_files
+from _config import agent_files, library_root
 AGENT = agent_files()
+LIB = library_root() or "."
 T = str(Path(__file__).resolve().parent)
 SRC = os.path.join(T, "native_index_20260915-172648.jsonl")
+if not os.path.isfile(SRC):
+    # look for any recent native_index_*.jsonl
+    import glob
+    candidates = sorted(glob.glob(os.path.join(T, "native_index_*.jsonl")))
+    SRC = candidates[-1] if candidates else ""
+
+if not SRC or not os.path.isfile(SRC):
+    print("no native_index JSONL found to promote (run index_native_all.sh first)")
+    sys.exit(0)
+
 os.makedirs(AGENT, exist_ok=True)
 OUT = os.path.join(AGENT, "native_models.jsonl")
 
@@ -33,9 +45,7 @@ for line in io.open(SRC, encoding="utf-8"):
         skipped += 1
         continue
     src = r.get("source") or ""
-    abs_src = src if os.path.isabs(src) else os.path.join(r"D:\3D_Assets", src)
-    if not os.path.isabs(src):
-        abs_src = os.path.join(r"D:\3D_Assets", src.replace("/", os.sep))
+    abs_src = src if os.path.isabs(src) else os.path.join(LIB, src.replace("/", os.sep))
     bbox = r.get("bbox_m")
     rows.append({
         "pack": r.get("section"),
@@ -59,6 +69,10 @@ for line in io.open(SRC, encoding="utf-8"):
     })
 
 rows.sort(key=lambda x: (x["pack"] or "", x["name"] or ""))
+if len(rows) < 10:
+    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
+                     "live index with a near-empty scan"
+                     % len(rows))
 with io.open(OUT, "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")
