@@ -41,35 +41,64 @@ listings alone, before any binary parsing (~98.8%).
 |---|---|
 | ![animations](docs/screenshots/animations.png) | ![viewer](docs/screenshots/viewer.png) |
 
-## Quick start
+## You do three things (the human part)
 
+You need [Python 3.10+](https://www.python.org/downloads/) and Git.
+No Blender, no Unreal, no pip installs. Your agent does everything else.
+
+**1 — get the app:**
 ```bash
 git clone https://github.com/MondRubberduck/PharosLibrary.git
-cd PharosLibrary
+```
 
-# 1. Point it at your asset folders (auto-detects sections)
+**2 — paste this SETUP prompt to your coding agent** (edit the one path
+in angle brackets — your agent runs every command itself):
+
+```
+Set up Pharos for my asset library.
+
+1. Read <repo>/README.md and <repo>/docs/AGENT_PLAYBOOK.md fully, then
+   follow PHASE 1 of the playbook.
+2. My assets live at: <D:/path/to/your/assets>
+   Run pharos.py init on that folder, fix anything the detector got
+   wrong in pharos_config.json, scan/crawl every folder the summary
+   lists, start the server, and generate the agent docs.
+3. Then ASK ME the playbook's interview questions before anything else.
+   When the server prints INGESTION COMPLETE, report the numbers to me.
+```
+
+**3 — from then on, paste this BUILD prompt with your idea:**
+
+```
+Build me a scene with my Pharos library: <your one-line idea — e.g. "a
+rainy neon night market alley" or "a medieval market square at dusk">.
+Read <library>/_Agent_Files/AGENT_START_HERE.md first, then follow
+docs/AGENT_PLAYBOOK.md PHASE 2: use what is on disk, ask me before
+downloading anything, model missing pieces yourself and tell me which.
+Validate the manifest, check the budget, build headless in Blender,
+verify the .blend, and render a preview if you can.
+```
+
+That's the whole human workflow. The dashboard
+(`http://127.0.0.1:8765`) opens whenever the server runs — browse what
+your agent found. Everything else (API, MCP, engines, pipelines) is in
+the sections below and your agent will read it on its own.
+
+### Manual quick start (what the agent does for you)
+
+```bash
 python pharos.py init "D:/path/to/your/assets"
 #    config lands at service/asset_service/pharos_config.json
 #    (pharos_config.example.json in the repo root is only a template)
 
-# 2. Start the server
-python pharos.py serve
-#    → http://127.0.0.1:8765
-
-# 3. Index raw mesh folders (real FBX dimensions, no engines needed)
-python service/asset_service/scanner.py "D:/path/to/models"
-
-# 4. Generate the agent entry files in YOUR library
-python pharos.py docs
+python pharos.py serve          # → http://127.0.0.1:8765
+python service/asset_service/scanner.py "D:/path/to/models"   # raw folders
+python pharos.py docs           # agent entry files into YOUR library
 ```
 
-Then tell your coding agent:
-
-> "Read `<your-library-root>/_Agent_Files/AGENT_START_HERE.md`, then use
-> the HTTP API at http://127.0.0.1:8765 to find assets."
-
-Or connect via MCP (`pip install "mcp<2"`, see `docs/MCP_SETUP.md`;
-Blender itself needs **no** plugin or MCP — the builder runs headless):
+Optional MCP for your agent client (`pip install "mcp<2"`, see
+`docs/MCP_SETUP.md`; Blender itself needs **no** plugin or MCP — the
+builder runs headless):
 
 ```json
 { "mcpServers": { "pharos": {
