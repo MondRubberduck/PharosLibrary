@@ -73,6 +73,13 @@ python run_blends.py                 # .blend objects pass
 python promote_native.py && python promote_blends.py   # -> _Agent_Files
 ```
 
+`recon_new.py` and `promote_blends.py` find their sections in the library
+itself (the pack folders carrying `Exports/manifest.json`, the kit folders
+carrying `Exports/kit_manifest.json`) — nothing is hardcoded to a folder
+name. Two optional overrides: `PHAROS_CONVERTED_ROOT` pins the converted
+section when a library has more than one, `PHAROS_RECON_LEFTOVER=<folder>`
+makes the scout report whether a specific pack was already removed.
+
 ### 4. `agent_index/` — regenerate the app's index files (pure Python)
 ```bash
 cd pipeline/agent_index
