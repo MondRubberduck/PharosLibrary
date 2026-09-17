@@ -11,7 +11,7 @@ BLENDER = os.environ.get("BLENDER_EXE", r"C:\Program Files\Blender Foundation\Bl
 SCRIPT = os.path.join(T, "export_kb3d.py")
 ROOT = section_root("kitbash", "PHAROS_KB3D_ROOT")
 
-# every .blend under KitbashOrdner, at any depth
+# every .blend under the kits root, at any depth
 allb = sorted(glob.glob(os.path.join(ROOT, "**", "*.blend"), recursive=True))
 todo = []
 for blend in allb:

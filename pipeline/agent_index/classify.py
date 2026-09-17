@@ -8,9 +8,12 @@ SKIP_TOP = {"Audio_Assets"}  # never re-scan the output
 
 # ---------------------------------------------------------------------------
 # TASK 4 (2026-09-16): explicit re-categorisation of known misfiles.
-# Applied AFTER the keyword rules; first substring match wins.
 # A blanket keyword pass would make the taxonomy worse - most apparent
 # anomalies are correct (rain-street is rain; subway tunnel is transit).
+#
+# STATUS: table NOT wired in.  classify() below consults RULES only, so no
+# entry here changes a published category; every entry is a hand-checked
+# judgement kept for the owner (see docs/CAPABILITIES.md section 7).
 # ---------------------------------------------------------------------------
 OVERRIDES = {
     'Big Rattling Truck At Tail (Neue Nationalgalerie)': ('Ambiance', 'City'),

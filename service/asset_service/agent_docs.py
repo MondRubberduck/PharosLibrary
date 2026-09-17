@@ -19,7 +19,19 @@ from . import config
 
 
 def _counts(db_path: str) -> dict:
-    conn = sqlite3.connect(db_path)
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.OperationalError as exc:
+        # A fresh install has no registry yet: `init` does not create it, the
+        # first serve/scanner run does.  Say so in plain words instead of
+        # letting sqlite3.OperationalError escape as a traceback.
+        raise SystemExit(
+            "cannot read the registry: %s\n"
+            "  (%s)\n"
+            "The registry does not exist yet.  Start the server once\n"
+            "  python pharos.py serve\n"
+            "or scan a folder, then run `python pharos.py docs` again."
+            % (db_path, exc))
     out: dict = {}
     def one(key, sql):
         try:

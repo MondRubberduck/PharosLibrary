@@ -525,7 +525,7 @@ def api_collection_items(params: dict) -> dict:
     qstems: set = set()
     for t in re.findall(r"[a-z0-9]+", q):
         qstems |= _stems(t)
-    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens | _synonyms(t)
+    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
     if q and not qstems:
         # every token was dropped (single letters / punctuation) -- such a
         # query must match nothing, never the whole library
@@ -748,7 +748,7 @@ def api_textures_items(params: dict) -> dict:
     qstems: set = set()
     for t in re.findall(r"[a-z0-9]+", q):
         qstems |= _stems(t)
-    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens | _synonyms(t)
+    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
     if q and not qstems:
         return {"total": 0, "page": page, "size": size, "q": q, "items": []}
     related: set = set()
@@ -915,7 +915,7 @@ def api_audio_items(params: dict) -> dict:
     qstems: set = set()
     for t in re.findall(r"[a-z0-9]+", q):
         qstems |= _stems(t)
-    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens | _synonyms(t)
+    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
     if q and not qstems:
         return {"total": 0, "page": page, "size": size, "q": q, "items": []}
     related: set = set()
@@ -1090,7 +1090,7 @@ def api_meshes(params: dict) -> dict:
     qstems: set = set()
     for t in re.findall(r"[a-z0-9]+", q):
         qstems |= _stems(t)
-    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens | _synonyms(t)
+    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
     if q and not qstems:
         # every token was dropped -- match nothing, never the whole library
         return {"total": 0, "exact": 0, "mode": "and", "page": page,
