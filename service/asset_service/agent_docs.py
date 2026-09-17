@@ -80,19 +80,33 @@ results, never errors.
 
 ## Step 3 — the rules that matter
 
+**Work in phases** (full manual: `<repo>/docs/AGENT_PLAYBOOK.md`):
+Phase 1 = setup + crawl + INTERVIEW your user (are these all the
+folders? crawl UE? purchase CSV?) until the server banner says
+INGESTION COMPLETE and the user confirmed. Phase 2 = build, following
+the priority lists:
+
+1. Asset on disk → use it. 2. On demand (owned-not-downloaded) → ask
+the user with a requisition list, never substitute silently. 3. Not in
+the library → model it from scratch in the build and SAY SO in the
+report. Textures: linked → use; fitting set exists → use; nothing →
+generate procedurally and say so.
+
 1. The library on disk is READ-ONLY for you. Locate and read files,
    never modify/move/delete them.
 2. Prefer the API over disk walks — that is the entire point of this
-   system (measured ~90%% token savings vs filesystem crawling).
+   system (measured ~90% token savings vs filesystem crawling).
 3. Dimension filters are METRES. `max_tri` is a triangle budget.
 4. Availability: `local` = on disk now; `owned-not-downloaded` =
    purchasable — surface it as a requisition list, never substitute
    silently.
 5. POST endpoints mutate human-visible state — only on explicit
    instruction (see AGENT_API.md §POST).
-6. Scene building: query the API, author a scene manifest, validate,
-   then build headless in Blender — the workflow is documented in the
-   repo's `docs/CAPABILITIES.md` §5.
+6. Blender needs NO plugin or MCP: builds run via
+   `blender --background --factory-startup --python scene_builder.py`.
+7. Scene building: query the API, author a scene manifest, validate,
+   then build headless — the workflow is documented in the repo's
+   `docs/CAPABILITIES.md` §5.
 
 ## Step 4 — fallback if the server is down
 

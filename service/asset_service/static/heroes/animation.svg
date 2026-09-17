@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#141821"/><stop offset="1" stop-color="#0d1016"/>
+    </linearGradient>
+    <linearGradient id="streak" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7cc4ff" stop-opacity="0"/>
+      <stop offset=".5" stop-color="#7cc4ff" stop-opacity=".9"/>
+      <stop offset="1" stop-color="#7cc4ff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="540" fill="url(#bg)"/>
+  <g fill="none" stroke="url(#streak)" stroke-width="3">
+    <path d="M60 430 Q 240 300 480 380 T 900 210"/>
+    <path d="M60 470 Q 260 360 480 430 T 900 290" opacity=".6"/>
+    <path d="M60 390 Q 220 250 480 330 T 900 140" opacity=".6"/>
+  </g>
+  <g stroke="#3a4250" stroke-width="2" fill="none" opacity=".8">
+    <circle cx="480" cy="270" r="70"/>
+    <circle cx="480" cy="270" r="110" stroke-dasharray="6 10"/>
+  </g>
+  <g fill="#7cc4ff">
+    <circle cx="480" cy="200" r="7"/>
+    <circle cx="550" cy="270" r="5" opacity=".7"/>
+    <circle cx="480" cy="340" r="5" opacity=".7"/>
+    <circle cx="410" cy="270" r="5" opacity=".7"/>
+  </g>
+  <text x="480" y="505" font-family="system-ui,sans-serif" font-size="26"
+        fill="#8b93a1" text-anchor="middle" letter-spacing="6">ANIMATION</text>
+</svg>

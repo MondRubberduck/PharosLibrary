@@ -116,7 +116,7 @@ async function load(){
  let d;try{d=await(await fetch('/api/collection/items?'+p)).json();}catch(e){grid.innerHTML='';count.textContent='load failed';return;}
  total=d.total;page=d.page;
  count.textContent=`${d.total} asset(s)`;
- grid.innerHTML=d.items.map(c=>{
+ grid.innerHTML=(d.total===0 && !d.q && !fStore && !fGroup && !fCat && !fAvail)?`<div style="grid-column:1/-1;padding:56px 24px;text-align:center;color:#8b93a1;font-size:14px;line-height:1.7"><div style="font-size:17px;color:#dfe3ea;margin-bottom:10px">No purchases indexed yet</div>This section lists <b>owned products</b> from a purchase CSV (Name / Product URL / Price columns).<br>Drop one into your collection folder and restart the server — see docs/CAPABILITIES.md §3.<br>Your other sections (meshes, textures, audio, animations) are unaffected.</div>`:d.items.map(c=>{
   const loc=c.cat||c.group;
   const badge=d.q&&c.tier===3?`<span class="badge rel">related</span>`:
     (d.q&&c.tier===2?`<span class="badge tagb">tag</span>`:'');

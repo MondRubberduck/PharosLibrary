@@ -222,7 +222,46 @@ def run_init(argv=None) -> int:
     cfg = build_config(report, registry_dir)
     config.save(cfg)
     print(f"\nconfig written: {cfg_file}")
-    print("next steps:")
+
+    # ---- INGESTION SUMMARY (the user must never wonder "did it work?") --
+    print("\n" + "-" * 24 + " INGESTION SUMMARY " + "-" * 24)
+    picks = report["sections"]
+    print(f"  sections      : animation={picks.get('animation', ['-'])[0]}"
+          f" | textures={picks.get('textures', ['-'])[0]}"
+          f" | audio={picks.get('audio', ['-'])[0]}")
+    print(f"  collection csv: {report['catalog_csvs'][0]
+                          if report['catalog_csvs'] else '(none found)'}")
+    if report["manifest_roots"]:
+        print(f"  manifest packs: {len(report.get('manifest_packs_found', []))}"
+              f" under {', '.join(report['manifest_roots'])}"
+              f" -> material recipes will import")
+    covered = set()
+    for kind in ("animation", "textures", "audio"):
+        covered.update(picks.get(kind) or [])
+    if report["catalog_csvs"]:
+        covered.add(Path(report["catalog_csvs"][0]).parent.name)
+    covered.update(Path(x).name for x in report["manifest_roots"])
+    for f in report["mesh_folders"]:
+        covered.add(f)
+        print(f"  to scan       : {f}   ->  python "
+              f"service/asset_service/scanner.py \"{root / f}\"")
+    not_indexed = [u for u in report["unknown"] if u not in covered]
+    if not_indexed:
+        print(f"  NOT INDEXED (matched no section): {', '.join(not_indexed)}")
+        print("    -> point a section at them in pharos_config.json, "
+              "or scan them with scanner.py")
+    print("-" * 67)
+
+    # questions the RUNNING AGENT must relay to its user before building
+    print("\nASK YOUR USER now (setup is not complete until you did):")
+    print("  1. Are these ALL your asset folders? (other drives? external?)")
+    print("  2. Crawl the Unreal packs for material recipes? "
+          "(needs UE 5.x; see pipeline/README.md chain 1)")
+    print("  3. Do you have a purchase CSV for the Assets section "
+          "(Name/URL/Price columns)?")
+    print("  4. Animation previews render once in a browser tab -- OK?")
+
+    print("\nnext steps:")
     print("  start the server : python pharos.py serve"
           "   (or python service/asset_service/browse.py)")
     if report["mesh_folders"]:

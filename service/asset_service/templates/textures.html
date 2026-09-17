@@ -113,7 +113,7 @@ async function load(){
  let d;try{d=await(await fetch('/api/textures/items?'+p)).json();}catch(e){grid.innerHTML='';count.textContent='load failed';return;}
  total=d.total;page=d.page;
  count.textContent=`${d.total} texture set(s)`;
- grid.innerHTML=d.items.map(c=>{
+ grid.innerHTML=(d.total===0 && !d.q && !fGroup && !fSub)?`<div style="grid-column:1/-1;padding:56px 24px;text-align:center;color:#8b93a1;font-size:14px;line-height:1.7"><div style="font-size:17px;color:#dfe3ea;margin-bottom:10px">No texture sets indexed yet</div>Point <code>sections.textures</code> in pharos_config.json at an image-folder library,<br>or run <code>scanner.py &lt;texture-folder&gt;</code>, then restart the server.</div>`:d.items.map(c=>{
   const badge=d.q&&c.tier===3?`<span class="badge rel">related</span>`:'';
   const media=c.thumb?`<img loading="lazy" src="${c.thumb}" alt="">`
     :`<div class="ph">${esc((c.name||'?')[0].toUpperCase())}</div>`;

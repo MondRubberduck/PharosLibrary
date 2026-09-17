@@ -1793,7 +1793,7 @@ async function load(){
  total=d.total;page=d.page;
  count.textContent=`${d.total} clip(s)`;
  for(const c of d.clips)keyByRel.set(c.rel,c.key);
- grid.innerHTML=d.clips.map(c=>{
+ grid.innerHTML=(d.total===0&&!d.q&&!sel)?`<div style="grid-column:1/-1;padding:56px 24px;text-align:center;color:#8b93a1;font-size:14px;line-height:1.7"><div style="font-size:17px;color:#dfe3ea;margin-bottom:10px">No animation packs indexed yet</div>Index your clip folders with <code>indexer.py --root &lt;library-root&gt;</code>,<br>then restart the server — previews render here automatically.</div>`:d.clips.map(c=>{
   const media=c.preview
    ?`<video src="/preview/${c.key}.webm?v=${PVV}" autoplay muted loop playsinline data-rate="${c.rate||''}"></video>`
    :`<div class="ph" data-rel="${esc(c.rel)}">&#9654;</div>`;
@@ -1837,7 +1837,11 @@ const keyByRel=new Map();   // server is the source of truth for cache keys
 let pdummy=null;
 function pgetRenderer(){if(!prenderer){
   prenderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
-  prenderer.setSize(PW,PH);prenderer.setPixelRatio(1);}return prenderer;}
+  prenderer.setSize(PW,PH);prenderer.setPixelRatio(1);
+  // recorded previews came out very dark on some GPUs: explicit tone
+  // mapping + exposure normalizes brightness across machines
+  if(THREE.ACESFilmicToneMapping!==undefined){prenderer.toneMapping=THREE.ACESFilmicToneMapping;
+   prenderer.toneMappingExposure=1.35;}}return prenderer;}
 function pgetDummy(){
  if(!pdummy){const L=new FBXLoader();
   L.setResourcePath('/res/'+encodeURIComponent('Animation/Actor/motion-dummy_male')+'/');
@@ -1887,8 +1891,9 @@ async function renderPreview(rel){
      if(m.map)m.color=new THREE.Color(0xffffff);}}});
  const scene=new THREE.Scene();
  scene.background=new THREE.Color(0x101216);
- scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.6));
- const key=new THREE.DirectionalLight(0xffffff,2.4);key.position.set(3,6,4);scene.add(key);
+ scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.9));
+ const key=new THREE.DirectionalLight(0xffffff,2.8);key.position.set(3,6,4);scene.add(key);
+ const fill=new THREE.DirectionalLight(0xcfe0ff,1.1);fill.position.set(-4,2,5);scene.add(fill);
  const holder=new THREE.Group();holder.add(root);scene.add(holder);
  if(holderHelper)holder.add(new THREE.SkeletonHelper(holderHelper));
  root.rotation.set(-Math.PI/2,0,0);   // Blender Z-up exports
@@ -2115,8 +2120,9 @@ async function makeLane(i){
  renderer.setSize(PW,PH);renderer.setPixelRatio(1);
  const scene=new THREE.Scene();
  scene.background=new THREE.Color(0x101216);
- scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.6));
- const key=new THREE.DirectionalLight(0xffffff,2.4);key.position.set(3,6,4);scene.add(key);
+ scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.9));
+ const key=new THREE.DirectionalLight(0xffffff,2.8);key.position.set(3,6,4);scene.add(key);
+ const fill=new THREE.DirectionalLight(0xcfe0ff,1.1);fill.position.set(-4,2,5);scene.add(fill);
  const dummy=await loadF(DUMMY,"Animation/Actor/motion-dummy_male");
  const bind=new Map();
  dummy.traverse(o=>{if(o.isBone||o===dummy)bind.set(o,[o.position.clone(),o.quaternion.clone(),o.scale.clone()]);});
@@ -2154,8 +2160,9 @@ async function renderPreview(rel,lane){
  fixMeshes(root);
  const scene=new THREE.Scene();
  scene.background=new THREE.Color(0x101216);
- scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.6));
- const key=new THREE.DirectionalLight(0xffffff,2.4);key.position.set(3,6,4);scene.add(key);
+ scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.9));
+ const key=new THREE.DirectionalLight(0xffffff,2.8);key.position.set(3,6,4);scene.add(key);
+ const fill=new THREE.DirectionalLight(0xcfe0ff,1.1);fill.position.set(-4,2,5);scene.add(fill);
  const holder=new THREE.Group();holder.add(root);scene.add(holder);
  if(helper)holder.add(new THREE.SkeletonHelper(helper));
  root.rotation.set(-Math.PI/2,0,0);
@@ -2432,11 +2439,16 @@ class Handler(BaseHTTPRequestHandler):
                         .replace("{{ANIM_THUMB}}",
                                  "/cimg?path=" + _pq(anim_pick.as_posix())
                                  if anim_pick is not None else
-                                 ("/thumb/" + str(anim) if anim is not None else ""))
+                                 ("/thumb/" + str(anim) if anim is not None
+                                  else "/static/heroes/animation.svg"))
                         .replace("{{ASSET_THUMB}}",
-                                 "/cimg?path=" + _pq(asset_img) if asset_img else "")
+                                 "/cimg?path=" + _pq(asset_img)
+                                 if asset_img
+                                 else "/static/heroes/assets.svg")
                         .replace("{{TEX_THUMB}}",
-                                 "/timg?path=" + _pq(tex_img) if tex_img else "")
+                                 "/timg?path=" + _pq(tex_img)
+                                 if tex_img
+                                 else "/static/heroes/textures.svg")
                         .replace("{{ANIM_CLIPS}}", str(aclips))
                         .replace("{{ANIM_FOLDERS}}", str(afold))
                         .replace("{{ASSET_PACKS}}", str(apacks))
@@ -2847,24 +2859,25 @@ def main(argv=None) -> int:
 
     build_thumb_index()
     db.init_db(_DB_PATH)   # applies schema migrations (source_url etc.)
+    c_n = t_n = a_n = m_n = 0
     try:
-        n = collection_import.import_collection(_DB_PATH)
-        print(f"collection imported: {n} assets", flush=True)
+        c_n = collection_import.import_collection(_DB_PATH)
+        print(f"collection imported: {c_n} assets", flush=True)
     except Exception as exc:  # noqa: BLE001 -- CSV missing/moved must not kill the app
         print(f"collection import skipped: {exc}", flush=True)
     try:
-        n = textures_import.import_textures(_DB_PATH)
-        print(f"textures imported: {n} sets", flush=True)
+        t_n = textures_import.import_textures(_DB_PATH)
+        print(f"textures imported: {t_n} sets", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"textures import skipped: {exc}", flush=True)
     try:
-        n = audio_import.import_audio(_DB_PATH)
-        print(f"audio imported: {n} files", flush=True)
+        a_n = audio_import.import_audio(_DB_PATH)
+        print(f"audio imported: {a_n} files", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"audio import skipped: {exc}", flush=True)
     try:
-        n = meshes_import.import_meshes(_DB_PATH)
-        print(f"meshes imported: {n} records", flush=True)
+        m_n = meshes_import.import_meshes(_DB_PATH)
+        print(f"meshes imported: {m_n} records", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"meshes import skipped: {exc}", flush=True)
     # self-heal the preview cache: drop stub/empty recordings and orphaned
@@ -2883,6 +2896,35 @@ def main(argv=None) -> int:
                 except OSError:
                     pass
     host = config.NETWORK["host"]
+    # explicit completion feedback: counts + folders nobody indexed, so a
+    # human watching the console never wonders whether it worked
+    try:
+        _c = db.connect(_DB_PATH)
+        _afold = _c.execute(
+            "SELECT COUNT(*) FROM assets WHERE id LIKE 'pack::Animation/%'"
+        ).fetchone()[0]
+        _c.close()
+    except Exception:                                     # noqa: BLE001
+        _afold = 0
+    print(f"INGESTION COMPLETE -- collection={c_n}"
+          f" textures={t_n} audio={a_n} meshes={m_n}"
+          f" anim_packs={_afold}", flush=True)
+    if config.is_configured():
+        covered = {config.ANIM_ROOT.name, config.TEX_ROOT.name,
+                   config.AUDIO_ROOT.name, config.COLLECTION_ROOT.name,
+                   config.AGENT_FILES.name}
+        covered.update(p.name for p in config.MANIFEST_ROOTS)
+        try:
+            strays = [d.name for d in config.LIBRARY_ROOT.iterdir()
+                      if d.is_dir() and not d.name.startswith((".", "_"))
+                      and d.name not in covered]
+        except OSError:
+            strays = []
+        if strays:
+            print(f"NOT INDEXED (no section claims these): "
+                  f"{', '.join(sorted(strays))}", flush=True)
+            print("  -> scan with scanner.py <folder> or edit "
+                  "pharos_config.json sections, then restart", flush=True)
     print(f"registry browser: http://{host}:{args.port}  "
           f"(db={_DB_PATH}, thumbs={len(_thumbs)})", flush=True)
     server = ThreadingHTTPServer((host, args.port), Handler)

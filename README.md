@@ -92,6 +92,10 @@ its engine) serves empty results, never errors.
 
 ## The agent contract
 
+- `docs/AGENT_PLAYBOOK.md` — the two-phase operating manual: SETUP
+  (crawl, then **interview the user** — "are these all your folders?")
+  and BUILD (the priority doctrine: on disk → use · on demand → ask ·
+  absent → model it yourself and say so; same ladder for textures)
 - `docs/CAPABILITIES.md` — the full capability matrix (what the system
   can and cannot do; the honest-limits list)
 - `AGENT_START_HERE.md` / `AGENT_API.md` — generated into your library
