@@ -1,15 +1,28 @@
-import io, json, os, sys
+import glob, io, json, os, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import library_root, section_root
 LIB = library_root() or "."
-LEA = os.path.join(LIB, "Leartes Env_ gumroad")
 MODEL_EXT = {".fbx", ".obj", ".usd", ".usda", ".usdc", ".blend", ".max"}
 
 if not os.path.isdir(LIB):
     print("library root not found: %s" % LIB)
     sys.exit(0)
+
+
+def converted_section() -> str:
+    """The section that holds CONVERTED Unreal packs -- its children carry
+    Exports/manifest.json (as opposed to the kit layout's kit_manifest.json).
+    Derived from the library instead of a hardcoded folder name.
+    """
+    for top in sorted(os.listdir(LIB)):
+        if glob.glob(os.path.join(LIB, top, "*", "Exports", "manifest.json")):
+            return os.path.join(LIB, top)
+    return ""
+
+
+LEA = os.environ.get("PHAROS_LEARTES_ROOT") or converted_section()
 
 print("=== LEARTES packs: uassets vs existing Exports ===")
 tot_new = 0
