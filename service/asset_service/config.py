@@ -113,6 +113,13 @@ TEX_MAIN = LIBRARY_ROOT / SECTIONS["textures_main"]
 AUDIO_ROOT = LIBRARY_ROOT / SECTIONS["audio"]
 COLLECTION_ROOT = LIBRARY_ROOT / SECTIONS["collection"]
 
+# Deliberate owner-default filename, kept verbatim: init.py only writes
+# `collection_csv` when the detected name DIFFERS from this literal
+# (init.py:179-183), so every config whose CSV is called this has no key at
+# all and relies on this default -- including the owner's live config.
+# Renaming it here alone would leave those installs pointing at a file that
+# does not exist; a neutral name would need an init.py change plus a config
+# migration. Reported as a documented exception, not a leftover.
 CSV_PATH = COLLECTION_ROOT / _CFG.get("collection_csv",
                                       "3D_Assets_Overview.csv")
 AVAILABILITY_JSONL = AGENT_FILES / "availability.jsonl"

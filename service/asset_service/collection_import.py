@@ -4,7 +4,9 @@ This is the ground truth for the Assets section -- detached from the
 pack indexing (the `assets`/`asset_files` tables stay the source for
 the Animation page only).
 
-CSV: <library_root>/<collection section>/3D_Assets_Overview.csv
+CSV: <library_root>/<collection section>/<collection_csv> -- the filename
+comes from config.CSV_PATH, whose default is the owner-library name
+"3D_Assets_Overview.csv" (see config.py:123 for why that default stays).
 Columns: Name, Service, Type, Seller / Author, Purchased, Price (USD),
          Product URL, Local Folder, Images
 Local Folder holds scraped product images; the first one (sorted) becomes

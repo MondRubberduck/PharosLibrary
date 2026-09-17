@@ -173,9 +173,12 @@ def build_config(report: dict, registry_dir: Path) -> dict:
     if coll_csv:
         cfg["sections"]["collection"] = Path(coll_csv).parent.name
         cfg["sections"]["collected_galleries"] = Path(coll_csv).parent.name
-    # CSV filename is currently fixed in config.CSV_PATH; record the name we
-    # found so a human/agent can align them (only 3D_Assets_Overview.csv is
-    # read today; rename your CSV or extend CSV_PATH handling to match)
+    # CSV filename: config.CSV_PATH reads `collection_csv` and defaults to
+    # "3D_Assets_Overview.csv" (config.py:123). Record the detected name only
+    # when it DIFFERS from that default -- so a config whose CSV carries the
+    # default name has no `collection_csv` key at all and depends on the code
+    # default. The literal here must therefore keep matching config.py:124;
+    # changing one without the other silently unpairs them.
     if coll_csv and Path(coll_csv).name != "3D_Assets_Overview.csv":
         cfg["collection_csv"] = Path(coll_csv).name
     if report["manifest_roots"]:
