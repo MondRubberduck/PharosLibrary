@@ -27,7 +27,7 @@ import re
 import sys
 from pathlib import Path
 import mathutils
-from mathutils import Vector, Vector as V2
+from mathutils import Vector
 
 
 def build(manifest_path: str, save_path: str = None, preview: bool = False):

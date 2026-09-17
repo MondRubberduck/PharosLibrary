@@ -25,12 +25,10 @@ import re
 import struct
 import sqlite3
 import sys
-from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-import sys as _sys
-_sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
 
 # ---------------------------------------------------------------------------
@@ -68,12 +66,6 @@ def detect_channel(filename: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # FBX bounding box extraction (binary, no dependencies)
 # ---------------------------------------------------------------------------
-
-def fbx_bbox(path: Path) -> Optional[list[float]]:
-    """DEPRECATED stub -- real FBX dimensions live in fbx_dims.fbx_bbox_m
-    (kept only so old imports do not break)."""
-    return None
-
 
 def obj_bbox(path: Path) -> Optional[list[float]]:
     """Parse OBJ vertex lines for min/max."""

@@ -1,4 +1,4 @@
-import os, sys, json, collections, datetime, struct, wave
+import collections, datetime, json, os, sys, wave
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))          # classify
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))      # _config
