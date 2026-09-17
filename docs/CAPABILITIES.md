@@ -58,8 +58,9 @@ token cost.**
 | Audio folders | `scanner.py` (WAV duration from header) or crawler `library_files.jsonl` | jsonl path additionally brings categories, keywords, sample rates |
 | Animation clip packs (FBX/BVH) | `indexer.py --root <library_root>` | builds the pack grid; previews are rendered once by the browser |
 | Purchase catalog | any CSV with Name/URL/Price-ish headers (`collection_csv` config key names it) | three-state availability via optional `availability.jsonl` |
-| Unreal `.uasset` packs | conversion pipeline (optional; needs UE 5.x) | exports FBX+textures+manifest per pack, metres @ scale 1.0, engine-exact material wiring |
-| KitBash-style `.blend` kits | conversion pipeline (optional; needs Blender) | one FBX per `_grp` assembly + `kit_manifest.json` |
+| Unreal `.uasset` packs | `pipeline/conversion/` (optional; needs UE 5.x + Git Bash) | exports FBX+textures+manifest per pack, metres @ scale 1.0, engine-exact material wiring; source libraries stay read-only (sandbox copy + tree fingerprints) |
+| KitBash-style `.blend` kits | `pipeline/kitbash/` (optional; needs Blender) | one FBX per `_grp` assembly + `kit_manifest.json` |
+| Raw FBX/OBJ/BLEND containers | `pipeline/native/` (optional; needs Blender) | Blender read-only enumeration → measured records |
 | Converted packs anywhere | list their parent dirs in `manifest_roots` config | recipes/wiring join at import; schemas `pharos.pack.export/v2` and `pharos.kb3d.export/v1` (old `kiosk.*` IDs accepted) |
 
 ## 4. Onboarding a fresh library (no crawler output at all)
