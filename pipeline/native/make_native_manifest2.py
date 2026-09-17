@@ -1,4 +1,4 @@
-import io, json, os, sys
+import glob, io, json, os, sys
 from collections import Counter
 from pathlib import Path
 
@@ -10,12 +10,31 @@ OUT = os.path.join(T, "native_manifest.json")
 BLENDS = os.path.join(T, "native_blends.txt")
 
 _cfg = load()
-SKIP_TOP = {"Animation", "_Agent_Files"} | set(_cfg.get("indexer_skip_dirs") or [])
 MODEL_EXT = {".fbx", ".obj", ".usd", ".usda", ".usdc", ".blend", ".max"}
 
 if not os.path.isdir(LIB):
     print("library root not found: %s" % LIB)
     sys.exit(0)
+
+
+def already_converted(section: str) -> bool:
+    """True for a section the pack-conversion chain already serves.
+
+    Those models arrive as thin per-mesh FBX under <pack>/Exports/ beside a
+    manifest.json, so enumerating them here again would double-count them
+    against models.jsonl and make the native pass spawn one Blender process
+    per export mesh.  KitBash3D kits write Exports/kit_manifest.json instead,
+    so they stay in scope.
+    """
+    return bool(glob.glob(os.path.join(LIB, section, "*", "Exports",
+                                       "manifest.json")))
+
+
+# never enumerate: the app's own output, the sections the app indexes itself,
+# whatever the owner's config excludes, and anything already converted
+SKIP_TOP = ({"Animation", "_Agent_Files"}
+            | set(_cfg.get("indexer_skip_dirs") or [])
+            | {top for top in os.listdir(LIB) if already_converted(top)})
 
 items = []
 for top in sorted(os.listdir(LIB)):
