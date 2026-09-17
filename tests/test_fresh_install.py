@@ -212,6 +212,13 @@ def main() -> int:
         m2 = browse.api_meshes({})
         check("scanner meshes queryable", m2["total"] == 3,
               f"total={m2['total']}")
+        # The token-bomb check above runs while the meshes table is EMPTY, so
+        # it passes with or without the guard (0 rows either way).  With rows
+        # present the guard is the only thing standing between `q=a` and the
+        # whole library (verified by mutation: guard removed -> total=3).
+        check("q=a -> 0 with rows indexed (token-bomb regression)",
+              browse.api_meshes({"q": ["a"]})["total"] == 0,
+              f"total={browse.api_meshes({'q': ['a']})['total']}")
         plate = next((i for i in m2["items"] if i["name"] == "plate"), None)
         check("plate row present", plate is not None)
         if plate:
@@ -298,13 +305,42 @@ def main() -> int:
         # 6. docs generation (fixture _Agent_Files, then clean it up)
         from asset_service import agent_docs
         paths = agent_docs.generate(dbp, repo_hint=str(REPO))
+        start_file = config.AGENT_FILES / "AGENT_START_HERE.md"
         body = paths[0].read_text(encoding="utf-8")
         check("AGENT_START_HERE generated with live counts",
               "Meshes" in body and "(2 packs)" in body)
+
+        # This check used to be `generate(...) is not []`, an identity test
+        # against a fresh list literal -- True for every possible return
+        # value.  Assert the documented behaviour instead: the previous
+        # generation moves to .md.bak-previous, and the NEXT run REPLACES
+        # that bak rather than piling up or dying on an existing file
+        # (the Windows rename->replace bug).
+        gen1_on_disk = start_file.read_text(encoding="utf-8")
         gen2 = agent_docs.generate(dbp, repo_hint=str(REPO))
         bak = config.AGENT_FILES / "AGENT_START_HERE.md.bak-previous"
+        one_bak = bak.is_file() and bak.read_text(encoding="utf-8") == gen1_on_disk
+        gen2_on_disk = start_file.read_text(encoding="utf-8")
+        gen3 = agent_docs.generate(dbp, repo_hint=str(REPO))
+        baks = list(config.AGENT_FILES.glob("AGENT_START_HERE.md.bak*"))
         check("docs regenerates (bak overwrite bug)",
-              bool(gen2) and bak.is_file())
+              bool(gen2) and bool(gen3) and one_bak and len(baks) == 1
+              and bak.read_text(encoding="utf-8") == gen2_on_disk,
+              f"baks={[b.name for b in baks]}")
+
+        # ...and a fresh install with no registry yet must get a plain,
+        # actionable message, never a sqlite3 traceback
+        cfg_now = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg_now["registry_dir"] = str(tmp / "no_such_registry")
+        cfg_path.write_text(json.dumps(cfg_now), encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(REPO / "pharos.py"), "docs"],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        out = (r.stdout or "") + (r.stderr or "")
+        check("docs without a registry fails plainly (no traceback)",
+              r.returncode == 1 and "Traceback" not in out
+              and "cannot read the registry" in out,
+              f"rc={r.returncode} out={out.strip()[-90:]!r}")
         shutil.rmtree(config.AGENT_FILES, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
