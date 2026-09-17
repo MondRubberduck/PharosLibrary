@@ -302,8 +302,8 @@ except Exception:
 PY
 )"
   if [[ -n "$SAMPLE" ]]; then
-    # pack names contain spaces ("Leartes Env_ gumroad/...") -- an unquoted
-    # $SAMPLE split on IFS and Blender was handed path fragments.
+    # pack names can contain spaces -- an unquoted $SAMPLE split on IFS and
+    # Blender was handed path fragments.
     SAMPLE="${SAMPLE//$'\r'/}"   # python heredoc output is CRLF; a trailing \r broke Blender
     mapfile -t SAMPLE_ARR <<< "$SAMPLE"
     echo "files: ${#SAMPLE_ARR[@]}"

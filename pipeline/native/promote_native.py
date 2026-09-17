@@ -1,7 +1,8 @@
 """TASK 2 -- promote the native geometry records into the agent index.
 
-Source : the 1,461 records produced by the native import pass
-         (CGTrader / TurboSquid / Mens_V1 / uploads / KitbashOrdner FBX+USD)
+Source : the records produced by the native import pass -- the importable
+         FBX/OBJ/USD containers of the library's non-converted sections
+         (native_index_*.jsonl, written by index_native_all.sh)
 Output: <library_root>/_Agent_Files/native_models.jsonl
 
 Schema is models.jsonl-compatible so an agent queries all four indexes the same way.

@@ -1,15 +1,15 @@
 """FIX: promote the .blend object enumeration into the agent-facing native index.
 
-Background: an earlier enumeration (native_index_blends.jsonl, 6,375 records) covered
-  KitbashOrdner 5,731 / CGTrader 640 / BlendFiles 4
+Background: an earlier enumeration (native_index_blends.jsonl) walked every .blend
+  under the library's top-level sections, read-only
 It was NOT promoted, on a mis-reading of the owner's instruction "do not export mesh
 from the Blendfiles, leave them be" - which was about EXPORTING/CONVERTING, not about
 knowing what exists. A .blend is the MOST Blender-native format there is, so excluding
 it was backwards.
 
-KitbashOrdner is deliberately EXCLUDED here: the 11 kits are already represented
-assembly-by-assembly in kb3d_models.jsonl (1,041 assemblies / 5,847 submeshes), so
-promoting 5,731 loose objects would double-count and confuse.
+The kit section is deliberately EXCLUDED here (see EXCLUDE_SECTIONS, resolved from the
+library at run time): its kits are already represented assembly-by-assembly in
+kb3d_models.jsonl, so promoting their loose objects would double-count and confuse.
 
 Writes the extra records into native_models.jsonl (one native index, not two).
 READ-ONLY on every .blend - nothing is opened or modified, this only re-files

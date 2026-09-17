@@ -22,14 +22,16 @@ def converted_section() -> str:
     return ""
 
 
-LEA = os.environ.get("PHAROS_LEARTES_ROOT") or converted_section()
+# PHAROS_CONVERTED_ROOT overrides the derived section (needed only when a
+# library holds more than one converted section).
+CONV = os.environ.get("PHAROS_CONVERTED_ROOT") or converted_section()
 
-print("=== LEARTES packs: uassets vs existing Exports ===")
+print("=== CONVERTED packs: uassets vs existing Exports ===")
 tot_new = 0
 new_packs = []
-lea_dirs = sorted(os.listdir(LEA)) if os.path.isdir(LEA) else []
-for d in lea_dirs:
-    p = os.path.join(LEA, d)
+pack_dirs = sorted(os.listdir(CONV)) if os.path.isdir(CONV) else []
+for d in pack_dirs:
+    p = os.path.join(CONV, d)
     if not os.path.isdir(p) or d.startswith("."):
         continue
     ua = um = 0
@@ -56,7 +58,7 @@ print("\n=== NEW (no export yet): %d ===" % tot_new)
 for n in new_packs:
     print("   " + n)
 
-print("\n=== KITBASHORDNER kits now on disk ===")
+print("\n=== .blend kits now on disk ===")
 kb = section_root("kitbash", "PHAROS_KB3D_ROOT") or os.path.join(LIB, "KitbashOrdner")
 kb_dirs = sorted(os.listdir(kb)) if os.path.isdir(kb) else []
 for d in kb_dirs:
@@ -76,6 +78,6 @@ print("\n=== Dark Medieval Environment Megapack Unity ===")
 u = os.path.join(LEA, "Dark Medieval Environment Megapack Unity")
 print("   still present:", os.path.isdir(u))
 
-print("\n=== Leartes folder summary ===")
-allf = sum(len(fn) for _, _, fn in os.walk(LEA)) if os.path.isdir(LEA) else 0
+print("\n=== converted section summary ===")
+allf = sum(len(fn) for _, _, fn in os.walk(CONV)) if os.path.isdir(CONV) else 0
 print("   total files:", allf)
