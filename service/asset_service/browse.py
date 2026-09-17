@@ -1,4 +1,4 @@
-"""Local registry browser (pulled-forward slice of Sprint 6).
+"""Local registry browser.
 
 A tiny localhost web UI over the SQLite registry so the virtual taxonomy is
 actually VISIBLE — the shared source of truth for the human AND the coding

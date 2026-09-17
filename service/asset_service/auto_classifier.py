@@ -1,4 +1,4 @@
-"""3-tier non-destructive auto-categorizer (Sprint 3).
+"""3-tier non-destructive auto-categorizer.
 
 Assigns every logical asset pack a virtual taxonomy:
     style        Photorealistic | Stylized | Neutral/Unclassified

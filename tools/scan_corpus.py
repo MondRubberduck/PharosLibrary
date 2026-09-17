@@ -232,7 +232,7 @@ def main() -> int:
         "notes": [
             "Read-only audit: no file under the root was created, modified, moved or deleted.",
             "Extension buckets are coarse; .fbx/.abc can be mesh OR animation "
-            "(Sprint 3 classifier resolves this per file).",
+            "(auto_classifier resolves this per file).",
             ".exr counted as texture; .hdr counted as hdri.",
         ],
     }

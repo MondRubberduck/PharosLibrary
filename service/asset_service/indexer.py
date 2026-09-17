@@ -1,4 +1,4 @@
-"""Non-destructive crawler + registry filler (Sprint 3).
+"""Non-destructive crawler + registry filler.
 
 Walks the canonical asset root, groups files into LOGICAL PACKS, probes
 binary headers (.uasset classes, FBX animation markers), runs the 3-tier
