@@ -301,8 +301,10 @@ def main() -> int:
         body = paths[0].read_text(encoding="utf-8")
         check("AGENT_START_HERE generated with live counts",
               "Meshes" in body and "(2 packs)" in body)
+        gen2 = agent_docs.generate(dbp, repo_hint=str(REPO))
+        bak = config.AGENT_FILES / "AGENT_START_HERE.md.bak-previous"
         check("docs regenerates (bak overwrite bug)",
-              agent_docs.generate(dbp, repo_hint=str(REPO)) is not [])
+              bool(gen2) and bak.is_file())
         shutil.rmtree(config.AGENT_FILES, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
