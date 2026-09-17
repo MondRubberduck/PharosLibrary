@@ -108,7 +108,10 @@ One JSON file (`pharos_config.json`, created by init or copied from
 `previews_dir`, `sections` (folder names per section), `agent_files`,
 `thumb_cache_dirs`, `extension_status_file`, `indexer_skip_dirs`,
 `manifest_roots`, `collection_csv`, `network`, `dashboard` curation.
-No machine-specific path exists anywhere in the code; `python pharos.py
+No owner-specific path exists anywhere in the code; the only absolute
+defaults left are version-pinned STANDARD install locations for optional
+engines (e.g. Blender 5.1 under Program Files, UE 5.7 under the Epic
+directory), every one of them env-overridable. `python pharos.py
 init` defaults the registry and previews to `~/.pharos/`. Asset files are
 never written: the only writes inside the library root are generated index
 files (`<agent_files>/`, plus `library_index.json` / `library_files.jsonl`
