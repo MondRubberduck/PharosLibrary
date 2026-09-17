@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import library_root
 LIB = library_root() or "."
 AGENT = os.path.join(LIB, "_Agent_Files")
+os.makedirs(AGENT, exist_ok=True)
 LEARTES = os.path.join(LIB, "Leartes Env_ gumroad")
 
 MODEL_EXT = {".fbx", ".obj", ".blend", ".usd", ".usda", ".usdc", ".abc",

@@ -566,11 +566,15 @@ def import_meshes(db_path: str | Path) -> int:
 
         # scanner-indexed rows (source='scan') are owned by scanner.py, not
         # by the crawler JSONLs -- this rebuild must preserve them (a fresh
-        # install without crawler output has NOTHING else in this table)
+        # install without crawler output has NOTHING else in this table).
+        # 'id' is EXCLUDED: crawler inserts restart auto-increment at 1, so
+        # re-inserting old ids collides fatally (laptop-run finding).
         scan_cols = [d[0] for d in conn.execute(
-            "SELECT * FROM meshes WHERE source='scan' LIMIT 0").description]
+            "SELECT * FROM meshes WHERE source='scan' LIMIT 0").description
+            if d[0] != "id"]
         scan_rows = [tuple(r) for r in conn.execute(
-            "SELECT * FROM meshes WHERE source='scan'")]
+            "SELECT " + ",".join(scan_cols) +
+            " FROM meshes WHERE source='scan'")]
 
         conn.execute("DELETE FROM meshes")
         conn.execute("DELETE FROM sqlite_sequence WHERE name='meshes'")

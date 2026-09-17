@@ -63,6 +63,12 @@ def _dominant(counts: dict[str, int]) -> str:
     audio = sum(counts.get(e, 0) for e in AUDIO_EXTS)
     images = sum(counts.get(e, 0) for e in IMAGE_EXTS)
     meshes = sum(counts.get(e, 0) for e in MESH_EXTS)
+    # model files present -> model folder, regardless of image counts:
+    # 3D packs ship 4-8 texture maps per mesh, so images ALWAYS outnumber
+    # meshes and a dominance rule misfiles every model pack as "textures"
+    # (laptop-run finding). Animation clips keep priority for fbx/bvh.
+    if meshes > 0 and meshes >= clips:
+        return "meshes"
     best = max(clips, audio, images, meshes)
     if best == 0:
         return ""
@@ -121,16 +127,25 @@ def detect(root: Path) -> dict:
     # (fresh libraries nest packs under category folders like "UE Packs/")
     manifest_parents = set()
     mroots = set()
-    for pat in ("Exports/manifest.json", "Exports/kit_manifest.json"):
+    kit_roots = set()
+    for pat, is_kit in (("Exports/manifest.json", False),
+                        ("Exports/kit_manifest.json", True)):
         for p in root.rglob(pat):
             manifest_parents.add(p.parent.parent.name)
             mroots.add(p.parent.parent.parent)   # dir CONTAINING the pack
+            if is_kit:
+                kit_roots.add(p.parent.parent.parent)
     # keep only the shallowest roots (a root inside another root is noise)
     mroots = {r for r in mroots
               if not any(o != r and r.is_relative_to(o) for o in mroots)}
     if manifest_parents:
         report["manifest_roots"] = sorted(str(r) for r in mroots)
         report["manifest_packs_found"] = sorted(manifest_parents)
+    if kit_roots:
+        kits = {r for r in kit_roots
+                if not any(o != r and r.is_relative_to(o)
+                           for o in kit_roots)}
+        report["kitbash_root"] = sorted(str(r) for r in kits)[0]
 
     report["catalog_csvs"] = [str(p) for p in _find_catalog_csvs(root)]
     return report
@@ -165,6 +180,8 @@ def build_config(report: dict, registry_dir: Path) -> dict:
         cfg["collection_csv"] = Path(coll_csv).name
     if report["manifest_roots"]:
         cfg["manifest_roots"] = list(report["manifest_roots"])
+    if report.get("kitbash_root"):
+        cfg["kitbash_root"] = report["kitbash_root"]
     return cfg
 
 
@@ -250,6 +267,10 @@ def run_init(argv=None) -> int:
         print(f"  NOT INDEXED (matched no section): {', '.join(not_indexed)}")
         print("    -> point a section at them in pharos_config.json, "
               "or scan them with scanner.py")
+    if picks.get("animation"):
+        print(f"  animation     : run indexer.py to index the clip packs ->"
+              f" python service/asset_service/indexer.py"
+              f" --root \"{root}\"")
     print("-" * 67)
 
     # questions the RUNNING AGENT must relay to its user before building

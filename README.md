@@ -49,6 +49,8 @@ cd PharosLibrary
 
 # 1. Point it at your asset folders (auto-detects sections)
 python pharos.py init "D:/path/to/your/assets"
+#    config lands at service/asset_service/pharos_config.json
+#    (pharos_config.example.json in the repo root is only a template)
 
 # 2. Start the server
 python pharos.py serve

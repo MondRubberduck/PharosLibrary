@@ -138,17 +138,38 @@ def try_trimesh(path: Path) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def wav_duration(path: Path) -> Optional[float]:
+    """Duration via a proper RIFF chunk walk. A fixed 44-byte header
+    breaks on BEXT/LIST/cue metadata chunks (offset 40 then holds chunk
+    headers, not the data size -- laptop-run found 8628s for a 2s hit)."""
     try:
         with open(path, "rb") as f:
-            hdr = f.read(44)
-            if len(hdr) < 44 or hdr[:4] != b"RIFF":
+            hdr = f.read(12)
+            if len(hdr) < 12 or hdr[:4] != b"RIFF" or hdr[8:12] != b"WAVE":
                 return None
-            rate = struct.unpack_from("<I", hdr, 24)[0]
-            data_size = struct.unpack_from("<I", hdr, 40)[0]
-            channels = struct.unpack_from("<H", hdr, 22)[0]
+            rate = channels = bits = 0
+            data_size = None
+            while True:
+                ch = f.read(8)
+                if len(ch) < 8:
+                    break
+                cid = ch[:4]
+                (csz,) = struct.unpack("<I", ch[4:8])
+                if cid == b"fmt ":
+                    body = f.read(min(csz, 16))
+                    if len(body) >= 14:
+                        channels = struct.unpack_from("<H", body, 2)[0]
+                        rate = struct.unpack_from("<I", body, 4)[0]
+                        bits = struct.unpack_from("<H", body, 14)[0] or 16
+                    f.seek(csz - min(csz, 16), 1)
+                elif cid == b"data":
+                    data_size = csz
+                    break                       # enough for duration
+                else:
+                    f.seek(csz + (csz & 1), 1)   # pad byte + LIST/BEXT skip
+            if data_size is None:
+                return None
             if rate == 0 or channels == 0:
                 return None
-            bits = struct.unpack_from("<H", hdr, 34)[0] or 16
             bytes_per_frame = channels * (bits // 8)
             if bytes_per_frame == 0:
                 return None

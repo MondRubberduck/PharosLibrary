@@ -150,12 +150,23 @@ def check_paths(data: dict) -> list[str]:
         if fbx and not Path(fbx).is_file():
             missing.append(f"assets[{i}] ('{a.get('id', '?')}'): FBX not found: {fbx}")
         mats = a.get("materials") or {}
-        for role, path in mats.items():
-            if role == "packed_channels":
-                continue
-            if path and not Path(path).is_file():
-                missing.append(
-                    f"assets[{i}].materials.{role}: not found: {path}")
+        if isinstance(mats, dict) and isinstance(mats.get("slots"), list):
+            # per-slot schema (recipe.slots[]): maps live under
+            # slots[].maps[].file -- flat traversal crashed on the list
+            for si, slot in enumerate(mats["slots"]):
+                for mi, m in enumerate(slot.get("maps") or []):
+                    mp = m.get("file")
+                    if mp and not Path(mp).is_file():
+                        missing.append(
+                            f"assets[{i}].materials.slots[{si}].maps[{mi}]"
+                            f" ({m.get('role', '?')}): not found: {mp}")
+        elif isinstance(mats, dict):
+            for role, path in mats.items():
+                if role == "packed_channels":
+                    continue
+                if path and not Path(path).is_file():
+                    missing.append(
+                        f"assets[{i}].materials.{role}: not found: {path}")
     for i, t in enumerate(data.get("textures", [])):
         folder = t.get("folder", "")
         if folder and not Path(folder).is_dir():

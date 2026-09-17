@@ -74,6 +74,25 @@ def build_fixture(root: Path) -> None:
     with wave.open(str(root / "Audio_Assets" / "Alarms" / "beep.wav"), "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
         w.writeframes(b"\x00\x00" * 8000)          # 1.0 s
+    # WAV with a metadata (LIST) chunk before data -- the naive 44-byte
+    # header read reported 8628s for a 2s file on the laptop run
+    info = b"INFOIART" + struct.pack("<I", 5) + b"test\x00"
+    if len(info) & 1:
+        info += b"\x00"
+    fmt = struct.pack("<HHIIHH", 1, 1, 8000, 16000, 2, 16)
+    frames = b"\x11\x22" * 16000                   # 2.0 s
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
+    body += b"LIST" + struct.pack("<I", len(info)) + info
+    body += b"data" + struct.pack("<I", len(frames)) + frames
+    (root / "Audio_Assets" / "Alarms" / "meta.wav").write_bytes(
+        b"RIFF" + struct.pack("<I", len(body)) + body)
+    # classic CGTrader-style product: 1 model + 6 texture maps
+    dl = root / "Downloads" / "Widget"
+    dl.mkdir(parents=True)
+    (dl / "widget.obj").write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+                                   encoding="utf-8")
+    for i in range(6):
+        (dl / f"map{i}.png").write_bytes(b"\x89PNG")
     models = root / "MyModels"
     models.mkdir(parents=True)
     (models / "plate.fbx").write_bytes(_min_fbx())
@@ -165,11 +184,10 @@ def main() -> int:
         conn.close()
         check("collection imports", collection_import.import_collection(dbp) == 1)
         check("textures import", textures_import.import_textures(dbp) >= 1)
-        try:
-            audio_import.import_audio(dbp, root=lib / "Nope")
-            check("missing audio index raises", False)
-        except FileNotFoundError:
-            check("missing audio index raises loudly", True)
+        # no crawl jsonl -> returns the kept-row count, wipes nothing
+        # (laptop-run finding: this used to raise AFTER deleting)
+        check("missing audio index keeps table",
+              audio_import.import_audio(dbp, root=lib / "Nope") == 0)
         meshes_import.import_meshes(dbp)   # must not wipe/lock anything
 
         # 3. API surface: empty mesh/audio sections serve zero, not errors
@@ -209,10 +227,38 @@ def main() -> int:
         m3 = browse.api_meshes({})
         check("scan rows survive rebuild", m3["total"] == 3)
 
+        # 5a. crawler rows + scan rows across TWO rebuilds (laptop-run
+        # finding: preserving scan rows WITH their ids collided fatally
+        # with crawler auto-increment ids on the second import)
+        af = lib / "_Agent_Files"
+        af.mkdir(exist_ok=True)
+        recs = [{"name": "FixtureCrate", "pack": "FixturePack", "source": "leartes",
+                 "fbx": str(lib / "MyModels" / "crate.obj"), "exists": True,
+                 "triangles": 1, "vertices": 3, "bbox_m": [2.0, 1.0, 0.0],
+                 "materials": [], "texture_files": []}]
+        (af / "models.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in recs) + "\n", encoding="utf-8")
+        meshes_import.import_meshes(dbp)
+        meshes_import.import_meshes(dbp)      # the collision case
+        m4 = browse.api_meshes({})
+        check("crawler + scan rows stable across double rebuild",
+              m4["total"] == 4, f"total={m4['total']}")
+        srcs = {i["source"] for i in m4["items"]}
+        check("both sources present after double rebuild",
+              "scan" in srcs and "leartes" in srcs, str(srcs))
+
+        # 5c. A5: scanner audio keeps the folder taxonomy
+        r = subprocess.run(
+            [sys.executable, str(REPO / "service/asset_service/scanner.py"),
+             str(lib / "Audio_Assets")], capture_output=True, text=True,
+            cwd=str(REPO), timeout=120)
+        check("scanner audio exit 0", r.returncode == 0,
+              (r.stderr or "")[-100:])
+
         # 5b. A3+A4: importers must run as DIRECT SCRIPTS on a fresh
         # registry dir (go-live finding: NameError / unable-to-open-db).
-        # audio_import is the documented exception: it raises loudly when
-        # the crawl jsonl is absent -- a clear failure, never a crash.
+        # audio_import without a crawl jsonl now KEEPS scanner rows
+        # (laptop-run finding: it used to wipe the table, then fail).
         for mod in ("meshes_import.py", "textures_import.py",
                     "collection_import.py"):
             r = subprocess.run(
@@ -225,30 +271,36 @@ def main() -> int:
             [sys.executable,
              str(REPO / "service/asset_service" / "audio_import.py"), dbp],
             capture_output=True, text=True, cwd=str(REPO), timeout=120)
-        check("direct-script audio_import fails loudly (no jsonl)",
-              r.returncode != 0 and "FileNotFoundError" in (r.stderr or ""),
-              (r.stderr or "")[-80:])
+        a_kept = browse.api_audio_items({"q": [""]})["total"]
+        check("audio_import no-jsonl: exit 0, keeps scanner rows",
+              r.returncode == 0 and "keeping" in (r.stdout or "")
+              and a_kept >= 1,
+              f"rc={r.returncode} kept={a_kept}")
 
-        # 5c. A5: scanner audio keeps the folder taxonomy
-        r = subprocess.run(
-            [sys.executable, str(REPO / "service/asset_service/scanner.py"),
-             str(lib / "Audio_Assets")], capture_output=True, text=True,
-            cwd=str(REPO), timeout=120)
-        check("scanner audio exit 0", r.returncode == 0,
-              (r.stderr or "")[-100:])
         a2 = browse.api_audio_items({"q": [""]})
-        check("A5: audio indexed from folders", a2["total"] >= 1,
+        check("A5: audio indexed from folders", a2["total"] >= 2,
               f"total={a2['total']}")
         cats = {i.get("cat") for i in a2["items"]}
         check("A5: folder taxonomy preserved (cat=Alarms)",
               "Alarms" in cats, str(cats))
+        meta = next((i for i in a2["items"] if i["name"] == "meta"), None)
+        check("F9: LIST-chunk WAV duration correct (~2.0s)",
+              meta is not None and meta.get("dur")
+              and abs(meta["dur"] - 2.0) < 0.05,
+              f"dur={meta.get('dur') if meta else None}")
+
+        # 5d. F3: model files beat image counts in the census
+        det2 = pharos_init.detect(lib)
+        check("F3: CGTrader-style folder classified as model folder",
+              "Downloads" in det2["mesh_folders"],
+              str(det2["mesh_folders"]))
 
         # 6. docs generation (fixture _Agent_Files, then clean it up)
         from asset_service import agent_docs
         paths = agent_docs.generate(dbp, repo_hint=str(REPO))
         body = paths[0].read_text(encoding="utf-8")
         check("AGENT_START_HERE generated with live counts",
-              "Meshes" in body and "(1 packs)" in body)
+              "Meshes" in body and "(2 packs)" in body)
         check("docs regenerates (bak overwrite bug)",
               agent_docs.generate(dbp, repo_hint=str(REPO)) is not [])
         shutil.rmtree(config.AGENT_FILES, ignore_errors=True)

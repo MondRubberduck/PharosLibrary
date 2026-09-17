@@ -78,6 +78,14 @@ def build(manifest_path: str, save_path: str = None, preview: bool = False):
                 print("    WARNING: audio file not found: %s" % af)
         print("  (Audio documented but not auto-imported yet)")
 
+    # drop orphaned image/material datablocks (dead kit references that
+    # were replaced leave hundreds of unassigned 0x0 images behind)
+    try:
+        bpy.data.orphans_purge(do_local_ids=True, do_linked_ids=False,
+                               do_recursive=True)
+    except Exception as exc:                              # noqa: BLE001
+        print(f"  (orphan purge skipped: {exc})")
+
     # --- save ---
     if not save_path:
         save_path = Path(manifest_path).with_suffix(".blend")
@@ -383,11 +391,44 @@ def _remap_dead_kb3d_images():
             continue
         kit_dir = p.parents[seg + 1] if seg + 1 < len(p.parents) else None
         kit = p.parents[seg].name.split(".blender.native")[0]
-        if kit_dir is None:
-            continue
-        cand = kit_dir / f"{kit}.png.2k" / p.name
-        if cand.is_file():
-            img.filepath = str(cand)
+        # the FBX records the library-of-origin path; when the library
+        # lives elsewhere (copied drive, new machine) that dir does not
+        # exist -> fall back to the configured kitbash/library roots
+        candidates = []
+        if kit_dir is not None:
+            candidates.append(kit_dir / f"{kit}.png.2k" / p.name)
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from asset_service import config as _cfg
+            _c = _cfg.load()
+            for key in ("kitbash_root", "library_root"):
+                if _c.get(key):
+                    candidates.append(
+                        Path(_c[key]) / f"{kit}.png.2k" / p.name)
+        except Exception:
+            pass
+        hit = next((c for c in candidates if c.is_file()), None)
+        if hit is None and kit_dir is not None:
+            # last resort: bounded search for the kit folder anywhere
+            # under the kitbash root (copied libraries rename parents)
+            try:
+                import sys as _sys2
+                _sys2.path.insert(
+                    0, str(Path(__file__).resolve().parents[1]))
+                from asset_service import config as _cfg2
+                _kr = _cfg2.load().get("kitbash_root")
+                if _kr:
+                    for found in Path(_kr).glob(
+                            f"**/kb3d_{kit}.png.2k"):
+                        cand = found / p.name
+                        if cand.is_file():
+                            hit = cand
+                            break
+            except Exception:
+                pass
+        if hit is not None:
+            img.filepath = str(hit)
             fixed += 1
     if fixed:
         print(f"    remapped {fixed} dead KitBash texture reference(s) "

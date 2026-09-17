@@ -80,6 +80,9 @@ the library does not cover a need, COVER IT, and say so.
 
 ### Build mechanics (unchanged)
 
+- **Blender is not on PATH by default on Windows** — use the absolute
+  path (`"C:\Program Files\Blender Foundation\Blender 5.x\blender.exe"`)
+  or add it to PATH yourself.
 - Query first (`/api/meshes`, `/api/textures/items`, …), author a
   `pharos.scene/v1` manifest (Y-up rotations, per-slot recipes via
   `recipe.slots[]`, `textures[]` for ground planes), validate +

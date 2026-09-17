@@ -132,6 +132,14 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(AUDIO_DDL)
+        # no crawler jsonl -> this importer owns NOTHING; scanner-indexed
+        # rows must survive a restart (previously the DELETE below ran
+        # first and the later open() failure could take them with it)
+        if not JSONL.is_file():
+            kept = conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]
+            print(f"audio import: no crawl index ({JSONL}) -- keeping "
+                  f"{kept} scanner-indexed row(s)")
+            return kept
         conn.execute("DELETE FROM audio")
         conn.execute("DELETE FROM sqlite_sequence WHERE name='audio'")
 
