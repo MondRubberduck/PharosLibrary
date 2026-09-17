@@ -1,6 +1,14 @@
 # Pharos MCP Setup
 
-Add to your MCP client (Claude Desktop, Cursor, etc.):
+Optional: the HTTP API is the primary surface; MCP is a convenience for
+clients that prefer native tools. **Blender needs NO MCP server, NO
+plugin, nothing** — scene builds run headless via
+`blender --background --factory-startup --python scene_builder.py`.
+This config is only for YOUR agent client (Claude Desktop, Cursor, …).
+
+The server resolves its own paths, so the working directory does not
+matter — `python` must simply find the repo. If plain `python` is not
+on PATH, use the absolute interpreter path.
 
 ## Claude Desktop / claude_desktop_config.json
 
@@ -10,7 +18,7 @@ Add to your MCP client (Claude Desktop, Cursor, etc.):
     "pharos": {
       "command": "python",
       "args": ["-m", "service.pharos_mcp_server"],
-      "cwd": "C:/path/to/pharos"
+      "cwd": "C:/path/to/PharosLibrary"
     }
   }
 }
@@ -23,11 +31,21 @@ Add to your MCP client (Claude Desktop, Cursor, etc.):
   "mcpServers": {
     "pharos": {
       "command": "python",
-      "args": ["-m", "service.pharos_mcp_server", "--cwd", "C:/path/to/pharos"]
+      "args": ["-m", "service.pharos_mcp_server"],
+      "env": { "PYTHONPATH": "C:/path/to/PharosLibrary" }
     }
   }
 }
 ```
+
+(If your client supports a `cwd` key, you may use it instead of
+`PYTHONPATH`.)
+
+## Windows notes
+
+- In PowerShell, `curl` is an alias for `Invoke-WebRequest` and the
+  documented `-s` flags hang — use `curl.exe` or the Python one-liner:
+  `python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8765/api/stats').read()[:200])"`.
 
 ## Available tools
 
@@ -50,3 +68,6 @@ Add to your MCP client (Claude Desktop, Cursor, etc.):
    opening the manifest.
 5. The collection tool shows `availability: local` (use now) vs
    `owned-not-downloaded` (ask the human to download).
+6. MCP filters are simpler than the HTTP stack — prefer the HTTP API
+   (`http://127.0.0.1:8765`, see the generated `AGENT_API.md`) for
+   nuanced queries.

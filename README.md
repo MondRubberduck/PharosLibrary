@@ -66,7 +66,8 @@ Then tell your coding agent:
 > "Read `<your-library-root>/_Agent_Files/AGENT_START_HERE.md`, then use
 > the HTTP API at http://127.0.0.1:8765 to find assets."
 
-Or connect via MCP (`pip install "mcp<2"`, see `docs/MCP_SETUP.md`):
+Or connect via MCP (`pip install "mcp<2"`, see `docs/MCP_SETUP.md`;
+Blender itself needs **no** plugin or MCP — the builder runs headless):
 
 ```json
 { "mcpServers": { "pharos": {

@@ -148,6 +148,10 @@ the configured roots — outside paths return 404/403.
 | `/api/anim/tree` | — | folders + counts |
 | `/api/stats` | — | `stats` (legacy packs) + `sections` (live totals) |
 
+(Windows PowerShell: `curl` is aliased to `Invoke-WebRequest` and the
+`-s` flags hang — use `curl.exe`, or
+`python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8765/api/stats').read()[:200])"`. HEAD requests work for link checks.)
+
 ## B. Mesh item fields (the ones that matter)
 
 `fbx`/`fbx_path` absolute path · `bbox_m` [x,y,z] extents in metres ·

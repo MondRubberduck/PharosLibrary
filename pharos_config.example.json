@@ -14,6 +14,8 @@
   "thumb_cache_dirs": [],
   "extension_status_file": "",
   "indexer_skip_dirs": [],
+  "collection_csv": "3D_Assets_Overview.csv",
+  "kitbash_root": "",
   "manifest_roots": [
     "C:/path/to/your/asset/library/converted_packs"
   ],

@@ -7,7 +7,8 @@ limited, it says so under "Limits".
 
 The one-line pitch: **an agent queries Pharos instead of walking the
 filesystem, and answers asset questions in seconds at a fraction of the
-token cost.**
+token cost.** Operating manual (setup + build doctrine):
+`AGENT_PLAYBOOK.md` in this folder.
 
 ---
 
@@ -92,8 +93,10 @@ token cost.**
   buildings keep their slots), **repoints dead KitBash texture
   references** at the shipped `.png.2k` folder, applies
   `manifest.textures[]` as ground planes, places crowd with real
-  per-instance animation stagger. Runs: `blender --background --python
-  scene_builder.py -- manifest.json`.
+  per-instance animation stagger. Runs:
+  `blender --background --factory-startup --python scene_builder.py
+  -- manifest.json` (`--factory-startup` is REQUIRED: user Blender
+  extensions can segfault headless runs).
 - `verify_importable.py` — one-file-per-process Blender import probe: an
   FBX that hard-crashes Blender's importer (exit 0xC0000005) becomes a
   five-second answer instead of a debugging session.
