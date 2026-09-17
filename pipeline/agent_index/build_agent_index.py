@@ -16,6 +16,7 @@ Re-runnable at any time; safe to run while a conversion batch is in progress
 """
 import io, os, json, datetime, collections
 
+import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import library_root
@@ -66,17 +67,20 @@ def read_manifest(exports_dir):
 packs = []
 for name in sorted(os.listdir(LIB)):
     d = os.path.join(LIB, name)
-    if not os.path.isdir(d):
+    if not os.path.isdir(d) or name.startswith((".", "_")):
         continue
-    if name in ("kiosk_data", "Kiosk_zCode"):
-        packs.append({"section": name, "pack": name, "path": d,
-                      "delivery_state": "not-assets",
-                      "note": "pipeline scratch that lives inside the asset root by accident"})
-        continue
-
-    if name == "Leartes Env_ gumroad":
-        candidates = [(s, os.path.join(d, s)) for s in sorted(os.listdir(d))
-                      if os.path.isdir(os.path.join(d, s)) and not s.startswith(".")]
+    # generic one-level expansion: if this folder's children carry Exports
+    # dirs, each child is a pack (nested category layouts); otherwise the
+    # folder itself is the pack candidate
+    try:
+        kids = [s for s in sorted(os.listdir(d))
+                if os.path.isdir(os.path.join(d, s)) and not s.startswith(".")]
+    except OSError:
+        kids = []
+    kid_packs = [s for s in kids
+                 if os.path.isdir(os.path.join(d, s, "Exports"))]
+    if kid_packs:
+        candidates = [(s, os.path.join(d, s)) for s in kid_packs]
     else:
         candidates = [(name, d)]
 

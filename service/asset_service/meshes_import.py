@@ -31,6 +31,8 @@ import os
 import re
 import sqlite3
 from pathlib import Path
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
 
 AGENT_FILES = config.AGENT_FILES
@@ -306,7 +308,7 @@ def _iter_manifests():
     for root in MANIFEST_ROOTS:
         if not root.is_dir():
             continue
-        for path in sorted(root.glob("*/Exports/manifest.json")):
+        for path in sorted(root.rglob("Exports/manifest.json")):
             try:
                 doc = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -314,7 +316,7 @@ def _iter_manifests():
             pack = doc.get("pack") or path.parent.parent.name
             yield pack, "leartes", path.parent, doc, \
                 doc.get("schema") in (LEARTES_SCHEMA, LEARTES_SCHEMA_LEGACY)
-        for path in sorted(root.glob("*/Exports/kit_manifest.json")):
+        for path in sorted(root.rglob("Exports/kit_manifest.json")):
             try:
                 doc = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -553,6 +555,7 @@ INSERT_SQL = (
 
 def import_meshes(db_path: str | Path) -> int:
     db_path = Path(db_path)
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:

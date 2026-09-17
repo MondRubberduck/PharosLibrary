@@ -1,5 +1,6 @@
 from pathlib import Path
 import os, json
+import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import section_root
 ROOT = section_root("textures", "AGENT_TEX_ROOT")

@@ -80,6 +80,12 @@ def build_fixture(root: Path) -> None:
     obj = "v 0 0 0\nv 2 0 0\nv 0 1 0\nf 1 2 3\n"
     (models / "crate.obj").write_text(obj, encoding="utf-8")
     (models / "lid.obj").write_text(obj, encoding="utf-8")
+    # NESTED pack layout (go-live finding A1: "UE Packs/<pack>/Exports/")
+    deep = root / "UE Packs" / "TestPack" / "Exports"
+    deep.mkdir(parents=True)
+    (deep / "manifest.json").write_text(json.dumps({
+        "schema": "pharos.pack.export/v2", "pack": "TestPack",
+        "meshes": []}), encoding="utf-8")
     (root / "Collected Files").mkdir(parents=True)
     (root / "Collected Files" / "purchases.csv").write_text(
         "Name,Product URL,Price (USD)\nOld Mill,https://example.com/m,9.99\n",
@@ -139,6 +145,15 @@ def main() -> int:
         check("is_configured", config.is_configured())
         check("init detected model folder hint",
               "MyModels" in pharos_init.detect(lib)["mesh_folders"])
+        det = pharos_init.detect(lib)
+        check("A1: nested pack discovered",
+              "TestPack" in det.get("manifest_packs_found", []),
+              str(det.get("manifest_packs_found")))
+        check("A1: manifest root = the nested parent dir",
+              str(lib / "UE Packs") in det.get("manifest_roots", []),
+              str(det.get("manifest_roots")))
+        check("A1: config carries the manifest root",
+              str(lib / "UE Packs") in cfg.get("manifest_roots", []))
 
         # 2. importers on a fresh registry (degradation path)
         from asset_service import db, collection_import, textures_import, \
@@ -193,6 +208,40 @@ def main() -> int:
         meshes_import.import_meshes(dbp)
         m3 = browse.api_meshes({})
         check("scan rows survive rebuild", m3["total"] == 3)
+
+        # 5b. A3+A4: importers must run as DIRECT SCRIPTS on a fresh
+        # registry dir (go-live finding: NameError / unable-to-open-db).
+        # audio_import is the documented exception: it raises loudly when
+        # the crawl jsonl is absent -- a clear failure, never a crash.
+        for mod in ("meshes_import.py", "textures_import.py",
+                    "collection_import.py"):
+            r = subprocess.run(
+                [sys.executable,
+                 str(REPO / "service/asset_service" / mod), dbp],
+                capture_output=True, text=True, cwd=str(REPO), timeout=120)
+            check(f"direct-script {mod}", r.returncode == 0,
+                  (r.stderr or "")[-100:])
+        r = subprocess.run(
+            [sys.executable,
+             str(REPO / "service/asset_service" / "audio_import.py"), dbp],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        check("direct-script audio_import fails loudly (no jsonl)",
+              r.returncode != 0 and "FileNotFoundError" in (r.stderr or ""),
+              (r.stderr or "")[-80:])
+
+        # 5c. A5: scanner audio keeps the folder taxonomy
+        r = subprocess.run(
+            [sys.executable, str(REPO / "service/asset_service/scanner.py"),
+             str(lib / "Audio_Assets")], capture_output=True, text=True,
+            cwd=str(REPO), timeout=120)
+        check("scanner audio exit 0", r.returncode == 0,
+              (r.stderr or "")[-100:])
+        a2 = browse.api_audio_items({"q": [""]})
+        check("A5: audio indexed from folders", a2["total"] >= 1,
+              f"total={a2['total']}")
+        cats = {i.get("cat") for i in a2["items"]}
+        check("A5: folder taxonomy preserved (cat=Alarms)",
+              "Alarms" in cats, str(cats))
 
         # 6. docs generation (fixture _Agent_Files, then clean it up)
         from asset_service import agent_docs

@@ -117,13 +117,19 @@ def detect(root: Path) -> dict:
             # mixed (converted packs are .uasset + .fbx + .png)
             report["unknown"].append(child.name)
 
-    # manifest roots: any child carrying an Exports/manifest.json
+    # manifest roots: packs carrying Exports/manifest.json at ANY depth
+    # (fresh libraries nest packs under category folders like "UE Packs/")
     manifest_parents = set()
-    for pat in ("*/Exports/manifest.json", "*/Exports/kit_manifest.json"):
-        for p in root.glob(pat):
+    mroots = set()
+    for pat in ("Exports/manifest.json", "Exports/kit_manifest.json"):
+        for p in root.rglob(pat):
             manifest_parents.add(p.parent.parent.name)
+            mroots.add(p.parent.parent.parent)   # dir CONTAINING the pack
+    # keep only the shallowest roots (a root inside another root is noise)
+    mroots = {r for r in mroots
+              if not any(o != r and r.is_relative_to(o) for o in mroots)}
     if manifest_parents:
-        report["manifest_roots"].append(root.name)
+        report["manifest_roots"] = sorted(str(r) for r in mroots)
         report["manifest_packs_found"] = sorted(manifest_parents)
 
     report["catalog_csvs"] = [str(p) for p in _find_catalog_csvs(root)]
@@ -158,7 +164,7 @@ def build_config(report: dict, registry_dir: Path) -> dict:
     if coll_csv and Path(coll_csv).name != "3D_Assets_Overview.csv":
         cfg["collection_csv"] = Path(coll_csv).name
     if report["manifest_roots"]:
-        cfg["manifest_roots"] = [str(root)]
+        cfg["manifest_roots"] = list(report["manifest_roots"])
     return cfg
 
 

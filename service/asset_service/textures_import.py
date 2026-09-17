@@ -17,6 +17,8 @@ import json
 import re
 import sqlite3
 from pathlib import Path
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
 
 TEX_ROOT = config.TEX_ROOT
@@ -195,6 +197,7 @@ def _record_from_dir(d: Path, grp: str, sub: str) -> dict | None:
 
 def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
     db_path = Path(db_path)
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:

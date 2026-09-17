@@ -13,6 +13,7 @@ Reads the human app's registry READ-ONLY. Writes only into _Agent_Files.
 import sqlite3, os, re, io, json, collections, datetime
 
 DB = r"D:\Pipeline\kiosk\registry\assets.sqlite"
+import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import library_root

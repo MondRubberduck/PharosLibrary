@@ -176,6 +176,8 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
 
     conn = None
     if not dry_run:
+        Path(db_path or config.DB_PATH).parent.mkdir(parents=True,
+                                                    exist_ok=True)
         conn = sqlite3.connect(db_path or config.DB_PATH)
         conn.row_factory = sqlite3.Row
         # a fresh install may run the scanner BEFORE the server ever
@@ -366,10 +368,14 @@ def _insert_texture_set(conn, stem, files, channels, folder):
 
 def _insert_audio(conn, af, duration, folder):
     rel = af.relative_to(folder).as_posix()
+    # folder taxonomy beats a generic label: Impacts/Metal/x.wav ->
+    # cat "Impacts", sub "Metal"; loose root files fall back to SFX
+    parts = Path(rel).parts
     conn.execute(
         "INSERT OR REPLACE INTO audio (name,cat,sub,rel,ext,bytes,dur,sr,ch,"
         "playable,desc,tags,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (af.stem, folder.name, "Scanned", rel, af.suffix.lower(),
+        (af.stem, parts[0] if len(parts) >= 2 else "SFX",
+     parts[1] if len(parts) >= 3 else "", rel, af.suffix.lower(),
          af.stat().st_size, duration, 0, 0,
          1 if af.suffix.lower() != ".aif" else 0, "",
          json.dumps([af.stem.lower()]),
