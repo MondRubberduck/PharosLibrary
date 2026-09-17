@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests (db schema round-trip, uasset parser)
+        run: |
+          python -B tests/test_db.py
+          python -B tests/test_uasset_parser.py
+      - name: Fresh-install smoke (init -> importers -> API -> scanner -> docs)
+        run: python -B tests/test_fresh_install.py

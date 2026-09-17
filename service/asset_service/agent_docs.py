@@ -196,7 +196,7 @@ def generate(db_path: str | None = None, repo_hint: str | None = None) -> list[P
     for name, body in (("AGENT_START_HERE.md", start), ("AGENT_API.md", api)):
         p = target / name
         if p.is_file():                      # keep one generation of history
-            p.rename(p.with_suffix(".md.bak-previous"))
+            p.replace(p.with_suffix(".md.bak-previous"))   # overwrites old bak
         p.write_text(body, encoding="utf-8")
         paths.append(p)
     return paths

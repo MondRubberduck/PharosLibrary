@@ -3,97 +3,123 @@
 **A local asset-intelligence server for coding agents.**
 
 Point it at any folder of 3D assets, textures, audio, or animations. It
-indexes everything into a queryable SQLite database and serves a rich HTTP
-API that coding agents (Claude, GPT, Cursor, any MCP client) can use to
-find, filter, and select assets by real-world dimensions, materials,
-themes, and availability — **without reading a single file from disk**.
+indexes everything into a queryable SQLite registry and serves an HTTP
+API + dashboard that coding agents (Claude, GPT, Cursor, any MCP client)
+use to find, filter, and select assets by real-world dimensions,
+materials, themes, and availability — **without reading a single file
+from disk**.
 
-```
-  Animations        Assets              Textures           Audio
-  1,313 clips       259 purchases       2,377 PBR sets     4,737 sounds
-  live 3D preview   galleries + links   4K maps            click to play
-```
+> *"Find me a door between 1.8 and 2.4 metres with textures"* →
+> structured JSON with absolute paths, triangle counts, material
+> recipes, and a 3D preview URL. In seconds.
+
+## Why: agents burn tokens crawling filesystems
+
+Measured on a 446 GiB / 92k-file library (three independent end-to-end
+dry runs plus an external QA agent):
+
+| | With Pharos API | Filesystem crawling | Saving |
+|---|---|---|---|
+| Tool calls per scene | ~320 | ~1,610 | **5×** |
+| Content tokens per scene | ~1.3 M | ~9.5 M | **~86%** |
+| Wall clock per scene | 1.5–3 h | 14–24 h | **~8×** |
+| Novel-scene discovery* | 6–9 calls / 16–24k tokens | 35–50 calls / 180–250k tokens | **~90%** |
+
+\* building a scene type that does not exist as a folder in the
+library (a Brazilian favela), routing across four asset sections —
+the generalization proof. An independent QA agent's own measurement of
+the geometry battery: ~14k tokens via the API vs 1.2 M+ for directory
+listings alone, before any binary parsing (~98.8%).
+
+## Screenshots
+
+| Dashboard | Textures |
+|---|---|
+| ![dashboard](docs/screenshots/dashboard.png) | ![textures](docs/screenshots/textures.png) |
+
+| Animations (self-rendered previews) | 3D viewer (three.js) |
+|---|---|
+| ![animations](docs/screenshots/animations.png) | ![viewer](docs/screenshots/viewer.png) |
 
 ## Quick start
 
 ```bash
-# 1. Clone and configure
 git clone https://github.com/MondRubberduck/PharosLibrary.git
 cd PharosLibrary
 
-# 2. Point it at your asset folders (or accept defaults)
-python service/asset_service/browse.py --init
+# 1. Point it at your asset folders (auto-detects sections)
+python pharos.py init "D:/path/to/your/assets"
 
-# 3. Start the server
-python service/asset_service/browse.py
-# → http://127.0.0.1:8765
+# 2. Start the server
+python pharos.py serve
+#    → http://127.0.0.1:8765
+
+# 3. Index raw mesh folders (real FBX dimensions, no engines needed)
+python service/asset_service/scanner.py "D:/path/to/models"
+
+# 4. Generate the agent entry files in YOUR library
+python pharos.py docs
 ```
 
-## What your agent gets
+Then tell your coding agent:
 
-The MCP server exposes these tools natively:
+> "Read `<your-library-root>/_Agent_Files/AGENT_START_HERE.md`, then use
+> the HTTP API at http://127.0.0.1:8765 to find assets."
 
-- `pharos_stats` — library overview
-- `pharos_search_meshes` — geometry with real dimensions, themes, budgets
-- `pharos_search_textures` — PBR sets
-- `pharos_search_audio` — sounds by keyword, category, duration
-- `pharos_search_collection` — owned purchases (local vs. not-downloaded)
-- `pharos_list_packs` — exact pack names
-
-See `docs/MCP_SETUP.md` for client configuration.
-
-Tell your coding agent:
-
-> "Read `<your-library-root>\_Agent_Files\AGENT_START_HERE.md`, then use the
-> HTTP API at http://127.0.0.1:8765 to find assets."
-
-Or with the MCP server (installed via `pip install mcp<2`):
+Or connect via MCP (`pip install "mcp<2"`, see `docs/MCP_SETUP.md`):
 
 ```json
-{ "pharos": { "command": "python", "args": ["-m", "service.pharos_mcp_server"], "cwd": "<repo root>" } }
+{ "mcpServers": { "pharos": {
+    "command": "python", "args": ["-m", "service.pharos_mcp_server"],
+    "cwd": "<repo root>" } } }
 ```
 
-The agent can then ask things like:
+## What you get, with and without engines
 
-- *"Find me a door between 1.8 and 2.4 metres with textures"*
-- *"What cyberpunk packs do I own?"*
-- *"Play me a siren sound"*
-- *"Which medieval packs are not downloaded yet?"*
+| Capability | Base (Python only) | + Blender | + Unreal Editor 5.x |
+|---|---|---|---|
+| Search: names, paths, tags, themes, availability | ✅ | ✅ | ✅ |
+| FBX dimensions + triangle counts (`scanner`) | ✅ | ✅ | ✅ |
+| Texture sets, audio with durations, purchase catalog | ✅ | ✅ | ✅ |
+| OBJ/GLB/STL measured geometry | + trimesh | ✅ | ✅ |
+| Native container enumeration (.blend/USD) | — | ✅ (`pipeline/native/`) | ✅ |
+| KitBash-style kits → per-assembly FBX + manifests | — | ✅ (`pipeline/kitbash/`) | ✅ |
+| Engine-exact material recipes & wiring (`hero_textures`) | — | — | ✅ (`pipeline/conversion/`) |
+| Scene manifest → Blender build | — | ✅ | ✅ |
 
-…and get structured JSON with absolute paths, dimensions, material
-recipes, and availability — in **~90% fewer tokens** than walking the
-filesystem.
+Everything degrades gracefully: a section without content (or without
+its engine) serves empty results, never errors.
+
+## The agent contract
+
+- `docs/CAPABILITIES.md` — the full capability matrix (what the system
+  can and cannot do; the honest-limits list)
+- `AGENT_START_HERE.md` / `AGENT_API.md` — generated into your library
+  by `pharos docs`, with live counts (never hand-maintained)
+- Search semantics: AND-first with ranked OR fallback, rarity-ranked,
+  tier/mode/exact disclosed per response; short tokens match on word
+  boundaries; all-dropped-token queries return zero, never everything
+- Safety: file routes path-jailed to configured roots; the library on
+  disk is never modified by the app
 
 ## Requirements
 
-- Python 3.10+ (stdlib only — no pip installs for the core server)
-- Any folder of assets you want to index
+- Python 3.10+ (stdlib only for the core server — no pip installs)
+- Optional: Blender 5.x, UE 5.x, Git Bash — only for the `pipeline/` chains
+- Windows / macOS / Linux (paths are config-driven)
 
 ## Architecture
 
 ```
-service/asset_service/
-  browse.py           HTTP server + page routes
-  config.py           path configuration (pharos_config.json)
-  db.py               SQLite schema (assets, meshes, textures, audio, collection)
-  indexer.py          pack discovery + tagging (Animation section)
-  collection_import.py  CSV purchase catalog importer
-  textures_import.py  texture set indexer
-  audio_import.py     audio library importer (from crawl JSONL)
-  meshes_import.py    geometry layer importer (from crawl JSONL)
-  auto_classifier.py  3-tier domain/style/theme classifier
-  templates/          HTML pages (assets, textures, audio, animation, viewer)
-  static/             vendored three.js r170 + loaders
-tools/                environment inspection, hashing, deployment
-docs/                 decision log (every design choice, dated)
-tests/                unit tests
+service/asset_service/    HTTP server + importers + MCP + scanner
+templates/ static/        dashboard pages, vendored three.js
+pipeline/                 optional conversion & index chains (UE/Blender)
+tools/ docs/ tests/       utilities, capability matrix, test suite
+pharos.py                 CLI: init | serve | docs
 ```
 
-## Documentation
-
-- `docs/CAPABILITIES.md` — what this system lets a coding agent do (the capability matrix)
-- `docs/MCP_SETUP.md` — MCP client configuration
-- `docs/tagging-plan.md` — the tagging/meta-tagging architecture
+The SQLite registry is **derived data**: importers rebuild it from
+crawler outputs and disk on every start. Delete it; restart; it's back.
 
 ## License
 
