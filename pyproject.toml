@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pharos"
+version = "0.1.0"
+description = "Local asset-intelligence server for coding agents: indexes 3D meshes, PBR textures, audio and animation clips into a queryable SQLite registry served over HTTP and MCP."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Pharos Contributors" }]
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# preview/image tooling for the classifier (optional, off by default)
+vision = [
+    "pillow>=10.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[tool.setuptools]
+package-dir = { "" = "service" }
+packages = ["asset_service"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

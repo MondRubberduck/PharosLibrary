@@ -1,0 +1,114 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>Pack files — AI Asset Registry</title><style>
+:root{--bg:#14161a;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui;background:var(--bg);color:var(--fg)}
+header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+h1{font-size:16px;margin:0}
+header a{color:#7cc4ff;text-decoration:none}
+.chip{background:#2a2f39;border-radius:20px;padding:1px 9px;font-size:11.5px}
+.chip.domain{color:#7cc4ff}.chip.style{color:#ffd479}.chip.human{color:#7dff9b}
+#meta{color:var(--dim);font-size:12.5px;padding:8px 20px;border-bottom:1px solid var(--line);word-break:break-all}
+#tools{padding:12px 20px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 9px}
+.echip{background:var(--card);color:var(--dim);border:1px solid var(--line);border-radius:14px;
+padding:2px 10px;font-size:12px;cursor:pointer}
+.echip.on{color:#7cc4ff;border-color:#31506e;background:#243040}
+table{border-collapse:collapse;width:calc(100% - 40px);margin:4px 20px 20px;font-size:13px}
+th{color:var(--dim);text-align:left;font-weight:500;border-bottom:1px solid var(--line);
+padding:6px 8px;position:sticky;top:0;background:var(--bg)}
+td{border-bottom:1px solid #20242c;padding:5px 8px;vertical-align:top;word-break:break-all}
+tr:hover td{background:#181b21}
+.fname{color:var(--fg)}.dir{color:var(--dim);font-size:12px}
+td.sz,th.sz{text-align:right;white-space:nowrap;color:var(--dim)}
+.ft{color:var(--dim);font-size:11.5px;white-space:nowrap}
+a.play{color:#7cc4ff;text-decoration:none;white-space:nowrap;margin-left:8px}
+button.cp{background:none;border:1px solid var(--line);color:var(--dim);border-radius:5px;
+cursor:pointer;padding:1px 7px;margin-left:6px;white-space:nowrap}
+button.cp:hover{color:#7cc4ff}
+#pager{display:flex;gap:12px;align-items:center;padding:0 20px 24px;color:var(--dim)}
+#pager button{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;
+padding:4px 12px;cursor:pointer}
+#pager button:disabled{opacity:.35;cursor:default}
+.star{color:#ffd479}
+#msg{padding:6px 20px;color:#7dff9b;font-size:12.5px}
+</style></head><body>
+<header><a href="/registry">&larr; registry</a><a href="/" style="color:#8b93a1;text-decoration:none;margin-left:6px">home</a><h1 id="pname"></h1><span id="chips"></span></header>
+<div id="meta"></div><div id="source" style="padding:6px 20px;border-bottom:1px solid var(--line);font-size:13px"></div>
+<div id="tools"><input id="q" placeholder="filter files in this pack …" size="40">
+<span id="exts"></span><span id="count" style="color:var(--dim)"></span></div>
+<div id="msg"></div>
+<table><thead><tr><th class="ft">type</th><th>file</th><th>folder</th>
+<th class="sz">size</th><th class="ft">kind</th><th></th></tr></thead>
+<tbody id="rows"></tbody></table>
+<div id="pager"><button id="prev">&lsaquo; prev</button><span id="pg"></span>
+<button id="next">next &rsaquo;</button></div>
+<script>
+const $=id=>document.getElementById(id);
+const q0=new URLSearchParams(location.search),pack=q0.get('id')||'';
+let page=1,ext='',query='',total=0,hero='',headerDone=false;
+const SIZE=200;
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=b=>b==null?'':b>1e9?(b/1e9).toFixed(1)+' GB':b>1e6?(b/1e6).toFixed(1)+' MB':b>1e3?(b/1e3).toFixed(0)+' KB':b+' B';
+async function load(){
+ const p=new URLSearchParams({id:pack,q:query,ext,page});
+ const d=await(await fetch('/api/pack_files?'+p)).json();
+ if(d.error){pname.textContent='\\u26a0 '+d.error;return;}
+ total=d.total;
+  if(!headerDone){headerDone=true;
+  pname.textContent=d.pack.name;
+  chips.innerHTML=`<span class="chip domain">${esc(d.pack.domain)}</span>`+
+   (d.pack.sub_category?`<span class="chip">${esc(d.pack.sub_category)}</span>`:'')+
+   `<span class="chip style">${esc(d.pack.style)}</span>`+
+   (d.pack.validation==='human_verified'?'<span class="chip human">human</span>':'');
+  hero=d.hero||'';
+  meta.innerHTML=`${esc(d.pack.vendor||'—')} · hero: <span class="dir">${esc(hero)}</span>`+
+   ` · absolute path prefix: <span class="dir">${esc(d.root)}</span>`;
+  const su=d.pack.source_url||'';
+  const search=`https://www.google.com/search?q=${encodeURIComponent((d.pack.vendor?d.pack.vendor+' ':'')+d.pack.name)}`;
+  source.innerHTML=`<b style="color:var(--dim);font-weight:500">source:</b> `+
+   (su?`<a href="${esc(su)}" target="_blank" rel="noopener" style="color:#7cc4ff">view where I got it &#8599;</a> · `
+      :`<a href="${search}" target="_blank" rel="noopener" style="color:#7cc4ff">find where I got this &#8599;</a> · `)+
+   `<input id="su" placeholder="paste store URL of this pack" value="${esc(su)}" size="34"> `+
+   `<button id="suSave" style="background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:3px 10px;cursor:pointer">save</button>`;
+  $('suSave').onclick=async()=>{
+   const r=await(await fetch('/api/pack_source',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id:pack,url:$('su').value.trim()})})).json();
+   if(r.ok){msg.textContent='source URL saved';setTimeout(()=>msg.textContent='',2000);headerDone=false;load();}
+   else msg.textContent='save failed: '+(r.error||'?');};}
+ count.textContent=`${d.total} file(s)`;
+ exts.innerHTML=`<button class="echip${ext===''?' on':''}" onclick="setExt('')">all</button>`+
+  d.ext_counts.map(e=>`<button class="echip${ext===e.ext?' on':''}" onclick="setExt('${e.ext}')">.${e.ext} <span style="opacity:.55">${e.n}</span></button>`).join('');
+ rows.innerHTML=d.files.map(f=>{
+   const parts=f.relative_path.split('/'),name=parts.pop(),dir=parts.join('/');
+   const e=(name.match(/\\.([^.]+)$/)||[])[1]||'';
+   const isHero=f.relative_path===hero;
+   const play=/\\.(fbx|bvh)$/i.test(f.relative_path)
+     ?`<a class="play" href="/viewer?pack=${encodeURIComponent(pack)}&file=${encodeURIComponent(f.relative_path)}">&#9654; 3D</a>`:'';
+   return `<tr><td class="ft">.${esc(e)}</td>
+    <td class="fname">${esc(name)}${isHero?' <span class="star" title="hero file">&#9733;</span>':''}${play}</td>
+    <td class="dir">${esc(dir?dir+'/':'')}</td><td class="sz">${fmt(f.file_size)}</td>
+    <td class="ft">${esc(f.file_type)}</td>
+    <td><button class="cp" data-p="${encodeURIComponent(d.root+f.relative_path)}" title="copy absolute path">path &#10697;</button><button class="cp" data-rv="${encodeURIComponent(d.root+f.relative_path)}" title="show in Explorer">&#128193;</button></td></tr>`;}).join('');
+ pg.textContent=`page ${d.page} / ${Math.max(1,Math.ceil(total/SIZE))}`;
+ prev.disabled=page<=1;next.disabled=page>=Math.ceil(total/SIZE);}
+function setExt(e){ext=(e===ext?'':e);page=1;load();}
+q.oninput=()=>{clearTimeout(window._t);window._t=setTimeout(()=>{query=q.value;page=1;load();},250);};
+prev.onclick=()=>{if(page>1){page--;load();}};
+next.onclick=()=>{if(page<Math.ceil(total/SIZE)){page++;load();}};
+rows.addEventListener('click',e=>{
+ const rv=e.target.closest('button[data-rv]');
+ if(rv){const rp=decodeURIComponent(rv.dataset.rv);
+  fetch('/api/open_explorer?path='+encodeURIComponent(rp))
+   .then(r=>r.json().then(j=>({ok:r.status===200,j})))
+   .then(({ok,j})=>{msg.textContent=ok?'opened in Explorer':'failed: '+(j.error||'?');
+     setTimeout(()=>msg.textContent='',1600);}
+  );
+  return;}
+ const b=e.target.closest('button.cp');if(!b)return;
+ const p=decodeURIComponent(b.dataset.p);
+ if(navigator.clipboard)navigator.clipboard.writeText(p).then(
+  ()=>{msg.textContent='copied: '+p;setTimeout(()=>msg.textContent='',1600);},
+  ()=>{msg.textContent=p;});});
+load();
+</script></body></html>

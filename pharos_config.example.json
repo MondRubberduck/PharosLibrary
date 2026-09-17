@@ -1,0 +1,29 @@
+{
+  "library_root": "C:/path/to/your/asset/library",
+  "registry_dir": "C:/Users/you/.pharos/registry",
+  "previews_dir": "C:/Users/you/.pharos/registry/previews",
+  "sections": {
+    "animation": "Animation",
+    "textures": "Textures_Materials",
+    "textures_main": "Textures_Materials/4K_Textures_Gumroad",
+    "audio": "Audio_Assets",
+    "collection": "Collected Files",
+    "collected_galleries": "Collected Files"
+  },
+  "agent_files": "_Agent_Files",
+  "thumb_cache_dirs": [],
+  "extension_status_file": "",
+  "indexer_skip_dirs": [],
+  "manifest_roots": [
+    "C:/path/to/your/asset/library/converted_packs"
+  ],
+  "network": {
+    "host": "127.0.0.1",
+    "port": 8765
+  },
+  "dashboard": {
+    "animation_hero": "",
+    "asset_hero_names": [],
+    "texture_hero_patterns": []
+  }
+}

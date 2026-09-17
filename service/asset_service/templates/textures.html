@@ -1,0 +1,165 @@
+<title>Textures — Library</title><style>
+:root{--bg:#14161a;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1;--cols:6}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui;background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+header{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header a{color:#7cc4ff;text-decoration:none}
+h1{font-size:15px;margin:0}
+input,select{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 9px}
+#wrap{flex:1;display:flex;min-height:0}
+#side{width:250px;min-width:250px;border-right:1px solid var(--line);overflow-y:auto;padding:10px 8px}
+#side h2{font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin:10px 8px 6px}
+#side h2:first-child{margin-top:2px}
+.fbtn{display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:none;border:none;
+color:var(--fg);padding:5px 10px;border-radius:6px;cursor:pointer;font-size:13px;word-break:break-word}
+.fbtn:hover{background:#1c2028}
+.fbtn.on{background:#243040;color:#7cc4ff}
+.fbtn .n{color:var(--dim);white-space:nowrap}
+.fbtn.sub{padding-left:24px;font-size:12px;color:var(--dim)}
+.fbtn.sub.on{color:#7cc4ff}
+.fbtn .tw{display:inline-block;width:12px;color:var(--dim)}
+#main{flex:1;overflow-y:auto;padding:14px}
+#grid{display:grid;grid-template-columns:repeat(var(--cols),1fr);gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;cursor:pointer;position:relative}
+.card:hover{border-color:#3a4250}
+.media{aspect-ratio:16/10;background:#101216;overflow:hidden}
+.media img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .25s}
+.card:hover .media img{transform:scale(1.06)}
+.ph{aspect-ratio:16/10;display:flex;align-items:center;justify-content:center;color:#4a5261;font-size:24px}
+.badge{position:absolute;top:6px;right:6px;background:rgba(16,18,22,.8);color:var(--dim);
+border-radius:10px;padding:1px 8px;font-size:10.5px;z-index:2}
+.badge.rel{background:#3d3220;color:#ffd479}
+.cap{padding:6px 9px}
+.cap .t{word-break:break-word;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;font-size:12.5px}
+.cap .f{color:var(--dim);font-size:11px;display:block;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#pager{display:flex;gap:12px;align-items:center;justify-content:center;padding:16px 0;color:var(--dim)}
+#pager button{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 14px;cursor:pointer}
+#pager button:disabled{opacity:.35;cursor:default}
+input[type=range]{accent-color:#6ea8fe;width:130px}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.72);display:none;z-index:10;align-items:center;justify-content:center}
+#modal.open{display:flex}
+#mbox{width:min(1060px,94vw);max-height:92vh;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+#mbox .close{float:right;background:none;border:1px solid var(--line);color:var(--fg);border-radius:6px;cursor:pointer;padding:2px 10px;font-size:15px}
+#mmain{width:100%;aspect-ratio:16/9;object-fit:contain;background:#0d0f13;border-radius:8px;display:block}
+#strip{display:flex;gap:6px;overflow-x:auto;padding:8px 0}
+#strip img{height:64px;border-radius:5px;cursor:pointer;opacity:.65;border:2px solid transparent}
+#strip img.on{opacity:1;border-color:#6ea8fe}
+.mrow{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0;align-items:center}
+.mrow .chip{background:#2a2f39;border-radius:14px;padding:2px 10px;font-size:12px;color:var(--dim)}
+.mrow button.b{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:13px}
+#mtags{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;align-items:center}
+#mtags .tag{background:#22303c;color:#9fcfe8;border-radius:12px;padding:1px 10px;font-size:11.5px}
+h2.mt{margin:6px 0 10px;font-size:19px}
+</style></head><body>
+<header><a href="/">&larr; home</a><h1>Textures</h1>
+<input id="q" placeholder="search textures (e.g. brick, wood, rust, grass) …" size="36">
+<div id="tools"><span id="count" style="color:var(--dim)"></span>
+<label>tile size <input type="range" id="size" min="3" max="12" step="1"></label></div></header>
+<div id="wrap"><div id="side"><h2>Groups — click to expand</h2><div id="tstore"></div></div>
+<div id="main"><div id="grid"></div><div id="pager">
+<button id="prev">&lsaquo; prev</button><span id="pg"></span><button id="next">next &rsaquo;</button></div></div></div>
+<div id="modal"><div id="mbox">
+<button class="close" id="mclose">✕</button>
+<h2 class="mt" id="mname"></h2>
+<div class="mrow" id="mchips"></div>
+<img id="mmain" alt="">
+<div id="strip"></div>
+<div class="mrow" id="mact"></div>
+<div id="mtags"></div>
+</div></div>
+<script>
+const $=id=>document.getElementById(id);
+const qBox=$('q'),sizeEl=$('size');
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let q='',page=1,total=0;
+let fGroup='',fSub='';
+let openGroups=[];
+let cols=parseInt(localStorage.getItem('texCols')||'6');sizeEl.value=cols;
+document.documentElement.style.setProperty('--cols',cols);
+const pageSize=()=>{
+ const gw=document.getElementById('main').clientWidth-28;
+ const cw=(gw-(cols-1)*12)/cols;
+ const rowH=cw*10/16+42+12;
+ const rows=Math.max(4,Math.floor((document.getElementById('main').clientHeight-28)/rowH));
+ return cols*rows;};
+function openExplorer(path,btn){
+ if(btn){btn.dataset.orig=btn.innerHTML;btn.disabled=true;}
+ fetch('/api/open_explorer?path='+encodeURIComponent(path))
+  .then(r=>r.json().then(j=>({ok:r.status===200,j})))
+  .then(({ok,j})=>{if(btn){btn.disabled=false;
+    btn.innerHTML=ok?'opened ✓':('failed: '+(j.error||'?'));
+    if(ok)setTimeout(()=>{btn.innerHTML=btn.dataset.orig;},1500);}})
+  .catch(e=>{if(btn){btn.disabled=false;btn.innerHTML='failed';}});}
+document.addEventListener('click',e=>{const b=e.target.closest('#mexp');
+ if(b)openExplorer(b.dataset.p,b);});
+async function loadTree(){
+ const d=await(await fetch('/api/textures/tree')).json();
+ let h=`<button class="fbtn${!fGroup&&!fSub?' on':''}" data-all="1">All textures <span class="n">${d.total}</span></button>`;
+ for(const g of d.groups){
+  const open=fGroup===g.name||openGroups.includes(g.name);
+  h+=`<button class="fbtn${fGroup===g.name&&!fSub?' on':''}" data-g="${esc(g.name)}"><span class="tw">${open?'▾':'▸'}</span> ${esc(g.name)} <span class="n">${g.n}</span></button>`;
+  if(open)h+=g.subs.map(s=>`<button class="fbtn sub${fSub===s.name&&fGroup===g.name?' on':''}" data-g="${esc(g.name)}" data-s="${esc(s.name)}">↳ ${esc(s.name)} <span class="n">${s.n}</span></button>`).join('');}
+ tstore.innerHTML=h;}
+tstore.onclick=e=>{const b=e.target.closest('.fbtn');if(!b)return;
+ if(b.dataset.all){fGroup='';fSub='';page=1;loadTree();load();return;}
+ const g=b.dataset.g;
+ if(b.dataset.s!==undefined&&b.dataset.s!==''){fGroup=g;fSub=b.dataset.s;page=1;loadTree();load();return;}
+ fGroup=(fGroup===g)?'':g;fSub='';
+ const i=openGroups.indexOf(g);if(i>=0)openGroups.splice(i,1);else openGroups.push(g);
+ page=1;loadTree();load();};
+async function load(){
+ const p=new URLSearchParams({q,page,size:pageSize()});
+ if(fGroup)p.set('group',fGroup);
+ if(fSub)p.set('sub',fSub);
+ let d;try{d=await(await fetch('/api/textures/items?'+p)).json();}catch(e){grid.innerHTML='';count.textContent='load failed';return;}
+ total=d.total;page=d.page;
+ count.textContent=`${d.total} texture set(s)`;
+ grid.innerHTML=d.items.map(c=>{
+  const badge=d.q&&c.tier===3?`<span class="badge rel">related</span>`:'';
+  const media=c.thumb?`<img loading="lazy" src="${c.thumb}" alt="">`
+    :`<div class="ph">${esc((c.name||'?')[0].toUpperCase())}</div>`;
+  return `<div class="card" data-id="${c.id}">${badge}
+   <div class="media">${media}</div>
+   <div class="cap"><span class="t" title="${esc(c.name)}">${esc(c.name)}</span>
+   <span class="f">${esc(c.sub||'')}${c.image_count?' · '+c.image_count+' imgs':''}</span></div></div>`;}).join('');
+ pg.textContent=`page ${d.page} / ${Math.max(1,Math.ceil(total/pageSize()))}`;
+ prev.disabled=page<=1;next.disabled=page>=Math.ceil(total/pageSize());}
+grid.onclick=e=>{const c=e.target.closest('.card');if(!c)return;openItem(+c.dataset.id);};
+prev.onclick=()=>{if(page>1){page--;load();main.scrollTop=0;}};
+next.onclick=()=>{if(page<Math.ceil(total/pageSize())){page++;load();main.scrollTop=0;}};
+qBox.oninput=()=>{clearTimeout(window._t);window._t=setTimeout(()=>{q=qBox.value.trim();page=1;load();},250);};
+sizeEl.oninput=()=>{cols=parseInt(sizeEl.value);localStorage.setItem('texCols',cols);
+ document.documentElement.style.setProperty('--cols',cols);page=1;
+ clearTimeout(window._s);window._s=setTimeout(load,250);};
+addEventListener('resize',()=>{clearTimeout(window._r);window._r=setTimeout(load,300);});
+async function openItem(id){
+ const d=await(await fetch('/api/textures/item?id='+id)).json();
+ if(d.error)return;
+ const it=d.item;
+ $('mname').textContent=it.name;
+ const bits=[it.grp,it.sub];
+ if(it.file_count)bits.push(it.file_count+' files');
+ if(it.size_str)bits.push(it.size_str);
+ $('mchips').innerHTML=bits.map(b=>`<span class="chip">${esc(b)}</span>`).join('');
+ const imgs=it.images||[];
+ $('mmain').src=imgs[0]||'';
+ $('strip').innerHTML=imgs.map((im,i)=>`<img src="${im}" data-i="${i}" class="${i===0?'on':''}" loading="lazy" alt="">`).join('');
+ $('strip').onclick=e=>{if(e.target.tagName!=='IMG')return;
+  const i2=+e.target.dataset.i;$('mmain').src=imgs[i2];
+  [...$('strip').children].forEach((el2,i)=>el2.classList.toggle('on',i===i2));};
+ let act='';
+ if(it.folder)act+=`<button class="b" id="mcopy" data-copy="${esc(it.folder)}">copy folder path</button>`;
+ if(it.folder)act+=`<button class="b" id="mexp" data-p="${esc(it.folder)}">open in Explorer &#8599;</button>`;
+ $('mact').innerHTML=act;
+ const cp=$('mcopy');
+ if(cp)cp.onclick=()=>{if(navigator.clipboard)navigator.clipboard.writeText(cp.dataset.copy).then(()=>{
+   cp.textContent='copied ✓';setTimeout(()=>cp.textContent='copy folder path',1500);});};
+ let tags=[];
+ try{tags=Array.isArray(it.tags)?it.tags:JSON.parse(it.tags||'[]');}catch(e){}
+ $('mtags').innerHTML=tags.length?('<span style="color:var(--dim);font-size:11.5px;margin-right:4px">tags:</span>'+
+   tags.slice(0,14).map(t=>`<span class="tag">${esc(t)}</span>`).join('')):'';
+ $('modal').classList.add('open');}
+$('mclose').onclick=()=>$('modal').classList.remove('open');
+$('modal').addEventListener('click',e=>{if(e.target.id==='modal')$('modal').classList.remove('open');});
+addEventListener('keydown',e=>{if(e.key==='Escape')$('modal').classList.remove('open');});
+loadTree();load();
+</script></body></html>

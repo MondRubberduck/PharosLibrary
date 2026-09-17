@@ -1,0 +1,225 @@
+"""pharos init — detect asset folders under a root and write pharos_config.json.
+
+Usage:
+    python -m asset_service init [ROOT] [--registry-dir DIR] [--force]
+
+Scans ROOT's immediate children (file-extension census, bounded sampling)
+and maps each folder to a Pharos section by dominant content:
+
+    FBX/BVH clips            -> sections.animation
+    image sets               -> sections.textures
+    WAV/OGG/MP3/... sounds   -> sections.audio
+    folder with a catalog CSV-> sections.collection
+    children with Exports/manifest.json or kit_manifest.json
+                             -> manifest_roots (material recipes join)
+
+Detection is best-effort and deliberately VERBOSE: init prints everything
+it decided so the user (or their agent) can correct the JSON by hand —
+the config file is the contract, not the detector.
+
+The registry (SQLite DB) defaults to ~/.pharos/registry so nothing is
+ever written inside the asset library itself.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from . import config
+
+CLIP_EXTS = {".fbx", ".bvh"}
+MESH_EXTS = {".obj", ".glb", ".gltf", ".stl", ".blend", ".usd", ".usda",
+             ".usdc", ".usdz", ".uasset", ".umodel", ".max"}
+AUDIO_EXTS = {".wav", ".ogg", ".mp3", ".flac", ".m4a", ".aif", ".aiff",
+              ".aac", ".wma"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp",
+              ".exr", ".hdr", ".dds", ".tga"}
+SAMPLE_LIMIT = 2000          # files censused per folder; classification
+                             # does not need the whole tree
+
+
+def _census(folder: Path) -> dict[str, int]:
+    """Bounded extension census of a folder tree."""
+    counts: dict[str, int] = {}
+    n = 0
+    try:
+        for p in folder.rglob("*"):
+            if n >= SAMPLE_LIMIT:
+                break
+            if p.is_file():
+                ext = p.suffix.lower()
+                counts[ext] = counts.get(ext, 0) + 1
+                n += 1
+    except OSError:
+        pass
+    return counts
+
+
+def _dominant(counts: dict[str, int]) -> str:
+    total = sum(counts.values()) or 1
+    clips = sum(counts.get(e, 0) for e in CLIP_EXTS)
+    audio = sum(counts.get(e, 0) for e in AUDIO_EXTS)
+    images = sum(counts.get(e, 0) for e in IMAGE_EXTS)
+    meshes = sum(counts.get(e, 0) for e in MESH_EXTS)
+    best = max(clips, audio, images, meshes)
+    if best == 0:
+        return ""
+    if best / total < 0.4:
+        return ""
+    if best == clips:
+        return "animation"
+    if best == audio:
+        return "audio"
+    if best == images:
+        return "textures"
+    return "meshes"          # model library: feed via scanner.py, no section
+
+
+def _find_catalog_csvs(root: Path) -> list[Path]:
+    """CSVs directly under root or one level deep that look like a
+    purchase catalog (header row containing name + url/price/seller)."""
+    hits = []
+    for p in sorted(root.glob("*.csv")) + sorted(root.glob("*/*.csv")):
+        try:
+            with open(p, encoding="utf-8-sig", errors="replace",
+                      newline="") as f:
+                header = (f.readline() or "").lower()
+        except OSError:
+            continue
+        if "name" in header and any(
+                k in header for k in ("url", "price", "seller", "store")):
+            hits.append(p)
+    return hits
+
+
+def detect(root: Path) -> dict:
+    """Classify root's children. Returns a report dict (also printed)."""
+    report: dict = {"root": str(root), "sections": {}, "mesh_folders": [],
+                    "manifest_roots": [], "catalog_csvs": [],
+                    "agent_files": (root / "_Agent_Files").is_dir(),
+                    "unknown": []}
+    if not root.is_dir():
+        report["error"] = f"root does not exist: {root}"
+        return report
+
+    for child in sorted(root.iterdir()):
+        if not child.is_dir() or child.name.startswith(("_", ".")):
+            continue
+        kind = _dominant(_census(child))
+        if kind == "meshes":
+            report["mesh_folders"].append(child.name)
+        elif kind:
+            report["sections"].setdefault(kind, []).append(child.name)
+        else:
+            # a folder may still be a manifest root even when its census is
+            # mixed (converted packs are .uasset + .fbx + .png)
+            report["unknown"].append(child.name)
+
+    # manifest roots: any child carrying an Exports/manifest.json
+    manifest_parents = set()
+    for pat in ("*/Exports/manifest.json", "*/Exports/kit_manifest.json"):
+        for p in root.glob(pat):
+            manifest_parents.add(p.parent.parent.name)
+    if manifest_parents:
+        report["manifest_roots"].append(root.name)
+        report["manifest_packs_found"] = sorted(manifest_parents)
+
+    report["catalog_csvs"] = [str(p) for p in _find_catalog_csvs(root)]
+    return report
+
+
+def _pick(sections: dict, kind: str) -> str | None:
+    cands = sections.get(kind) or []
+    return cands[0] if cands else None
+
+
+def build_config(report: dict, registry_dir: Path) -> dict:
+    """Turn a detect() report into a pharos_config.json payload."""
+    root = Path(report["root"])
+    cfg = config.load()
+    cfg["library_root"] = str(root)
+    cfg["registry_dir"] = str(registry_dir)
+    cfg["previews_dir"] = str(registry_dir / "previews")
+    for kind, key in (("animation", "animation"), ("audio", "audio"),
+                      ("textures", "textures")):
+        pick = _pick(report["sections"], kind)
+        if pick:
+            cfg["sections"][key] = pick
+    # textures_main: keep the default relative name; harmless if absent
+    coll_csv = report["catalog_csvs"][0] if report["catalog_csvs"] else None
+    if coll_csv:
+        cfg["sections"]["collection"] = Path(coll_csv).parent.name
+        cfg["sections"]["collected_galleries"] = Path(coll_csv).parent.name
+    # CSV filename is currently fixed in config.CSV_PATH; record the name we
+    # found so a human/agent can align them (only 3D_Assets_Overview.csv is
+    # read today; rename your CSV or extend CSV_PATH handling to match)
+    if coll_csv and Path(coll_csv).name != "3D_Assets_Overview.csv":
+        cfg["collection_csv"] = Path(coll_csv).name
+    if report["manifest_roots"]:
+        cfg["manifest_roots"] = [str(root)]
+    return cfg
+
+
+def run_init(argv=None) -> int:
+    argv = argv if argv is not None else sys.argv[2:]
+    parser = argparse.ArgumentParser(
+        prog="pharos init",
+        description="detect asset folders under ROOT and write pharos_config.json")
+    parser.add_argument("root", nargs="?", default=".",
+                        help="folder to scan (default: current directory)")
+    parser.add_argument("--registry-dir", default=None,
+                        help="where the SQLite registry lives "
+                             "(default: ~/.pharos/registry)")
+    parser.add_argument("--force", action="store_true",
+                        help="overwrite an existing pharos_config.json")
+    args = parser.parse_args(argv)
+
+    root = Path(args.root).resolve()
+    registry_dir = (Path(args.registry_dir).resolve()
+                    if args.registry_dir
+                    else Path.home() / ".pharos" / "registry")
+    report = detect(root)
+
+    print(f"scanning: {root}")
+    if "error" in report:
+        print(f"  ERROR: {report['error']}")
+        return 1
+    for kind in ("animation", "textures", "audio"):
+        picks = report["sections"].get(kind) or []
+        print(f"  {kind:<10} -> {picks[0] if picks else '(not found)'}"
+              + (f"   [also: {', '.join(picks[1:])}]" if len(picks) > 1 else ""))
+    csvs = report["catalog_csvs"]
+    print(f"  collection -> "
+          + (f"{Path(csvs[0]).parent.name} (csv: {Path(csvs[0]).name})"
+             if csvs else "(no catalog CSV found)"))
+    print(f"  manifest packs: "
+          + (f"{len(report.get('manifest_packs_found', []))} found"
+             + (f" under {root}" if report["manifest_roots"] else "")
+             if report["manifest_roots"] else "(none)"))
+    print(f"  agent index (_Agent_Files): "
+          + ("present" if report["agent_files"] else "absent"))
+    if report["mesh_folders"]:
+        print("  model folders (index via scanner, not a section): "
+              + ", ".join(report["mesh_folders"]))
+    if report["unknown"]:
+        print("  unclassified (mixed/other content): "
+              + ", ".join(report["unknown"]))
+
+    cfg_file = config._CONFIG_FILE
+    if cfg_file.is_file() and not args.force:
+        print(f"\nconfig already exists: {cfg_file}"
+              "\n(re-run with --force to overwrite, or edit it by hand)")
+        return 0
+
+    cfg = build_config(report, registry_dir)
+    config.save(cfg)
+    print(f"\nconfig written: {cfg_file}")
+    print("next steps:")
+    print("  start the server : python pharos.py serve"
+          "   (or python service/asset_service/browse.py)")
+    if report["mesh_folders"]:
+        print("  index model folders: python service/asset_service/scanner.py "
+              f"\"{root / report['mesh_folders'][0]}\"")
+    return 0
