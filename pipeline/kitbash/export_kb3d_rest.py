@@ -10,6 +10,10 @@ from _config import section_root
 BLENDER = os.environ.get("BLENDER_EXE", r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe")
 SCRIPT = os.path.join(T, "export_kb3d.py")
 ROOT = section_root("kitbash", "PHAROS_KB3D_ROOT")
+if not ROOT or not os.path.isdir(ROOT):
+    raise SystemExit("FATAL: kits root not found: %r -- set `kitbash_root` in "
+                     "pharos_config.json or PHAROS_KB3D_ROOT "
+                     "(see pipeline/README.md)" % ROOT)
 
 # every .blend under the kits root, at any depth
 allb = sorted(glob.glob(os.path.join(ROOT, "**", "*.blend"), recursive=True))
