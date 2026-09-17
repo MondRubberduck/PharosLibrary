@@ -274,6 +274,17 @@ def main() -> int:
                 capture_output=True, text=True, cwd=str(REPO), timeout=120)
             check(f"direct-script {mod}", r.returncode == 0,
                   (r.stderr or "")[-100:])
+        # indexer.py is quoted verbatim by the app's own INGESTION SUMMARY
+        # ("python service/asset_service/indexer.py --root <lib>") and in
+        # CAPABILITIES: its sys.path bootstrap sat BELOW the first
+        # `from asset_service import ...`, so the documented command died
+        # with ModuleNotFoundError
+        r = subprocess.run(
+            [sys.executable, str(REPO / "service/asset_service/indexer.py"),
+             "--root", str(lib)],
+            capture_output=True, text=True, cwd=str(REPO), timeout=300)
+        check("direct-script indexer.py --root (INGESTION SUMMARY form)",
+              r.returncode == 0, (r.stderr or "")[-140:])
         r = subprocess.run(
             [sys.executable,
              str(REPO / "service/asset_service" / "audio_import.py"), dbp],

@@ -28,12 +28,15 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from asset_service import config
 from typing import Optional
 
 REPO = Path(__file__).resolve().parents[2]
+# this must run BEFORE the first asset_service import: as a direct script
+# (python service/asset_service/indexer.py --root <lib> -- the form the app's
+# own INGESTION SUMMARY prints) the package is not on sys.path yet
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from asset_service import config                                # noqa: E402
 from asset_service import db                                    # noqa: E402
 from asset_service.auto_classifier import (                     # noqa: E402
     PackInput, classify_pack, get_vision_classifier, probe_fbx_markers,
