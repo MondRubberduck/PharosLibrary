@@ -71,12 +71,17 @@ def validate_manifest(data: dict) -> list[str]:
         return ["manifest must be a JSON object"]
 
     # unknown top-level keys -> warning (D09)
-    KNOWN_KEYS = {"scene", "units", "up_axis", "ground_y", "assets",
-                  "textures", "crowd", "audio"}
+    KNOWN_KEYS = {"schema", "scene", "units", "up_axis", "ground_y",
+                  "assets", "textures", "crowd", "audio"}
     unknown = set(data.keys()) - KNOWN_KEYS
     if unknown:
         errors.append(f"unknown top-level key(s) ignored: "
                       f"{sorted(unknown)} (known: {sorted(KNOWN_KEYS)})")
+    schema = data.get("schema")
+    if schema is not None and schema not in (
+            "pharos.scene/v1", "kiosk.scene/v1"):
+        errors.append(f"unrecognized schema {schema!r} "
+                      "(expected pharos.scene/v1)")
 
     if data.get("units", "meters") != "meters":
         errors.append("units must be 'meters' (Pharos exports are metre-based)")
