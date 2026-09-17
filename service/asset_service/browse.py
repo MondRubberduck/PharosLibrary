@@ -636,7 +636,7 @@ def api_collection_item(params: dict) -> dict:
         r["tags"] = []
     r.pop("taglist", None)
     r.pop("meta", None)
-    return {"item": r}
+    out = dict(r); out["item"] = r; return out
 
 
 def api_collection_tag(params: dict, body: dict) -> dict:
@@ -823,7 +823,7 @@ def api_textures_item(params: dict) -> dict:
     r["res"] = (r.get("meta") or {}).get("res") or ""
     r["desc"] = (r.get("meta") or {}).get("desc") or ""
     r["themes"] = (r.get("meta") or {}).get("themes") or []
-    return {"item": r}
+    out = dict(r); out["item"] = r; return out
 
 
 # ---------------------------------------------------------------------------
@@ -982,7 +982,7 @@ def api_audio_item(params: dict) -> dict:
         return {"error": "not found"}
     r["relfull"] = (AUDIO_ROOT / r["rel"]).as_posix()
     r["tags"] = [t for t in r["tags"]][:18]
-    return {"item": r}
+    out = dict(r); out["item"] = r; return out
 
 
 # ---------------------------------------------------------------------------

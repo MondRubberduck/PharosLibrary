@@ -139,11 +139,11 @@ the configured roots — outside paths return 404/403.
 | `/api/meshes/packs` | — (exact pack names + wiring health; call BEFORE `pack=`) | `packs` |
 | `/api/meshes/themes` | — (theme vocabulary + counts) | `themes` |
 | `/api/textures/items` | `q`, `group`, `sub` | `items` |
-| `/api/textures/item?id=` | — | object |
+| `/api/textures/item?id=` | — | object (fields at top level + `item` copy) |
 | `/api/audio/items` | `q`, `cat`, `sub`, `min_dur` (seconds) | `items` |
-| `/api/audio/item?id=` | — | object |
+| `/api/audio/item?id=` | — | object (fields at top level + `item` copy) |
 | `/api/collection/items` | `q`, `store`, `group`, `cat`, `avail=local|notdown` | `items` |
-| `/api/collection/item?id=` | — | object |
+| `/api/collection/item?id=` | — | object (fields at top level + `item` copy) |
 | `/api/anim/clips` | `q`, `packs` (pipe-separated), `page`, `size` | `clips` (NOT `items`) |
 | `/api/anim/tree` | — | folders + counts |
 | `/api/stats` | — | `stats` (legacy packs) + `sections` (live totals) |
