@@ -16,7 +16,7 @@
 set -uo pipefail
 
 CONV_ROOT="$(cd "$(dirname "$0")" && pwd)"
-TOOLS="$CONV_ROOT/tools"
+TOOLS="$CONV_ROOT"          # the helper scripts live beside this driver
 STATUSDIR="$CONV_ROOT/status"
 ASSETS_ROOT="${ASSETS_ROOT:?set ASSETS_ROOT to your pack source root}"
 MAX_PACKS=0
@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mkdir -p "$STATUSDIR"
+mkdir -p "$STATUSDIR" "$CONV_ROOT/logs"
 
 # ---- build the plan: every pack with >0 assets, ascending by asset count ----
 PLAN="$(python - "$TOOLS/pack_discovery.py" "$ASSETS_ROOT" <<'PY'

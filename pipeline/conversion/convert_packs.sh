@@ -36,7 +36,7 @@ set -uo pipefail
 UE_EXE="${UE_EXE:-}"   # e.g. "/c/Program Files/Epic Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
 BLENDER_EXE="${BLENDER_EXE:-}"   # e.g. "/c/Program Files/Blender Foundation/Blender 5.1/blender.exe"
 CONV_ROOT="$(cd "$(dirname "$0")" && pwd)"
-TOOLS="$CONV_ROOT/tools"
+TOOLS="$CONV_ROOT"    # the helper scripts live beside this driver
 SANDBOX="$CONV_ROOT/sandbox"
 SANDBOX_CONTENT="$SANDBOX/Content"
 PROJECT="$SANDBOX/Sandbox.uproject"
