@@ -1,13 +1,12 @@
-import sys
-from pathlib import Path
 """Fold the KitBash3D kit exports into the agent-facing model index.
 
 One record per group assembly, matching the models.jsonl schema so an agent can
-query kits and Leartes packs the same way.
+query kits and converted packs the same way.
 
 Writes <library_root>/_Agent_Files/kb3d_models.jsonl
 """
-import glob, io, json, os
+import glob, io, json, os, sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import agent_files

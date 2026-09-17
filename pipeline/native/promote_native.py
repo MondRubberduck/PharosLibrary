@@ -1,7 +1,4 @@
-import sys
-from pathlib import Path
-"""
-TASK 2 -- promote the native geometry records into the agent index.
+"""TASK 2 -- promote the native geometry records into the agent index.
 
 Source : the 1,461 records produced by the native import pass
          (CGTrader / TurboSquid / Mens_V1 / uploads / KitbashOrdner FBX+USD)
@@ -12,7 +9,7 @@ Deliberately EXCLUDED: the .blend object enumeration (native_index_blends.jsonl)
 the owner's standing instruction is to leave .blend files alone, and the KitBash3D
 kits are already covered assembly-by-assembly by kb3d_models.jsonl.
 """
-import collections, io, json, os
+import collections, glob, io, json, os, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -23,7 +20,6 @@ T = str(Path(__file__).resolve().parent)
 SRC = os.path.join(T, "native_index_20260915-172648.jsonl")
 if not os.path.isfile(SRC):
     # look for any recent native_index_*.jsonl
-    import glob
     candidates = sorted(glob.glob(os.path.join(T, "native_index_*.jsonl")))
     SRC = candidates[-1] if candidates else ""
 

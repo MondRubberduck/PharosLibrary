@@ -1,7 +1,4 @@
-import sys
-from pathlib import Path
-"""
-FIX: promote the .blend object enumeration into the agent-facing native index.
+"""FIX: promote the .blend object enumeration into the agent-facing native index.
 
 Background: an earlier enumeration (native_index_blends.jsonl, 6,375 records) covered
   KitbashOrdner 5,731 / CGTrader 640 / BlendFiles 4
@@ -18,7 +15,8 @@ Writes the extra records into native_models.jsonl (one native index, not two).
 READ-ONLY on every .blend - nothing is opened or modified, this only re-files
 records an earlier read-only pass already produced.
 """
-import io, os, json, collections
+import collections, io, json, os, sys
+from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

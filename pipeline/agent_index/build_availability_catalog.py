@@ -1,6 +1,4 @@
-from pathlib import Path
-"""
-build_availability_catalog.py
+"""build_availability_catalog.py
 
 Builds the agent-facing catalogue the owner asked for: one list that covers
   * what is ON DISK right now, and
@@ -11,8 +9,9 @@ non-local assets as non-existent.
 Reads the human app's registry READ-ONLY. Writes only into _Agent_Files.
 """
 import sqlite3, os, re, io, json, collections, datetime
-
 import sys
+from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import library_root, db_path

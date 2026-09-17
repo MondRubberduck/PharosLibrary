@@ -1,6 +1,4 @@
-from pathlib import Path
-"""
-build_agent_index.py -- the agent-facing layer for the asset library.
+"""build_agent_index.py -- the agent-facing layer for the asset library.
 
 Produces, under <library_root>/_Agent_Files :
   packs.json            one record per library section / pack, with a
@@ -15,8 +13,9 @@ Re-runnable at any time; safe to run while a conversion batch is in progress
 (reads only).  Never writes outside _Agent_Files.
 """
 import io, os, json, datetime, collections
-
 import sys
+from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import library_root
