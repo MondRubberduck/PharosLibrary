@@ -70,24 +70,9 @@ def detect_channel(filename: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def fbx_bbox(path: Path) -> Optional[list[float]]:
-    """Extract approximate bounding box from binary FBX by scanning
-    Vertices arrays. Returns [x, y, z] extents or None."""
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return None
-    if not data.startswith(b"Kaydara FBX Binary"):
-        return None
-    # find the largest 'd' array (float64) — this is usually Vertices
-    # simplified: scan for 'Vertices' then read the following array
-    idx = data.find(b"Vertices\x00\x00d\x00\x00\x00")
-    if idx < 0:
-        idx = data.find(b"Vertices")
-        if idx < 0:
-            return None
-    # skip name + type byte + array length (u32) + encoding + compressed len
-    # this is approximate; for production use the full parser
-    return None  # requires full binary parse; deferred to trimesh path
+    """DEPRECATED stub -- real FBX dimensions live in fbx_dims.fbx_bbox_m
+    (kept only so old imports do not break)."""
+    return None
 
 
 def obj_bbox(path: Path) -> Optional[list[float]]:
@@ -193,6 +178,14 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
     if not dry_run:
         conn = sqlite3.connect(db_path or config.DB_PATH)
         conn.row_factory = sqlite3.Row
+        # a fresh install may run the scanner BEFORE the server ever
+        # started -- create every table this scanner writes (all DDLs are
+        # IF NOT EXISTS, so this is a no-op against an existing registry)
+        from asset_service.meshes_import import MESHES_DDL
+        from asset_service.textures_import import TEXTURES_DDL
+        from asset_service.audio_import import AUDIO_DDL
+        conn.executescript(MESHES_DDL + TEXTURES_DDL + AUDIO_DDL)
+        conn.commit()
 
     # --- pass 1: find manifests (authoritative mesh data) ---
     manifests = {}
@@ -255,7 +248,14 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
         else:
             # try to extract geometry
             geo = None
-            if mf.suffix.lower() == ".obj":
+            if mf.suffix.lower() == ".fbx":
+                from asset_service.fbx_dims import fbx_bbox_m
+                g = fbx_bbox_m(mf)
+                if g:
+                    geo = {"bbox": g["bbox_m"],
+                           "triangles": g["triangles"],
+                           "vertices": g["vertices"]}
+            elif mf.suffix.lower() == ".obj":
                 bbox = obj_bbox(mf)
                 tri = obj_triangles(mf)
                 if bbox:

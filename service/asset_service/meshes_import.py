@@ -73,6 +73,10 @@ CREATE TABLE IF NOT EXISTS meshes (
 );
 CREATE INDEX IF NOT EXISTS idx_meshes_pack ON meshes(pack);
 CREATE INDEX IF NOT EXISTS idx_meshes_maxdim ON meshes(max_dim);
+-- scanner.py owns rows with source='scan'; one per (name, pack) so
+-- re-scanning a folder replaces instead of duplicating
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meshes_name_pack_scan
+  ON meshes(name, pack) WHERE source='scan';
 -- per-pack material-wiring health, straight from the export manifests
 CREATE TABLE IF NOT EXISTS mesh_pack_wiring (
   pack TEXT PRIMARY KEY,
@@ -557,6 +561,14 @@ def import_meshes(db_path: str | Path) -> int:
 
         by_ap, by_pn, raw_index, wiring, mstats = _manifest_index()
 
+        # scanner-indexed rows (source='scan') are owned by scanner.py, not
+        # by the crawler JSONLs -- this rebuild must preserve them (a fresh
+        # install without crawler output has NOTHING else in this table)
+        scan_cols = [d[0] for d in conn.execute(
+            "SELECT * FROM meshes WHERE source='scan' LIMIT 0").description]
+        scan_rows = [tuple(r) for r in conn.execute(
+            "SELECT * FROM meshes WHERE source='scan'")]
+
         conn.execute("DELETE FROM meshes")
         conn.execute("DELETE FROM sqlite_sequence WHERE name='meshes'")
         conn.execute("DELETE FROM mesh_pack_wiring")
@@ -598,6 +610,12 @@ def import_meshes(db_path: str | Path) -> int:
                         r["bbox_min_x"], r["bbox_min_y"], r["bbox_min_z"],
                         r["bbox_max_x"], r["bbox_max_y"], r["bbox_max_z"]))
                     n += 1
+
+        if scan_rows:
+            conn.executemany(
+                f"INSERT INTO meshes ({','.join(scan_cols)}) "
+                f"VALUES ({','.join('?' for _ in scan_cols)})", scan_rows)
+            n += len(scan_rows)
 
         # A pack that owns mesh rows but no manifest FILE at all (CGTrader, ...)
         # still gets a row, with a ratio of None: no wiring exists to report. This

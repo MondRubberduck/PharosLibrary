@@ -1146,6 +1146,7 @@ def api_meshes(params: dict) -> dict:
             **_mesh_extras(r),
             "tier": q_tier if qstems else 0,
         })
+    fallback_ranked = False
     if not items and or_items and qstems:
         # OR fallback, ranked by token RARITY (inverse frequency among the
         # fallback rows): a row hitting the selective token ('cobblestone',
@@ -1180,11 +1181,14 @@ def api_meshes(params: dict) -> dict:
             for t in e["_toks"]))
         for e in items:
             e.pop("_toks", None)
+        fallback_ranked = True
     if sort == "max_dim":
         items.sort(key=lambda x: -(x["max_dim_m"] or 0))
     elif sort == "triangles":
         items.sort(key=lambda x: x["triangles"])
-    else:
+    elif not fallback_ranked:
+        # default alphabetical order; after a rarity-ranked OR fallback it
+        # would destroy the ranking we just computed
         items.sort(key=lambda x: (x["pack"], x["name"].lower()))
     total = len(items)
     exact = sum(1 for e in items if e.get("tier", 0) < 3)
