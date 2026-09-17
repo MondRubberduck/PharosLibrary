@@ -411,7 +411,11 @@ def _apply_ground_textures(manifest, ground_y):
                  if p.is_file() and p.suffix.lower()
                  in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp")]
         if setname:
-            files = [p for p in files if setname.lower() in p.name.lower()]
+            # display names use spaces, filenames use underscores --
+            # compare on alphanumerics only
+            norm = lambda s: re.sub(r"[^a-z0-9]+", "", s.lower())
+            key = norm(setname)
+            files = [p for p in files if key in norm(p.stem)]
         recipe = {}
         for p in files:
             n = p.name.lower()
