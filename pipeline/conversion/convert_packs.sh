@@ -94,7 +94,16 @@ if [[ "$NO_REPLACE" == "1" ]]; then
   fi
 fi
 [[ -f "$UE_EXE" ]] || { echo "ERROR: UE not found: $UE_EXE" >&2; exit 2; }
-[[ -f "$PROJECT" ]] || { echo "ERROR: sandbox project missing: $PROJECT" >&2; exit 2; }
+# the sandbox is deliberately NOT shipped (its EngineAssociation must match
+# THIS machine's UE) -- generate it locally, once, then re-run this script
+[[ -f "$PROJECT" ]] || {
+  echo "ERROR: sandbox project missing: $PROJECT" >&2
+  echo "       create it once with:" >&2
+  echo "         python \"$(cygpath -m "$CONV_ROOT" 2>/dev/null || echo "$CONV_ROOT")/make_sandbox.py\"" >&2
+  echo "       (empty throwaway UE project, Python plugin enabled;" >&2
+  echo "        your sources are copied in and out, never modified)" >&2
+  exit 2
+}
 mkdir -p "$LOGDIR" "$STATUSDIR"
 
 SLUG="$(echo "$PACK" | tr ' /\\' '___')"

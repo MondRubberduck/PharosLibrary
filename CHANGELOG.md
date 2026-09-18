@@ -24,6 +24,11 @@ printed by the suites themselves, never hand-typed).
 - `convert_packs.sh`: `--no-replace` is implemented (was parsed and
   silently ignored) and game-root splitting no longer breaks on /Game
   folders containing spaces.
+- The UE conversion sandbox is no longer a hidden prerequisite: it was
+  never shipped (its EngineAssociation must match the local UE), but the
+  drivers dead-ended without saying so. New `pipeline/conversion/
+  make_sandbox.py` generates it locally (version derived from `UE_EXE`),
+  and both drivers now print that exact command when it is missing.
 - Fresh-install smoke suite prints its own check count; a pytest wrapper
   (`tests/test_smoke_entry.py`) makes plain `pytest` run the contract —
   previously pytest reported green while skipping it entirely.

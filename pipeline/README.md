@@ -37,6 +37,8 @@ round-trip check), Git Bash.**
 export UE_EXE="/c/Program Files/Epic Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
 export ASSETS_ROOT="D:/path/to/packs"          # children = packs
 cd pipeline/conversion
+python make_sandbox.py                         # ONE-TIME: generate the local
+                                               # conversion sandbox (see below)
 bash ./convert_packs.sh --pack "MyPack"        # adds --skip-meshes NAME for
                                                # exporter-crashing assets
 bash ./relink_pack.sh --pack "MyPack" --preview # engine-exact wiring, dry run
@@ -44,6 +46,15 @@ python verify_pack_export.py "<pack>/Exports"  # must print PASS
 ```
 Manifest schema: `pharos.pack.export/v2` (v1 = inventory only). Legacy
 `kiosk.*` schema IDs are accepted everywhere on read.
+
+**The sandbox** (`sandbox/Sandbox.uproject`) is NOT shipped in the repo —
+it is an empty throwaway UE project whose EngineAssociation must match
+YOUR UE install, so `make_sandbox.py` generates it locally (deriving the
+version from `UE_EXE`, or pass `--engine-version 5.7`). It enables
+`PythonScriptPlugin`, packs are robocopied into its `Content/` for the
+headless engine run, and your sources stay read-only. Delete and
+regenerate any time. If a driver reports "sandbox project missing", it
+prints exactly this command.
 
 ### 2. `kitbash/` — KitBash-style `.blend` kits → per-assembly FBX
 **Requires: Blender.** One FBX per root assembly (`*_grp`), textures

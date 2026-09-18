@@ -119,6 +119,69 @@ def test_kb3d_index_absolutizes_relative_fbx_paths():
             assert Path(row["fbx"]).is_file(), row["fbx"]
 
 
+def test_make_sandbox_creates_usable_uproject():
+    """The conversion sandbox is generated locally, not shipped (its
+    EngineAssociation must match the machine's UE). The generator must
+    produce a valid uproject with the Python plugin enabled, derive the
+    association from UE_EXE, and refuse to clobber without --force."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "sandbox"
+        r = subprocess.run(
+            [sys.executable, "-B",
+             str(REPO / "pipeline" / "conversion" / "make_sandbox.py"),
+             "--out", out],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120,
+            env={**os.environ,
+                 "UE_EXE": r"C:\Program Files\Epic Games\UE_5.7\Engine"
+                           r"\Binaries\Win64\UnrealEditor-Cmd.exe"})
+        assert r.returncode == 0, (r.stderr or "")[-300:]
+        doc = json.loads((out / "Sandbox.uproject").read_text(
+            encoding="utf-8"))
+        assert doc["EngineAssociation"] == "5.7", doc
+        assert any(p.get("Name") == "PythonScriptPlugin" and p.get("Enabled")
+                   for p in doc.get("Plugins") or []), doc
+        assert (out / "Content").is_dir()
+        # idempotent: a second run must not clobber, and must say so
+        r2 = subprocess.run(
+            [sys.executable, "-B",
+             str(REPO / "pipeline" / "conversion" / "make_sandbox.py"),
+             "--out", out],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        assert r2.returncode == 0 and "already exists" in (r2.stdout or "")
+
+
+def test_drivers_print_sandbox_remediation():
+    """A virgin machine without a sandbox must get the exact regeneration
+    command, not a bare 'missing' error (the sandbox is generated locally
+    on purpose, so the error message IS the setup documentation)."""
+    # the test needs a machine WITHOUT a sandbox; a generated one may
+    # legitimately exist in the repo tree -- move it aside, restore after
+    # (same backup/restore pattern as the fresh-install suite's config)
+    real_sandbox = REPO / "pipeline" / "conversion" / "sandbox"
+    parked = None
+    if real_sandbox.is_dir():
+        parked = real_sandbox.with_name("sandbox.parked-for-test")
+        real_sandbox.rename(parked)
+    try:
+        for driver in ("convert_packs.sh", "relink_pack.sh"):
+            r = subprocess.run(
+                ["bash", str(REPO / "pipeline" / "conversion" / driver),
+                 "--pack", "FixturePack"],
+                capture_output=True, text=True, cwd=str(REPO), timeout=120,
+                env={**os.environ,
+                     # any real file passes the UE check so the sandbox
+                     # check (and its remediation message) is what fires
+                     "UE_EXE": sys.executable,
+                     "ASSETS_ROOT": REPO.as_posix()})
+            combined = (r.stdout or "") + (r.stderr or "")
+            assert r.returncode == 2, (driver, r.returncode, combined[-200:])
+            assert "make_sandbox.py" in combined, \
+                f"{driver} no longer points at the generator: {combined[-300:]}"
+    finally:
+        if parked is not None and parked.is_dir() and not real_sandbox.exists():
+            parked.rename(real_sandbox)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
