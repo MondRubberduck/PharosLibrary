@@ -26,6 +26,8 @@ def main() -> int:
     rx = re.compile("|".join(PATTERNS), re.I)
     hits = []
     for f in files:
+        if f.replace("\\", "/") == "tools/leak_scan.py":
+            continue          # this file legitimately contains the patterns
         try:
             text = open(f, encoding="utf-8", errors="replace").read()
         except OSError:
