@@ -113,7 +113,12 @@ def detect(root: Path) -> dict:
     for child in sorted(root.iterdir()):
         if not child.is_dir() or child.name.startswith(("_", ".")):
             continue
-        kind = _dominant(_census(child))
+        counts = _census(child)
+        kind = _dominant(counts)
+        if counts.get(".blend"):
+            # .blend files need an explicit decision (enumerate containers,
+            # export kits, or leave them alone) -- surface the candidates
+            report.setdefault("blend_folders", []).append(child.name)
         if kind == "meshes":
             report["mesh_folders"].append(child.name)
         elif kind:
@@ -229,6 +234,10 @@ def run_init(argv=None) -> int:
     if report["mesh_folders"]:
         print("  model folders (index via scanner, not a section): "
               + ", ".join(report["mesh_folders"]))
+    if report.get("blend_folders"):
+        print("  blend folders (decision needed: enumerate containers, "
+              "export kits, or leave as-is): "
+              + ", ".join(report["blend_folders"]))
     if report["unknown"]:
         print("  unclassified (mixed/other content): "
               + ", ".join(report["unknown"]))
@@ -291,8 +300,13 @@ def run_init(argv=None) -> int:
     print("  4. Animation previews render once in a browser tab -- OK?")
 
     print("\nnext steps:")
-    print("  start the server : python pharos.py serve"
+    print("  check setup     : python pharos.py doctor")
+    print("  auto-run chains : python pharos.py ingest  (relays the "
+          "decision questions to your user)")
+    print("  start the server: python pharos.py serve"
           "   (or python service/asset_service/browse.py)")
+    print("  agent setup flow: docs/STARTING_PROMPT.md + "
+          "docs/AGENT_SETUP_BRIEF.md")
     if report["mesh_folders"]:
         print("  index model folders: python service/asset_service/scanner.py "
               f"\"{root / report['mesh_folders'][0]}\"")

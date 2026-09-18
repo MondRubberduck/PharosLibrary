@@ -1,9 +1,43 @@
 # Changelog
 
 ## 0.2.1 (2026-09-18)
-Honesty + pipeline-correctness pass (audit follow-up; counts below are
-printed by the suites themselves, never hand-typed).
+Honesty + pipeline-correctness pass, then the setup-experience phase
+(Phase 0-2 of the audit roadmap; counts below are printed by the suites
+themselves, never hand-typed).
 
+- `pharos.py doctor` (+ `--json`): one command that checks python,
+  config, registry schema, PER-SECTION coverage (a zero section is
+  reported as "not indexed" with the filling command -- empty is a
+  state, not an error), section folders on disk, generated-docs
+  staleness, the configured port, and optional engines (Blender, UE,
+  git-bash, MCP). Every gap carries a paste-ready fix.
+- `pharos.py ingest`: runs every chain that is safe to run
+  automatically in order (scanner for model folders and audio,
+  animation indexer, the four importers, agent docs) and prints an
+  ASK YOUR USER block with the decisions that must be relayed (UE pack
+  crawl, KitBash3D/.blend handling, purchase CSV, crawl-quality
+  indexes). `init` now surfaces .blend folders as such a decision.
+- The texture index chain self-builds its `tex_meta.json` cache
+  (previously a hand-made leftover no script produced -- the chain was
+  author-machine-only). Dims come from a stdlib header sniffer
+  (PNG/JPEG/GIF/BMP/TIFF/WEBP/EXR/HDR/PSD); unparseable files are
+  "unknown", never guessed. `--rescan` rebuilds; `AGENT_TEX_META`
+  overrides the cache path.
+- docs/STARTING_PROMPT.md: the paste-ready setup prompt for users.
+  docs/AGENT_SETUP_BRIEF.md: the agent's setup contract -- decision
+  matrix, mandatory interview, definition of done. README, `init` and
+  the generated AGENT_START_HERE point at them.
+- scene_builder: a texture set whose display name matches no filename
+  in its folder now falls back to ALL maps in the folder (the folder is
+  the set the user pointed at). Found by live verification: a "1k"
+  subfolder row used to silently lose the ground plane.
+- Live verification (scratch harness, real registry): server boot +
+  published counts, geometry search honouring metre filters with
+  on-disk recipe spot checks, jailed image serving + traversal escapes,
+  audio HTTP Range, MCP over stdio (6 tools, live numbers), and a
+  headless Blender build from API-picked assets reopened and asserted
+  (ground snapping, rotation conjugation, per-slot materials, live
+  textures, textured ground plane).
 - Data retention now truly covers all three tables: the audio table
   gained a `source` column and `audio_import` no longer wipes
   scanner-indexed rows when a crawl jsonl exists (UNIQUE(rel) contract:

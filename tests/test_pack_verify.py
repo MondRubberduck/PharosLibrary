@@ -16,6 +16,7 @@ Run standalone: python -B tests/test_pack_verify.py
 
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -180,6 +181,76 @@ def test_drivers_print_sandbox_remediation():
     finally:
         if parked is not None and parked.is_dir() and not real_sandbox.exists():
             parked.rename(real_sandbox)
+
+
+def _png(w=1, h=1):
+    import zlib
+    def chunk(t, d):
+        c = t + d
+        return (struct.pack(">I", len(d)) + c
+                + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF))
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    raw = b"".join(b"\x00" + b"\x10\x20\x30" * w for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def _jpeg(w=3, h=2):
+    sof = (b"\xff\xc0" + struct.pack(">H", 17) + b"\x08"
+           + struct.pack(">HH", h, w) + b"\x03" + b"\x01\x22\x00")
+    return b"\xff\xd8" + sof + b"\xff\xd9"
+
+
+def test_tex_index_self_builds_cache():
+    """gen_tex_index required a hand-made tex_meta.json that NO script
+    produced -- the chain was author-machine-only. The self-builder must
+    create the cache from the root, parse real image dims from headers
+    (PNG/JPEG/GIF/BMP), mark unparseable files as unknown, and reuse the
+    cache on the next run."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        tex = tmp / "tex"
+        (tex / "Wood").mkdir(parents=True)
+        (tex / "Metal").mkdir()
+        names = ([f"plank_{i:02d}" for i in range(4)]
+                 + [f"steel_{i:02d}" for i in range(4)])
+        for i, base in enumerate(names):
+            sub = tex / ("Wood" if base.startswith("plank") else "Metal")
+            (sub / f"{base}_albedo.png").write_bytes(_png(1, 1))
+            (sub / f"{base}_normal.png").write_bytes(_png(1, 1))
+        (tex / "Wood" / "odd_dim.jpg").write_bytes(_jpeg(3, 2))
+        (tex / "Metal" / "odd.gif").write_bytes(
+            b"GIF89a" + struct.pack("<HH", 5, 7) + b"\x00\x00;")
+        (tex / "Metal" / "odd.bmp").write_bytes(
+            b"BM" + b"\x00" * 16 + struct.pack("<ii", 9, -4))
+        (tex / "Wood" / "junk.png").write_bytes(b"\x89PNG garbage")
+        r = _run("pipeline/agent_index/gen_tex_index.py", {
+            "AGENT_TEX_ROOT": str(tex),
+            "AGENT_TEX_META": str(tmp / "tex_meta.json"),
+            "PHAROS_CONFIG": str(tmp / "missing.json"),
+        })
+        assert r.returncode == 0, (r.stderr or "")[-400:]
+        assert "cache missing" in (r.stdout or ""), (r.stdout or "")[:300]
+        assert "wrote library_index.json" in (r.stdout or "")
+        files_jsonl = tex / "library_files.jsonl"
+        assert files_jsonl.is_file()
+        rows = {json.loads(l)["p"]: json.loads(l)
+                for l in files_jsonl.read_text(
+                    encoding="utf-8").splitlines() if l.strip()}
+        assert len(rows) >= 10
+        assert rows["Wood/odd_dim.jpg"]["w"] == 3, rows["Wood/odd_dim.jpg"]
+        assert rows["Metal/odd.gif"]["h"] == 7
+        assert rows["Metal/odd.bmp"]["w"] == 9
+        assert rows["Metal/odd.bmp"]["h"] == 4          # negative height abs
+        assert rows["Wood/junk.png"]["w"] is None       # unknown, never guessed
+        # second run reuses the cache (no rebuild chatter)
+        r2 = _run("pipeline/agent_index/gen_tex_index.py", {
+            "AGENT_TEX_ROOT": str(tex),
+            "AGENT_TEX_META": str(tmp / "tex_meta.json"),
+            "PHAROS_CONFIG": str(tmp / "missing.json"),
+        })
+        assert r2.returncode == 0, (r2.stderr or "")[-300:]
+        assert "cache missing" not in (r2.stdout or "")
 
 
 if __name__ == "__main__":

@@ -93,9 +93,11 @@ results, never errors.
 
 **Work in phases** (full manual: `<repo>/docs/AGENT_PLAYBOOK.md`):
 Phase 1 = setup + crawl + INTERVIEW your user (are these all the
-folders? crawl UE? purchase CSV?) until the server banner says
-INGESTION COMPLETE and the user confirmed. Phase 2 = build, following
-the priority lists:
+folders? crawl UE? purchase CSV? what to do with .blend files?) until
+the server banner says INGESTION COMPLETE and the user confirmed. If
+setup was never finished, `<repo>/docs/AGENT_SETUP_BRIEF.md` is the
+decision matrix and `<repo>/docs/STARTING_PROMPT.md` the paste-ready
+flow. Phase 2 = build, following the priority lists:
 
 1. Asset on disk → use it. 2. On demand (owned-not-downloaded) → ask
 the user with a requisition list, never substitute silently. 3. Not in

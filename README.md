@@ -57,21 +57,20 @@ pip installs). Your agent does everything else.
 git clone https://github.com/MondRubberduck/PharosLibrary.git
 ```
 
-**2 — paste this SETUP prompt to your coding agent** (edit the one path
-in angle brackets — your agent runs every command itself):
+**2 — paste the starting prompt to your coding agent** (edit the paths
+in angle brackets — your agent runs every command itself, and will ask
+you the setup questions before touching any engine):
 
 ```
-Set up Pharos for my asset library.
-
-1. Read <repo>/README.md and <repo>/docs/AGENT_PLAYBOOK.md fully, then
-   follow PHASE 1 of the playbook.
-2. My assets live at: <D:/path/to/your/assets>
-   Run pharos.py init on that folder, fix anything the detector got
-   wrong in pharos_config.json, scan/crawl every folder the summary
-   lists, start the server, and generate the agent docs.
-3. Then ASK ME the playbook's interview questions before anything else.
-   When the server prints INGESTION COMPLETE, report the numbers to me.
+Set up Pharos for my asset library. Setup only.
+Read <repo>/README.md, then <repo>/docs/STARTING_PROMPT.md and follow it
+exactly. My assets live at <D:/path/to/your/assets>.
 ```
+
+The full paste-ready prompt (and the interview it forces) lives in
+[`docs/STARTING_PROMPT.md`](docs/STARTING_PROMPT.md); the agent's side of
+the deal — the decision matrix and the questions it must relay to you —
+is [`docs/AGENT_SETUP_BRIEF.md`](docs/AGENT_SETUP_BRIEF.md).
 
 **3 — from then on, paste this BUILD prompt with your idea:**
 

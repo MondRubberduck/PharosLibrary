@@ -444,6 +444,52 @@ def main() -> int:
               and bak.read_text(encoding="utf-8") == gen2_on_disk,
               f"baks={[b.name for b in baks]}")
 
+        # 6b. doctor: the one-command setup check must parse, report live
+        # section counts, and pass on a correctly-prepared fixture install
+        r = subprocess.run(
+            [sys.executable, str(REPO / "pharos.py"), "doctor", "--json"],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        check("doctor exits 0 on a working fixture install",
+              r.returncode == 0, (r.stderr or "")[-120:])
+        try:
+            d = json.loads(r.stdout)
+        except ValueError:
+            d = {}
+        check("doctor --json parses with a verdict",
+              d.get("verdict") in ("READY", "READY-WITH-GAPS"),
+              str(d.get("verdict")))
+        check("doctor reports live section counts",
+              any(c["name"] == "section:meshes" and c["status"] == "ok"
+                  for c in d.get("checks", [])),
+              str([c for c in d.get("checks", [])
+                   if c["name"] == "section:meshes"]))
+
+        # 6c. ingest --dry-run lists the safe chains and runs nothing;
+        # a real ingest chains scanner/indexer/importers/docs and prints
+        # the ASK YOUR USER decision block
+        r = subprocess.run(
+            [sys.executable, str(REPO / "pharos.py"), "ingest", "--dry-run"],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        check("ingest dry-run lists commands, runs nothing",
+              r.returncode == 0 and "scanner.py" in r.stdout
+              and "(dry-run: skipped)" in r.stdout,
+              (r.stderr or "")[-120:])
+        r = subprocess.run(
+            [sys.executable, str(REPO / "pharos.py"), "ingest"],
+            capture_output=True, text=True, cwd=str(REPO), timeout=600)
+        check("ingest exits 0 with decision block",
+              r.returncode == 0 and "ASK YOUR USER" in r.stdout,
+              (r.stderr or "")[-140:])
+        _c = _sq.connect(dbp)
+        _anim = _c.execute("SELECT COUNT(*) FROM assets WHERE "
+                           "id LIKE 'pack::Animation/%'").fetchone()[0]
+        _mesh_n = _c.execute("SELECT COUNT(*) FROM meshes").fetchone()[0]
+        _c.close()
+        check("ingest indexed animation packs",
+              _anim >= 1, f"anim={_anim}")
+        check("ingest kept meshes intact across rebuild",
+              _mesh_n >= 3, f"meshes={_mesh_n}")
+
         # ...and a fresh install with no registry yet must get a plain,
         # actionable message, never a sqlite3 traceback
         cfg_now = json.loads(cfg_path.read_text(encoding="utf-8"))

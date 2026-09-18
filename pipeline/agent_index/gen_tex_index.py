@@ -1,7 +1,6 @@
 from pathlib import Path
-import os, re, json, collections, datetime
+import os, re, json, collections, datetime, struct, sys
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _config import section_root
 ROOT = section_root("textures", "AGENT_TEX_ROOT")
@@ -10,7 +9,158 @@ if not os.path.isdir(ROOT):
     raise SystemExit("FATAL: texture root does not exist: %s" % ROOT)
 SKIP_NAMES = {"library_index.json", "library_files.jsonl", "material_sets.jsonl", "AGENT_INDEX.md"}
 
-meta = json.load(open(os.path.join(TMP, "tex_meta.json"), encoding="utf-8"))
+# ---------------------------------------------------------------------------
+# tex_meta cache (path/ext/bytes/w/h per image). The cache is BUILT HERE when
+# missing (it used to be a hand-made leftover that no script produced, which
+# made this chain author-machine-only). AGENT_TEX_META env overrides the
+# cache path; --rescan forces a rebuild. Dims are read from file headers by a
+# stdlib sniffer; anything unparseable gets w/h None and shows as "unknown"
+# resolution -- never a crash, never a guess.
+# ---------------------------------------------------------------------------
+RES_CANON = ("--rescan" in sys.argv)
+META_PATH = os.environ.get("AGENT_TEX_META") or os.path.join(TMP, "tex_meta.json")
+FILEEXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".gif",
+           ".psd", ".exr", ".hdr"}
+
+def _image_dims(path, head):
+    """(w, h) from file headers, or (None, None). Header-level only."""
+    try:
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            return struct.unpack(">II", head[16:24])
+        if head[:2] == b"\xff\xd8":                                   # JPEG
+            data = head
+            pos = 2
+            while pos + 4 < len(data):
+                if data[pos] != 0xFF:
+                    pos += 1
+                    continue
+                marker = data[pos + 1]
+                if marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
+                    pos += 2
+                    continue
+                seglen = struct.unpack(">H", data[pos + 2:pos + 4])[0]
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    h, w = struct.unpack(">HH", data[pos + 5:pos + 9])
+                    return (w, h)
+                pos += 2 + seglen
+            return (None, None)
+        if head[:6] in (b"GIF87a", b"GIF89a"):
+            return struct.unpack("<HH", head[6:10])
+        if head[:2] == b"BM":
+            w, h = struct.unpack("<ii", head[18:26])
+            return (w, abs(h))
+        if head[:4] in (b"II*\x00", b"MM\x00\x00"):                   # TIFF
+            e = "<" if head[:2] == b"II" else ">"
+            ifd = struct.unpack(e + "I", head[4:8])[0]
+            with open(path, "rb") as fh:
+                fh.seek(ifd)
+                body = fh.read(2 + 12 * 64)
+            n = struct.unpack(e + "H", body[:2])[0]
+            dims = {}
+            for i in range(min(n, 64)):
+                off = 2 + 12 * i
+                tag, typ = struct.unpack_from(e + "HH", body, off)
+                if tag in (256, 257):
+                    val = struct.unpack_from(e + ("H" if typ == 3 else "I"),
+                                             body, off + 8)[0]
+                    dims[tag] = val
+            return (dims.get(256), dims.get(257))
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP":             # WEBP
+            with open(path, "rb") as fh:
+                data = fh.read(64)
+            o = 12
+            while o + 8 <= len(data):
+                fourcc = data[o:o + 4]
+                size = struct.unpack("<I", data[o + 4:o + 8])[0]
+                payload = data[o + 8:o + 8 + min(size, 32)]
+                if fourcc == b"VP8X" and len(payload) >= 10:
+                    w = int.from_bytes(payload[4:7], "little") + 1
+                    h = int.from_bytes(payload[7:10], "little") + 1
+                    return (w, h)
+                if fourcc == b"VP8L" and len(payload) >= 6 and payload[0] == 0x2F:
+                    bits = struct.unpack("<I", payload[1:5])[0]
+                    return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+                if fourcc == b"VP8 " and payload[3:6] == b"\x9d\x01\x2a":
+                    w = struct.unpack("<H", payload[6:8])[0] & 0x3FFF
+                    h = struct.unpack("<H", payload[8:10])[0] & 0x3FFF
+                    return (w, h)
+                o += 8 + size + (size & 1)
+            return (None, None)
+        if head[:4] == b"\x76\x2f\x31\x01":                           # OpenEXR
+            with open(path, "rb") as fh:
+                fh.seek(8)
+                buf = fh.read(1 << 16)
+            i = 0
+            while i < len(buf):
+                e = buf.find(b"\x00", i)
+                if e < 0 or e == i:
+                    break
+                name = buf[i:e]
+                i = e + 1
+                e = buf.find(b"\x00", i)
+                if e < 0:
+                    break
+                i = e + 1
+                size = struct.unpack("<I", buf[i:i + 4])[0]
+                i += 4
+                if name == b"dataWindow" and size == 16:
+                    x0, y0, x1, y1 = struct.unpack("<iiii", buf[i:i + 16])
+                    return (x1 - x0 + 1, y1 - y0 + 1)
+                i += size
+        if head[:11] in (b"#?RADIANCE\n", b"#?\n"):                   # Radiance HDR
+            with open(path, "rb") as fh:
+                for _ in range(64):
+                    line = fh.readline(512)
+                    if not line:
+                        break
+                    if line.startswith(b"-Y"):
+                        parts = line.split()
+                        h, w = int(parts[1]), int(parts[3])
+                        return (w, h)
+        if head[:4] == b"8BPS":                                       # PSD
+            h, w = struct.unpack(">II", head[14:22])
+            return (w, h)
+    except (OSError, struct.error, IndexError):
+        pass
+    return (None, None)
+
+def build_meta():
+    rows = []
+    for dp, dn, fn in os.walk(ROOT):
+        dn[:] = [d for d in dn if d != "_Agent_Files"]
+        for f in fn:
+            ext = os.path.splitext(f)[1].lower()
+            if ext not in FILEEXT:
+                continue
+            p = os.path.join(dp, f)
+            try:
+                size = os.path.getsize(p)
+            except OSError:
+                continue
+            w = h = None
+            try:
+                with open(p, "rb") as fh:
+                    head = fh.read(64)
+                w, h = _image_dims(p, head)
+            except OSError:
+                pass
+            rows.append({"path": p.replace("\\", "/"), "ext": ext,
+                         "bytes": size, "w": w, "h": h})
+    return rows
+
+if RES_CANON or not os.path.isfile(META_PATH):
+    if RES_CANON:
+        print("tex_meta cache: RESCAN requested -- rebuilding", flush=True)
+    else:
+        print("tex_meta cache missing (%s) -- building from the texture "
+              "root (one-time; use --rescan to refresh later)" % META_PATH,
+              flush=True)
+    meta = build_meta()
+    with open(META_PATH, "w", encoding="utf-8") as _mf:
+        json.dump(meta, _mf)
+    print("tex_meta cache: %d images written to %s" % (len(meta), META_PATH),
+          flush=True)
+meta = json.load(open(META_PATH, encoding="utf-8"))
 
 def norm(s):
     s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", s)
@@ -105,7 +255,6 @@ for m, toks in MAP_DEF.items():
 MAPTOKENS = set(TOKEN2MAP)
 RESTOK = {"512", "1024", "2048", "4096", "8192", "256", "2k", "1k", "4k", "8k", "16k"}
 DROP = {"seamless", "masked", "mirror", "wm", "png", "jpg", "raw", "base"}
-FILEEXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".gif", ".psd", ".exr", ".hdr"}
 
 def top_of(rel):
     seg = rel.split(os.sep)

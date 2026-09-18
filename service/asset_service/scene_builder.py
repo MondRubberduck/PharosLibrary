@@ -460,10 +460,20 @@ def _apply_texture_sets(manifest, ground_y, roots_by_id):
                  in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp")]
         if setname:
             # display names use spaces, filenames use underscores --
-            # compare on alphanumerics only
+            # compare on alphanumerics only. If the NAME matches no
+            # filename (display name is the folder name, files are named
+            # differently -- e.g. a "1k" subfolder row), fall back to ALL
+            # maps in the folder: the folder IS the set the user pointed
+            # at, and a silent skip would lose the ground plane.
             norm = lambda s: re.sub(r"[^a-z0-9]+", "", s.lower())
             key = norm(setname)
-            files = [p for p in files if key in norm(p.stem)]
+            matched = [p for p in files if key in norm(p.stem)]
+            if matched:
+                files = matched
+            else:
+                print(f"    note: set name {setname!r} matches no "
+                      f"filename in {folder} -- using all maps in the "
+                      f"folder")
         recipe = {}
         for p in files:
             n = p.name.lower()
