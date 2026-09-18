@@ -368,8 +368,8 @@ def _insert_texture_set(conn, stem, files, channels, folder):
     first = sorted(files)[0]
     conn.execute(
         "INSERT OR REPLACE INTO textures (name,grp,sub,folder,files,images,"
-        "file_count,bytes,first_image,thumb,tags,meta) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "file_count,bytes,first_image,thumb,tags,meta,source) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (stem, folder.name, "Scanned", str(folder),
          json.dumps([f.as_posix() for f in files]),
          json.dumps([f.as_posix() for f in sorted(files)
@@ -378,7 +378,8 @@ def _insert_texture_set(conn, stem, files, channels, folder):
          first.as_posix(), first.as_posix(),
          json.dumps([stem.lower()]),
          json.dumps({"stems": [stem.lower()], "themes": [],
-                     "facets": {"grp": folder.name.lower()}})))
+                     "facets": {"grp": folder.name.lower()}}),
+         "scan"))
 
 
 def _insert_audio(conn, af, duration, folder):

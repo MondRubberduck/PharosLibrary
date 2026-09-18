@@ -1,0 +1,3 @@
+# pipeline shell drivers MUST stay LF or bash fails on the
+# 'bad interpreter: /usr/bin/env bash^M' error (POSIX/CI)
+*.sh text eol=lf

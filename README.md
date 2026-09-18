@@ -31,6 +31,11 @@ the generalization proof. An independent QA agent's own measurement of
 the geometry battery: ~14k tokens via the API vs 1.2 M+ for directory
 listings alone, before any binary parsing (~98.8%).
 
+Method note: these figures come from recorded agent runs on one private
+446 GiB library (three dry runs + two independent QA agents, logs
+archived by the author). They are directional evidence, not a
+controlled benchmark; a reproducible `bench/` harness is on the roadmap.
+
 ## Screenshots
 
 | Dashboard | Textures |

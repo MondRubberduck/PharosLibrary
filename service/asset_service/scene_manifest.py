@@ -34,7 +34,8 @@ Schema (pharos.scene/v1; kiosk.scene/v1 accepted):
   "textures": [
     {
       "set": "Pavement cobblestonemedieval12",
-      "apply_to": "hero_building",     # optional: asset id to texture
+      "apply_to": "hero_building",     # asset id, "ground", or a list
+                                      # mixing both (["ground","hero"])
       "folder": "D:/path/to/texture/set/"
     }
   ],

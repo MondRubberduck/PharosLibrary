@@ -1,7 +1,7 @@
 """pharos init — detect asset folders under a root and write pharos_config.json.
 
 Usage:
-    python -m asset_service init [ROOT] [--registry-dir DIR] [--force]
+    python pharos.py init [ROOT] [--registry-dir DIR] [--force]
 
 Scans ROOT's immediate children (file-extension census, bounded sampling)
 and maps each folder to a Pharos section by dominant content:

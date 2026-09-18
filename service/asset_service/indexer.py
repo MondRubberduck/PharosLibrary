@@ -323,9 +323,18 @@ def index_root(root: Path, db_path: Path, limit: int = 0, dry_run: bool = False,
     # handover 2026-09-15 §7.1: drop registry rows for packs whose folder
     # no longer exists (e.g. a pack the owner deleted from the library)
     if not dry_run and conn is not None:
-        stale = [r["id"] for r in conn.execute(
-            "SELECT id, hero_file_path FROM assets")
-            if not Path(r["hero_file_path"]).exists()]
+        # guard: pruning is per-file Path.exists(); if the library root
+        # itself is unreachable (unmounted NAS / removed drive) EVERY row
+        # looks stale and one pass would delete the entire registry
+        if not root.is_dir():
+            print(f"  WARNING: library root unreachable ({root}) -- "
+                  "pruning SKIPPED so the registry is not wiped; "
+                  "re-run when the drive is mounted", flush=True)
+            stale = []
+        else:
+            stale = [r["id"] for r in conn.execute(
+                "SELECT id, hero_file_path FROM assets")
+                if not Path(r["hero_file_path"]).exists()]
         for pack_id in stale:
             conn.execute("DELETE FROM assets WHERE id = ?", (pack_id,))
         if stale:

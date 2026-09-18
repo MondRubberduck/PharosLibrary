@@ -322,6 +322,17 @@ def api_packs(params: dict) -> list[dict]:
     return out
 
 
+
+def _jailed(t, root) -> bool:
+    """True when resolved path t sits inside root (real containment, not
+    a string-prefix match -- 'Audio_Assets_backup' must not pass a jail
+    meant for 'Audio_Assets')."""
+    try:
+        t.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError, RuntimeError):
+        return False
+
 def _safe_dir(encoded: str) -> Optional[str]:
     """Decode a URL-encoded directory that must live under a canonical root."""
     directory = Path(unquote(encoded))
@@ -2338,6 +2349,29 @@ domain.onchange=style.onchange=load;loadStats();load();
 
 
 class Handler(BaseHTTPRequestHandler):
+    # DNS-rebinding guard: without a Host allow-list, any web page the
+    # user visits while the server runs can rebind a hostname to
+    # 127.0.0.1 and become same-origin -> full read+write of the
+    # library. Only loopback names (plus an explicitly configured bind
+    # host) are accepted.
+    def _host_ok(self) -> bool:
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host:
+            return False
+        hp = host.rsplit(":", 1)
+        name = hp[0].strip("[]")
+        port = hp[1] if len(hp) == 2 else ""
+        allowed = {"127.0.0.1", "localhost", "::1"}
+        try:
+            allowed.add(str(self.server.server_address[0]).lower())
+        except Exception:
+            pass
+        try:
+            my_port = str(self.server.server_address[1])
+        except Exception:
+            my_port = ""
+        return name in allowed and port in ("", my_port)
+
     def log_message(self, fmt, *args):  # quiet
         pass
 
@@ -2373,6 +2407,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
 
     def do_HEAD(self):
+        if not self._host_ok():
+            return self._json({"error": "bad host"}, 403)
         # link checkers and curl -I must not see 501 on previews/media
         self._head_only = True
         try:
@@ -2381,6 +2417,8 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        if not self._host_ok():
+            return self._json({"error": "bad host"}, 403)
         url = urlparse(self.path)
         params = parse_qs(url.query)
         try:
@@ -2511,7 +2549,7 @@ class Handler(BaseHTTPRequestHandler):
                     t = t.resolve()
                 except OSError:
                     t = None
-                if (t is None or not str(t).startswith(str(AUDIO_ROOT))
+                if (t is None or not _jailed(t, AUDIO_ROOT)
                         or t.suffix.lower() not in AUDIO_PLAYABLE
                         and t.suffix.lower() not in {".aif", ".aiff"}
                         or not t.is_file()):
@@ -2561,15 +2599,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not t.is_absolute():
                     for r in roots:
                         cand = (r / t).resolve()
-                        if (str(cand).startswith(str(r))
-                                and cand.exists()):
+                        if _jailed(cand, r) and cand.exists():
                             t = cand
                             break
                 try:
                     t = t.resolve()
                 except OSError:
                     t = None
-                if t is None or not any(str(t).startswith(str(r)) for r in roots):
+                if t is None or not any(_jailed(t, r) for r in roots):
                     return self._json({"error": "path outside asset roots"}, 403)
                 if not t.exists():
                     return self._json({"error": "path does not exist"}, 404)
@@ -2578,7 +2615,7 @@ class Handler(BaseHTTPRequestHandler):
                         os.startfile(str(t))
                     else:
                         subprocess.Popen(
-                            'explorer /select,"' + str(t) + '"', shell=True)
+                            ["explorer", "/select," + str(t)])
                 return self._json({"ok": True, "abs": t.as_posix()})
             elif url.path.startswith("/timg"):
                 # texture previews/maps, jailed to Textures_Materials
@@ -2588,7 +2625,7 @@ class Handler(BaseHTTPRequestHandler):
                     t = t.resolve()
                 except OSError:
                     t = None
-                if (t is None or not str(t).startswith(str(TEXTURES_ROOT))
+                if (t is None or not _jailed(t, TEXTURES_ROOT)
                         or t.suffix.lower() not in TEX_DISPLAY_EXT
                         or not t.is_file()):
                     return self._json({"error": "not found"}, 404)
@@ -2608,7 +2645,7 @@ class Handler(BaseHTTPRequestHandler):
                     p = p.resolve()
                 except OSError:
                     p = None
-                if (p is None or not str(p).startswith(str(COLLECTION_ROOT))
+                if (p is None or not _jailed(p, COLLECTION_ROOT)
                         or p.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
                         or not p.is_file()):
                     return self._json({"error": "not found"}, 404)
@@ -2666,7 +2703,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path.startswith("/static/"):
                 rel = url.path[len("/static/"):]
                 static_file = (STATIC_DIR / rel).resolve()
-                if (not str(static_file).startswith(str(STATIC_DIR.resolve()))
+                if (not _jailed(static_file, STATIC_DIR.resolve())
                         or not static_file.is_file()):
                     return self._json({"error": "not found"}, 404)
                 self._bytes(static_file.read_bytes(),
@@ -2720,6 +2757,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
 
     def do_POST(self):
+        if not self._host_ok():
+            return self._json({"error": "bad host"}, 403)
         """Bulk human re-tagging: {"ids": [...], "set": {domain|style} | "status"}.
         Same semantics as the host-app extension: validation_status becomes
         'human_verified' and confidence 1.0."""
@@ -2785,7 +2824,7 @@ class Handler(BaseHTTPRequestHandler):
                     except OSError:
                         return self._json({"error": "bad path"}, 400)
                     folder = Path(row["folder"]).resolve()
-                    if (not str(target).startswith(str(folder))
+                    if (not _jailed(target, folder)
                             or target.suffix.lower() not in IMG_EXTS
                             or not target.is_file()):
                         return self._json(

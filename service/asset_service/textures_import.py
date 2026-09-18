@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS textures (
   name TEXT NOT NULL,
   grp TEXT,
   sub TEXT,
+  source TEXT,
   folder TEXT,
   files TEXT,
   images TEXT,
@@ -201,7 +202,28 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(TEXTURES_DDL)
-        conn.execute("DELETE FROM textures")
+        # self-migrate: older tables have no source column
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(textures)")}
+        if "source" not in cols:
+            conn.execute("ALTER TABLE textures ADD COLUMN source TEXT")
+        # no textures root -> this importer owns NOTHING; scanner rows
+        # must survive a restart (retention invariant, meshes/audio-style)
+        if not root.is_dir():
+            kept = conn.execute("SELECT COUNT(*) FROM textures"
+                                ).fetchone()[0]
+            print(f"textures import: root absent ({root}) -- keeping "
+                  f"{kept} scanner-indexed row(s)")
+            return kept
+        # scanner rows (source='scan') survive the rebuild; only this
+        # importer's own rows (source NULL / 'crawl') are replaced
+        scan_cols = [d[0] for d in conn.execute(
+            "SELECT * FROM textures WHERE source='scan' LIMIT 0"
+            ).description if d[0] != "id"]
+        scan_rows = [tuple(r) for r in conn.execute(
+            "SELECT " + ",".join(scan_cols) +
+            " FROM textures WHERE source='scan'")]
+        conn.execute("DELETE FROM textures WHERE source IS NOT 'scan'")
         conn.execute("DELETE FROM sqlite_sequence WHERE name='textures'")
 
         # crawl-agent index: category descriptions/keywords + naming notes
@@ -305,12 +327,17 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
                 {"stems": stems, "themes": themes, "facets": facets,
                  "res": _res(src + " " + r["sub"]), "desc": desc},
                 ensure_ascii=False)
+            r["source"] = "crawl"
             cols = ("name,grp,sub,folder,files,images,file_count,bytes,"
-                    "first_image,thumb,tags,meta").split(",")
+                    "first_image,thumb,tags,meta,source").split(",")
             conn.execute(
                 f"INSERT INTO textures ({','.join(cols)}) "
                 f"VALUES ({','.join('?' * len(cols))})",
                 [r[c] for c in cols])
+        if scan_rows:
+            conn.executemany(
+                f"INSERT INTO textures ({','.join(scan_cols)}) "
+                f"VALUES ({','.join('?' for _ in scan_cols)})", scan_rows)
         conn.commit()
     finally:
         conn.close()

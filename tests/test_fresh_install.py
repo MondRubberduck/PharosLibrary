@@ -313,6 +313,63 @@ def main() -> int:
               "Downloads" in det2["mesh_folders"],
               str(det2["mesh_folders"]))
 
+        # 5e. textures retention: scanner texture sets survive a
+        # server-style rebuild (readiness-review blocker: the importer
+        # used to DELETE FROM textures unconditionally)
+        from asset_service import textures_import as _ti
+        r = subprocess.run(
+            [sys.executable, str(REPO / "service/asset_service/scanner.py"),
+             str(lib / "Textures_Materials")], capture_output=True,
+            text=True, cwd=str(REPO), timeout=120)
+        check("scanner texture pass exit 0", r.returncode == 0,
+              (r.stderr or "")[-80:])
+        t_after_scan = browse.api_textures_items({"q": [""]})["total"]
+        _ti.import_textures(dbp)          # rebuild with root present
+        _ti.import_textures(dbp)          # and again
+        t_after_rebuild = browse.api_textures_items({"q": [""]})["total"]
+        check("texture sets survive double rebuild",
+              t_after_rebuild >= t_after_scan and t_after_scan >= 2,
+              f"scan={t_after_scan} rebuild={t_after_rebuild}")
+        import sqlite3 as _sq
+        _c = _sq.connect(dbp)
+        _srcs = {r[0] for r in _c.execute(
+            "SELECT DISTINCT source FROM textures")}
+        _c.close()
+        check("texture rows carry source markers (scan + crawl, no NULL)",
+              "scan" in _srcs and "crawl" in _srcs and None not in _srcs,
+              str(_srcs))
+
+        # 5f. Host-header guard (DNS-rebinding blocker): the server must
+        # 403 any non-loopback Host on GET/POST/HEAD
+        import time as _time
+        import urllib.request as _ur
+        srv = subprocess.Popen(
+            [sys.executable, str(REPO / "pharos.py"), "serve",
+             "--no-open", "--port", "8844"],
+            cwd=str(REPO), stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        try:
+            base = "http://127.0.0.1:8844/api/stats"
+            ok_code = None
+            for _ in range(30):
+                _time.sleep(0.5)
+                try:
+                    ok_code = _ur.urlopen(base, timeout=2).status
+                    break
+                except Exception:
+                    continue
+            check("fixture server boots", ok_code == 200, str(ok_code))
+            req = _ur.Request(base, headers={"Host": "evil.example:8844"})
+            try:
+                _ur.urlopen(req, timeout=3)
+                bad_code = 200
+            except _ur.HTTPError as e:
+                bad_code = e.code
+            check("Host guard: rebinding host -> 403", bad_code == 403,
+                  str(bad_code))
+        finally:
+            srv.terminate()
+
         # 6. docs generation (fixture _Agent_Files, then clean it up)
         from asset_service import agent_docs
         paths = agent_docs.generate(dbp, repo_hint=str(REPO))

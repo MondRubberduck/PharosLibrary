@@ -22,4 +22,4 @@ Modules:
 Everything in this package treats the canonical asset roots as read-only.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -30,6 +30,12 @@ _ELEM_FMT = {"d": ("d", 8), "f": ("f", 4), "i": ("i", 4),
              "l": ("q", 8), "b": ("b", 1)}
 
 
+class _FBXParseError(Exception):
+    """Hard parse failure: unknown property type, array length beyond
+    the buffer (truncation), or nesting too deep. A partially-parsed
+    file must yield None, never a plausible wrong bbox."""
+
+
 def _read_property(data: bytes, pos: int):
     """Read one property at pos. Returns (value, new_pos); (None, pos+1)
     for unknown type codes (cannot advance safely -> caller stops)."""
@@ -59,13 +65,15 @@ def _read_property(data: bytes, pos: int):
                 return None, pos
         fmt, size = _ELEM_FMT[t]
         if len(raw) < n * size:
-            return None, pos
+            raise _FBXParseError(
+                f"array claims {n} {t}-elements but only "
+                f"{len(raw) // size} present (truncated file?)")
         return list(struct.unpack_from(f"<{n}{fmt}", raw, 0)), pos
     if t in ("S", "R"):
         n = struct.unpack_from("<I", data, pos)[0]
         pos += 4
         return data[pos:pos + n], pos + n
-    return None, pos
+    raise _FBXParseError(f"unknown property type {t!r} at {pos-1}")
 
 
 def _read_record(data: bytes, pos: int):
@@ -91,7 +99,10 @@ def _read_record(data: bytes, pos: int):
     return name, props, end_offset, prop_end
 
 
-def _parse_nodes(data: bytes, pos: int, limit: int, top: bool = False):
+def _parse_nodes(data: bytes, pos: int, limit: int, top: bool = False,
+                 depth: int = 0):
+    if depth > 64:
+        raise _FBXParseError("node nesting deeper than 64")
     """Parse successive records up to limit. Returns (nodes, pos)."""
     out = []
     while pos + 13 <= limit:
@@ -108,7 +119,7 @@ def _parse_nodes(data: bytes, pos: int, limit: int, top: bool = False):
         if rec is None:
             break
         name, props, end, after = rec
-        kids, _ = _parse_nodes(data, after, end)
+        kids, _ = _parse_nodes(data, after, end, depth=depth + 1)
         out.append((name, props, kids))
         pos = end
     return out, pos
@@ -136,7 +147,7 @@ def fbx_file_info(path: str | Path) -> dict | None:
     version = struct.unpack_from("<I", data, 23)[0]
     try:
         top, _ = _parse_nodes(data, 27, len(data), top=True)
-    except (struct.error, zlib.error):
+    except (struct.error, zlib.error, _FBXParseError, RecursionError):
         return None
 
     lo = [float("inf")] * 3

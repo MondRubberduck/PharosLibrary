@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pharos"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local asset-intelligence server for coding agents: indexes 3D meshes, PBR textures, audio and animation clips into a queryable SQLite registry served over HTTP and MCP."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,6 +12,8 @@ license = { text = "MIT" }
 authors = [{ name = "Pharos Contributors" }]
 
 [project.optional-dependencies]
+# stdio MCP server (see docs/MCP_SETUP.md)
+mcp = ["mcp<2"]
 # preview/image tooling for the classifier (optional, off by default)
 vision = [
     "pillow>=10.0",
@@ -24,6 +26,11 @@ dev = [
 [tool.setuptools]
 package-dir = { "" = "service" }
 packages = ["asset_service"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+# the dashboard is dead without these (templates + vendored three.js)
+asset_service = ["templates/*.html", "static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

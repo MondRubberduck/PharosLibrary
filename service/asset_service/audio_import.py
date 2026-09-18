@@ -156,8 +156,20 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
                 pass
 
         n = 0
-        with open(JSONL, encoding="utf-8") as f:
-            for line in f:
+        # cp1252/latin-1 fallback: strict utf-8 emptied the whole audio
+        # section when the crawl index carried non-ASCII filenames
+        raw = JSONL.read_bytes()
+        text = None
+        for enc in ("utf-8", "cp1252", "latin-1"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            raise UnicodeDecodeError("audio index", raw[:1], 0, 1,
+                                     "undecodable")
+        for line in text.splitlines():
                 line = line.strip()
                 if not line:
                     continue

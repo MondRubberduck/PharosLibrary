@@ -51,8 +51,9 @@ def build(manifest_path: str, save_path: str = None):
     print(f"{'=' * 60}")
 
     # --- import assets ---
+    roots_by_id: dict = {}
     for i, asset in enumerate(manifest.get("assets", [])):
-        _import_asset(asset, ground_y, i)
+        _import_asset(asset, ground_y, i, roots_by_id)
         sys.stdout.flush()      # a crash mid-build must not lose the log
                                # (Blender buffers stdout in --background)
 
@@ -61,9 +62,9 @@ def build(manifest_path: str, save_path: str = None):
     # drive) and cost 45+ min on a real build)
     _remap_dead_kb3d_images()
 
-    # --- ground-covering texture sets (manifest.textures[]) ---
+    # --- texture sets: ground planes AND/OR onto named assets ---
     if manifest.get("textures"):
-        _apply_ground_textures(manifest, ground_y)
+        _apply_texture_sets(manifest, ground_y, roots_by_id)
 
     # --- crowd ---
     for group in manifest.get("crowd", []):
@@ -98,7 +99,7 @@ def build(manifest_path: str, save_path: str = None):
     return save_path
 
 
-def _import_asset(asset, ground_y, index):
+def _import_asset(asset, ground_y, index, roots_by_id=None):
     """Import one FBX, position it, optionally rebuild its material."""
     fbx = asset["fbx"]
     aid = asset.get("id", f"asset_{index}")
@@ -218,6 +219,9 @@ def _import_asset(asset, ground_y, index):
                       f"pass recipe 'slots[]' for per-slot wiring)")
     else:
         print(f"    (no material recipe — placeholder materials remain)")
+
+    if roots_by_id is not None:
+        roots_by_id[aid] = root
 
     # deselect for next import
     bpy.ops.object.select_all(action='DESELECT')
@@ -429,14 +433,23 @@ def _remap_dead_kb3d_images():
               f"to the shipped .png.2k folder")
 
 
-def _apply_ground_textures(manifest, ground_y):
+def _apply_texture_sets(manifest, ground_y, roots_by_id):
     """manifest.textures[] — apply each set as a ground plane (V5 D5: the
     block was validated but never did anything). Entry: {folder, set,
     apply_to ('ground'|'ground_plane'|omit), size (m, default 20)}."""
     for tex in manifest.get("textures", []) or []:
-        apply_to = (tex.get("apply_to") or "ground").lower()
-        if apply_to not in ("ground", "ground_plane", "floor"):
-            continue                     # e.g. apply_to: asset-specific
+        # apply_to: "ground" (default) | an asset id | a LIST mixing both.
+        # This is how the gigabytes of library texture sets reach assets
+        # that carry no recipe of their own (scanner-indexed, modelled).
+        raw_at = tex.get("apply_to") or "ground"
+        targets = ([raw_at] if isinstance(raw_at, str) else
+                   [t for t in raw_at if isinstance(t, str)])
+        wants_ground = any(t.lower() in
+                           ("ground", "ground_plane", "floor")
+                           for t in targets)
+        asset_targets = [t for t in targets
+                         if t.lower() not in ("ground", "ground_plane",
+                                              "floor")]
         folder = Path(tex.get("folder") or "")
         setname = tex.get("set") or ""
         if not folder.is_dir():
@@ -467,19 +480,39 @@ def _apply_ground_textures(manifest, ground_y):
             print(f"    WARNING: no map channels recognised in {folder} "
                   f"(set {setname!r})")
             continue
-        size = float(tex.get("size", 20.0))
-        bpy.ops.mesh.primitive_plane_add(size=size, location=(
-            tex.get("position", [0, 0, 0])[0],
-            tex.get("position", [0, 0, 0])[1],
-            ground_y - 0.002))
-        plane = bpy.context.active_object
-        plane.name = f"ground_{setname or 'tex'}"[:60]
-        mat = _make_material(plane.name, recipe)
-        if plane.data.materials:
-            plane.data.materials.clear()
-        plane.data.materials.append(mat)
-        print(f"    ground plane '{plane.name}' {size}x{size}m: "
-              f"{sorted(recipe.keys())}")
+        applied = []
+        if wants_ground:
+            size = float(tex.get("size", 20.0))
+            bpy.ops.mesh.primitive_plane_add(size=size, location=(
+                tex.get("position", [0, 0, 0])[0],
+                tex.get("position", [0, 0, 0])[1],
+                ground_y - 0.002))
+            plane = bpy.context.active_object
+            plane.name = f"ground_{setname or 'tex'}"[:60]
+            mat = _make_material(plane.name, recipe)
+            if plane.data.materials:
+                plane.data.materials.clear()
+            plane.data.materials.append(mat)
+            applied.append(f"ground plane {size}x{size}m")
+
+        for aid in asset_targets:
+            root = roots_by_id.get(aid)
+            if root is None:
+                print(f"    WARNING: textures[] apply_to unknown asset "
+                      f"id '{aid}' (known: {sorted(roots_by_id)})")
+                continue
+            mat = _make_material(f"{aid}_{setname or 'tex'}"[:60], recipe)
+            n = 0
+            for child in _all_meshes(root):
+                if child.data.materials:
+                    child.data.materials.clear()
+                child.data.materials.append(mat)
+                n += 1
+            applied.append(f"{n} mesh(es) of '{aid}'")
+
+        if applied:
+            print(f"    texture set '{setname or folder.name}' "
+                  f"[{sorted(recipe.keys())}] -> {'; '.join(applied)}")
 
 
 def _build_crowd(group, ground_y):

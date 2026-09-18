@@ -2,7 +2,7 @@
 
 Loads `pharos_config.json` from the service folder. Every module imports
 paths from here — no hardcoded machine paths anywhere. Create the file
-with `python -m asset_service init` (auto-detects folders under a root
+with `python pharos.py init` (auto-detects folders under a root
 you point it at) or copy `pharos_config.example.json` from the repo root
 and edit it. Change the JSON, restart, done.
 """

@@ -170,8 +170,16 @@ def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
                 conn.execute(f"ALTER TABLE collection ADD COLUMN {col} TEXT")
         conn.commit()
 
-        with open(csv_path, encoding="utf-8-sig", newline="") as f:
-            rows = list(csv.DictReader(f))
+        # Excel exports are frequently cp1252; strict utf-8 would empty
+        # the whole Purchases section on the first non-ASCII seller name
+        rows = []
+        for enc in ("utf-8-sig", "cp1252", "latin-1"):
+            try:
+                with open(csv_path, encoding=enc, newline="") as f:
+                    rows = list(csv.DictReader(f))
+                break
+            except UnicodeDecodeError:
+                continue
 
         # human thumbnail overrides survive re-imports
         overrides = {}
