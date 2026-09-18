@@ -33,15 +33,19 @@ def norm(s):
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
-# manual aliases the fuzzy matcher cannot bridge (verified by hand)
-ALIAS = {
-    # The download renamed several KitBash3D folders, so an alias must always be
-    # keyed to the CURRENT folder name.  Only the cases that naive matching
-    # cannot bridge belong here.
-    "minikitneocity": "neocity",                        # "Mini Kit: Neo City" -> NeoCity
-    "orientalbuilding": "oriantelbuilding",             # typo in the pack itself
-    "abandonedsubwaystationinberlin": "subwaystation",
-}
+# manual aliases the fuzzy matcher cannot bridge (verified by hand).
+# Library-specific mappings live in the GITIGNORED aliases.json beside
+# this script ({normalized_folder: normalized_item}); the tracked table
+# stays empty so no purchase history ships in the public repo. Format:
+# {"aliases": {"minikitneocity": "neocity", ...}}
+ALIAS: dict = {}
+_alias_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "aliases.json")
+try:
+    with io.open(_alias_file, encoding="utf-8") as _af:
+        ALIAS.update(json.load(_af).get("aliases") or {})
+except (OSError, ValueError):
+    pass
 
 
 def scan_disk():

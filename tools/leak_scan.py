@@ -16,13 +16,17 @@ PATTERNS = [
     "C:" + SEP + "Users" + SEP + "kondi",
     "E:" + SEP + "Epic",
     "KitbashOrdner", "Kiosk_zCode", "Mens_V1",
+    # library-content markers: specific pack/vendor names from the owner's
+    # library that leaked into tracked sources once already. Specific
+    # enough to never false-positive on generic prose.
+    "Oriantel", "HorrorMansion", "Sonniss",
 ]
 
 
 def main() -> int:
     files = subprocess.run(
         ["git", "ls-files"], capture_output=True, text=True,
-        check=True).stdout.split()
+        check=True).stdout.splitlines()   # split() breaks on filenames with spaces
     rx = re.compile("|".join(PATTERNS), re.I)
     hits = []
     for f in files:

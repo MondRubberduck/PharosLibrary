@@ -25,12 +25,19 @@ for man_path in sorted(glob.glob(os.path.join(ROOT, "*", "Exports", "kit_manifes
     d = json.load(io.open(man_path, encoding="utf-8"))
     kits += 1
     def _portable(path, base):
-        """kit_manifests record ABSOLUTE paths from the machine that
-        exported them; when the library was copied elsewhere those are
-        dead. Re-anchor to this library via the manifest's own dir."""
+        """kit_manifests written by kb3d_metadata record ABSOLUTE paths
+        from the machine that exported them; when the library was copied
+        elsewhere those are dead -- re-anchor via the manifest's own dir.
+        export_kb3d records group FBX paths RELATIVE to the Exports dir
+        ("FBX/<grp>/<grp>.fbx"); those are absolutized against `base`.
+        Anything the index emits is absolute so downstream consumers
+        (registry `fbx` column, viewer) can open it."""
         if not path:
             return os.path.join(base, "")
-        if os.path.isabs(path) and not os.path.isfile(path):
+        if not os.path.isabs(path):
+            return os.path.normpath(os.path.join(base,
+                                                 path.replace("/", os.sep)))
+        if not os.path.isfile(path):
             rel = path.replace("/", os.sep)
             # try the tail segments (up to 4) relative to exports/kit root
             parts = rel.split(os.sep)
@@ -42,7 +49,7 @@ for man_path in sorted(glob.glob(os.path.join(ROOT, "*", "Exports", "kit_manifes
         return path
 
     for g in d.get("groups") or []:
-        fbx_abs = _portable(g["fbx"], exports)
+        fbx_abs = _portable(g.get("fbx") or "", exports)
         bbox = g.get("bbox_m")
         rows.append({
             "pack": kit,

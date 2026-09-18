@@ -41,19 +41,11 @@ A("")
 A("| Folder | Files | What it is |")
 A("|---|---:|---|")
 TOPDESC = {
-    "4K_Textures_Gumroad": "Main PBR library: ~18 material classes (Wood, Rocks, Metals, Fabrics, Marble, Roads, Ground, Grass, Animals, Sci-Fi, Military, Medieval, Destruction, Organic, Walls, Roofs, Pavements, Flooring). Each material is a folder of maps.",
-    "(root)": "Loose collection: Textures.com sets/previews, Poliigon-style PBR, single photos, overlays, skyboxes, HDR-ish images.",
-    "CC0Textures": "CC0 PBR sets (Color/Normal/Roughness/Displacement) as PNG + matching .zip archives + USD (.usda/.usdc).",
-    "Glitch_Art": "Glitch / datamosh art images (PNG).",
-    "Pixel_Art": "Pixel-art tile sets (Bricks, Dungeon, etc.).",
-    "Cloth": "Fabric/cloth wrinkles, creases and zBrush brushes (.psd/.zbp/.zip + JPG).",
-    "HDRi": "HDRI environment maps (.exr/.hdr), incl. Manhattan Nights set.",
-    "JSPlacememnt": "Seamless pattern/displacement images (DotGrid etc.).",
-    "Wood_Floor": "Wood floor PBR sets.",
-    "Bedroom_Textures": "Misc bedroom/prop reference images.",
-    "Neuer Ordner": "A few misc PBR sets.",
-    "Smudges": "Overlay/smudge/scuff textures.",
-    "Blender_AddOns": "Blender addon (.zip) + EdgeWear .blend (not textures).",
+    # Optional per-folder descriptions rendered into the index table.
+    # Kept empty in the public repo -- folder names and their meanings
+    # are library-specific. Fill locally (this file is tracked, so for a
+    # private library prefer overriding at call time) or leave empty:
+    # the table renders fine with a blank "What it is" column.
 }
 for k, c in idx["top_level"].items():
     A(f"| `{k}` | {c['files']} | {TOPDESC.get(k,'')} |")

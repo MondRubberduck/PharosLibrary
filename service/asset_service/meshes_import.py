@@ -173,7 +173,8 @@ PACK_THEMES = {
     "demonic_village": ["fantasy", "horror"],
     "ancients": ["medieval", "ornate"],
     "hauntedprison_5.0": ["horror"],
-    "horrormansion": ["horror"],
+    # (a pack whose name already contains a theme keyword needs no
+    # PACK_THEMES backfill -- the per-name matcher finds it)
     "scifitrainfacility": ["scifi"],
     "scifi_industrial": ["scifi"],
     "cyberpunk": ["scifi"],
@@ -286,10 +287,11 @@ def _finish_recipe(recipe: dict) -> dict:
                     primary["packed_channels"] = out.get("channels")
     maps = {k: v for k, v in primary.items() if k != "packed_channels"}
     # A slot the exporter marked `unresolved` still lists the textures the
-    # material uses, but with no role ("other") and no param -- e.g.
-    # HorrorMansion's M_InteriorTrim. That is not a usable recipe, so it must
-    # not count as resolved: `resolved:true` always means at least one map has
-    # a real role, and never produces an empty primary.
+    # material uses, but with no role ("other") and no param (e.g. a trim
+    # material wired only through hardcoded masters). That is not a usable
+    # recipe, so it must not count as resolved: `resolved:true` always
+    # means at least one map has a real role, and never produces an empty
+    # primary.
     named = [k for k in maps if k != "other"]
     return {"slots": slots, "primary": primary,
             "resolved": bool(named), "primary_slot": primary_slot}

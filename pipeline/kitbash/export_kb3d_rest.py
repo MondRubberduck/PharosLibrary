@@ -1,6 +1,6 @@
-"""Second pass: the three KitBash3D kits that use the OLDER packaging, where the
-.blend sits directly in the kit folder rather than in a .blender.native subfolder.
-Re-runnable; skips kits that already have Exports/kit_manifest.json."""
+"""Second pass: KitBash3D kits that use the OLDER packaging, where the
+.blend sits directly in the kit folder rather than in a .blender.native
+subfolder. Re-runnable; skips kits that already have Exports/kit_manifest.json."""
 import glob, os, subprocess, sys
 from pathlib import Path
 

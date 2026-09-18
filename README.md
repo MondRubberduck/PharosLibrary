@@ -49,7 +49,8 @@ controlled benchmark; a reproducible `bench/` harness is on the roadmap.
 ## You do three things (the human part)
 
 You need [Python 3.10+](https://www.python.org/downloads/) and Git.
-No Blender, no Unreal, no pip installs. Your agent does everything else.
+No Blender, no Unreal needed, and the core server is stdlib-only (zero
+pip installs). Your agent does everything else.
 
 **1 — get the app:**
 ```bash
@@ -146,9 +147,11 @@ its engine) serves empty results, never errors.
 
 ## Requirements
 
-- Python 3.10+ (stdlib only for the core server — no pip installs)
+- Python 3.10+ (stdlib only for the core server — no pip installs;
+  the optional MCP integration adds one: `pip install "mcp<2"`)
 - Optional: Blender 5.x, UE 5.x, Git Bash — only for the `pipeline/` chains
-- Windows / macOS / Linux (paths are config-driven)
+- Windows and Linux are CI-verified. macOS should work (stdlib core,
+  config-driven paths) but is not covered by CI.
 
 ## Architecture
 

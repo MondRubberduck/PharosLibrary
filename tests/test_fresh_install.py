@@ -139,8 +139,11 @@ def main() -> int:
     reg.mkdir()
     build_fixture(lib)
     failures: list[str] = []
+    checks_run = 0
 
     def check(label, cond, detail=""):
+        nonlocal checks_run
+        checks_run += 1
         print(f"  [{'PASS' if cond else 'FAIL'}] {label} {detail}")
         if not cond:
             failures.append(label)
@@ -307,6 +310,31 @@ def main() -> int:
               and abs(meta["dur"] - 2.0) < 0.05,
               f"dur={meta.get('dur') if meta else None}")
 
+        # 5g. audio scan-row retention WITH a crawl jsonl present. The
+        # docs claim scanner rows survive every importer rebuild; the
+        # audio table's UNIQUE(rel) forbids two rows for one file, so the
+        # contract is: the crawl row REPLACES the scan row for files the
+        # jsonl knows (richer sr/ch/dur), and scan-only files survive.
+        # (Before the source column existed, this rebuild wiped BOTH.)
+        import sqlite3 as _sq
+        (lib / "Audio_Assets" / "library_files.jsonl").write_text(
+            json.dumps({"p": "Alarms/beep.wav", "cat": "Alarms", "sub": "",
+                        "ext": ".wav", "bytes": 16044, "dur": 1.0,
+                        "sr": 8000, "ch": 1}) + "\n", encoding="utf-8")
+        audio_import.import_audio(dbp)
+        _c = _sq.connect(dbp)
+        _c.row_factory = _sq.Row
+        _arows = {r["rel"]: r["source"]
+                  for r in _c.execute("SELECT rel, source FROM audio")}
+        _c.close()
+        check("audio rebuild: crawl row replaces overlapped scan row",
+              _arows.get("Alarms/beep.wav") == "crawl", str(_arows))
+        check("audio rebuild: scan-only row survives",
+              _arows.get("Alarms/meta.wav") == "scan", str(_arows))
+        check("audio rows carry source markers (no NULL)",
+              len(_arows) == 2 and None not in _arows.values(),
+              str(_arows))
+
         # 5d. F3: model files beat image counts in the census
         det2 = pharos_init.detect(lib)
         check("F3: CGTrader-style folder classified as model folder",
@@ -367,6 +395,26 @@ def main() -> int:
                 bad_code = e.code
             check("Host guard: rebinding host -> 403", bad_code == 403,
                   str(bad_code))
+
+            # CSRF hardening on the mutating endpoints: a cross-site page
+            # can SEND requests to the loopback server even though it can
+            # never read the responses (the Host guard). Foreign Origin
+            # must 403, opaque content types must 415, and a well-formed
+            # JSON request must pass the guard and reach the handler
+            # (handler-level 400 "nothing to do" proves it got through).
+            def _post(headers, body=b"{}"):
+                req2 = _ur.Request("http://127.0.0.1:8844/api/retag",
+                                   data=body, headers=headers, method="POST")
+                try:
+                    return _ur.urlopen(req2, timeout=3).status
+                except _ur.HTTPError as e:
+                    return e.code
+            check("CSRF: foreign Origin POST -> 403",
+                  _post({"Origin": "http://evil.example"}) == 403)
+            check("CSRF: non-JSON content-type POST -> 415",
+                  _post({"Content-Type": "text/plain"}) == 415)
+            check("CSRF: JSON POST passes guard (handler 400 = no-op)",
+                  _post({"Content-Type": "application/json"}) == 400)
         finally:
             srv.terminate()
 
@@ -417,7 +465,8 @@ def main() -> int:
         elif cfg_path.is_file():
             cfg_path.unlink()
     print("FRESH-INSTALL SMOKE:",
-          "PASS" if not failures else f"FAIL {failures}")
+          "PASS" if not failures else f"FAIL {failures}",
+          f"({checks_run} checks executed)")
     return 0 if not failures else 1
 
 

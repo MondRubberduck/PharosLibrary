@@ -149,10 +149,12 @@ pipelines own.
   scripts until it grows. The server-side importers have no such floor and
   always run, so `init` / `serve` / `scanner.py` and the API are
   unaffected.
-- The audio taxonomy cannot be overridden: `classify.OVERRIDES` in
-  `pipeline/agent_index/classify.py` carries hand-checked
-  re-categorisations of known misfiles, but `classify()` consults only its
-  RULES table, so no entry there reaches a published category.
+- The audio taxonomy cannot be overridden: `classify()` in
+  `pipeline/agent_index/classify.py` consults only its RULES table.
+  Hand-checked re-categorisations of known misfiles exist, but they live
+  in the GITIGNORED `pipeline/agent_index/audio_overrides.json` (kept
+  out of the repo because they carry library-specific file titles) and
+  are loaded by nothing -- no entry there reaches a published category.
 - Two servers on one port: `python pharos.py serve` does not detect an
   already-running instance. The stdlib server allows address reuse, so on
   Windows a second run binds 8765 successfully (observed: two processes

@@ -54,6 +54,7 @@ SKIP_MESHES=""
 SKIP_PATTERNS=""
 DO_SYNC=1
 DO_BLENDER=1
+NO_REPLACE=0
 
 usage() {
   # print the Options/Usage block straight out of this file's header so the
@@ -75,12 +76,23 @@ while [[ $# -gt 0 ]]; do
     -h|--help)         usage; exit 0 ;;
     --no-sync)         DO_SYNC=0; shift ;;
     --skip-blender)    DO_BLENDER=0; shift ;;
-    --no-replace)      shift ;;
+    --no-replace)      NO_REPLACE=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
 [[ -n "$PACK" ]] || { echo "ERROR: --pack required" >&2; exit 2; }
+# --no-replace is a safety gate: refuse to silently reuse an Exports folder
+# a previous run (or a previous pack version) left behind
+if [[ "$NO_REPLACE" == "1" ]]; then
+  EXISTING_EXPORTS="$OUT_ROOT/$PACK/Exports"
+  [[ -z "$OUT_ROOT" ]] && EXISTING_EXPORTS="$ASSETS_ROOT/$PACK/Exports"
+  if [[ -e "$EXISTING_EXPORTS" ]]; then
+    echo "ERROR: --no-replace: $EXISTING_EXPORTS already exists" >&2
+    echo "       (delete it first, or drop the flag to merge into it)" >&2
+    exit 5
+  fi
+fi
 [[ -f "$UE_EXE" ]] || { echo "ERROR: UE not found: $UE_EXE" >&2; exit 2; }
 [[ -f "$PROJECT" ]] || { echo "ERROR: sandbox project missing: $PROJECT" >&2; exit 2; }
 mkdir -p "$LOGDIR" "$STATUSDIR"
@@ -151,9 +163,12 @@ else
 fi
 
 # every discovered game root must exist in the sandbox, else the engine will
-# silently scan nothing and we'd write an empty manifest
+# silently scan nothing and we'd write an empty manifest. Split on '|' ONLY
+# (quoted + read -ra): a /Game top folder may contain spaces, and word-
+# splitting on spaces would fragment it into a bogus SYNC FAILED.
 MISSING=""
-for gr in ${GAME_ROOTS//|/ }; do
+IFS='|' read -r -a _GAME_ROOT_LIST <<< "$GAME_ROOTS"
+for gr in "${_GAME_ROOT_LIST[@]}"; do
   d="$SANDBOX_CONTENT/${gr#/Game/}"
   [[ -d "$d" ]] || MISSING="$MISSING $d"
 done

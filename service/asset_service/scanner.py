@@ -200,8 +200,11 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
         # IF NOT EXISTS, so this is a no-op against an existing registry)
         from asset_service.meshes_import import MESHES_DDL
         from asset_service.textures_import import TEXTURES_DDL
-        from asset_service.audio_import import AUDIO_DDL
+        from asset_service.audio_import import AUDIO_DDL, ensure_source_column
         conn.executescript(MESHES_DDL + TEXTURES_DDL + AUDIO_DDL)
+        # the audio source column post-dates some registries: make sure
+        # THIS writer can write before any importer ever ran
+        ensure_source_column(conn)
         conn.commit()
 
     # --- pass 1: find manifests (authoritative mesh data) ---
@@ -389,14 +392,15 @@ def _insert_audio(conn, af, duration, folder):
     parts = Path(rel).parts
     conn.execute(
         "INSERT OR REPLACE INTO audio (name,cat,sub,rel,ext,bytes,dur,sr,ch,"
-        "playable,desc,tags,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "playable,desc,tags,meta,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (af.stem, parts[0] if len(parts) >= 2 else "SFX",
      parts[1] if len(parts) >= 3 else "", rel, af.suffix.lower(),
          af.stat().st_size, duration, 0, 0,
          1 if af.suffix.lower() != ".aif" else 0, "",
          json.dumps([af.stem.lower()]),
          json.dumps({"stems": [af.stem.lower()], "themes": [],
-                     "facets": {"cat": folder.name.lower()}})))
+                     "facets": {"cat": folder.name.lower()}}),
+         "scan"))
 
 
 def main(argv=None) -> int:

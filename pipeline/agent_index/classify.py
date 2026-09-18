@@ -11,35 +11,12 @@ SKIP_TOP = {"Audio_Assets"}  # never re-scan the output
 # A blanket keyword pass would make the taxonomy worse - most apparent
 # anomalies are correct (rain-street is rain; subway tunnel is transit).
 #
-# STATUS: table NOT wired in.  classify() below consults RULES only, so no
-# entry here changes a published category; every entry is a hand-checked
-# judgement kept for the owner (see docs/CAPABILITIES.md section 7).
+# STATUS: NOT wired in.  classify() below consults RULES only. The former
+# hand-checked OVERRIDES table moved to the GITIGNORED
+# audio_overrides.json beside this script (it carried library-specific
+# file titles that must not ship in the public repo). If you ever wire
+# overrides in, load them from there.
 # ---------------------------------------------------------------------------
-OVERRIDES = {
-    'Big Rattling Truck At Tail (Neue Nationalgalerie)': ('Ambiance', 'City'),
-    'ruck and police sirens, Tram, Crowd atmosphere, Turkish voices': ('Ambiance', 'City'),
-    'City_36_Street, Light, Ambience, Cars, Horn': ('Ambiance', 'City'),
-    'City_40_Street, Light, Ambience, Warning Alarm, Far': ('Ambiance', 'City'),
-    'City_63_Street, Pedestrian, Ambience, Busy': ('Ambiance', 'City'),
-    'Night_City_Big Street_Light Traffic_Hum': ('Ambiance', 'City'),
-    'City_Street_Pavement_Single Car Passing By': ('Ambiance', 'City'),
-    'Morning_Birds_Empty_Street_Distant_Traffic': ('Ambiance', 'City'),
-    'City_Industrial_Street_Num_Buzz_Car Passing By': ('Ambiance', 'City'),
-    'In Water Crowded Afternoon': ('Ambiance', 'Crowd'),
-    'Tribal_25_Bells, Dance, People, Crowd,General, Ambience': ('Ambiance', 'Crowd'),
-    'Tribal_05_Bells, Dance, People, Crowd, Ambience': ('Ambiance', 'Crowd'),
-    'Water_10_City, Rain, Roof': ('Ambiance', 'City'),
-    'CA1_Ambience_BerlinCity_AlexanderPlatz_Loop': ('Ambiance', 'City'),
-    'City place quiet birds bell light activity and animals': ('Ambiance', 'City'),
-    'Street Road Workers Clanging Dragging People Talking': ('Ambiance', 'City'),
-    'Suburban Life - Children Playing Voices Shouts Kindergarten': ('Ambiance', 'Crowd'),
-    'drum beat, excited crowd clapping in unison': ('Ambiance', 'Crowd'),
-    'madrid_food_market_busy': ('Ambiance', 'City'),
-    'distant truck starting, departing midway': ('Ambiance', 'City'),
-    'Checkout,Voices,Mandarin,Lively': ('Ambiance', 'City'),
-    'busy supermarket - cars_trolleys_footsteps_chatter': ('Ambiance', 'City'),
-    'train horn and crowd away wide': ('Ambiance', 'City'),
-}
 
 RULES = [
     # (top, sub, weight, [keywords])

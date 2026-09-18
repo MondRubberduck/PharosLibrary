@@ -2354,6 +2354,14 @@ class Handler(BaseHTTPRequestHandler):
     # 127.0.0.1 and become same-origin -> full read+write of the
     # library. Only loopback names (plus an explicitly configured bind
     # host) are accepted.
+    def _allowed_hosts(self) -> set:
+        allowed = {"127.0.0.1", "localhost", "::1"}
+        try:
+            allowed.add(str(self.server.server_address[0]).lower())
+        except Exception:
+            pass
+        return allowed
+
     def _host_ok(self) -> bool:
         host = (self.headers.get("Host") or "").strip().lower()
         if not host:
@@ -2361,16 +2369,60 @@ class Handler(BaseHTTPRequestHandler):
         hp = host.rsplit(":", 1)
         name = hp[0].strip("[]")
         port = hp[1] if len(hp) == 2 else ""
-        allowed = {"127.0.0.1", "localhost", "::1"}
-        try:
-            allowed.add(str(self.server.server_address[0]).lower())
-        except Exception:
-            pass
+        allowed = self._allowed_hosts()
         try:
             my_port = str(self.server.server_address[1])
         except Exception:
             my_port = ""
         return name in allowed and port in ("", my_port)
+
+    def _origin_ok(self) -> bool:
+        """CSRF hardening. The Host guard stops DNS-rebinding READS, but a
+        web page the user is visiting can still SEND cross-site requests
+        to the loopback server. Two browser signals close that:
+        - Sec-Fetch-Site (all modern browsers, every request): the UI is
+          same-origin by construction, so anything labelled cross-site
+          was not initiated by our pages.
+        - Origin (attached to every fetch/XHR POST): a foreign origin is
+          rejected outright.
+        Non-browser clients (curl, agents) send neither header and are
+        unaffected."""
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site and site not in ("same-origin", "same-site", "none"):
+            return False
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin:
+            return True
+        try:
+            o = urlparse(origin)
+            name = (o.hostname or "").strip().strip("[]").lower()
+            port = str(o.port) if o.port else ""
+        except ValueError:
+            return False
+        if name not in self._allowed_hosts():
+            return False
+        try:
+            my_port = str(self.server.server_address[1])
+        except Exception:
+            my_port = ""
+        return port in ("", my_port)
+
+    def _json_body(self):
+        """(body, err) for the JSON-mutating endpoints. Enforces an
+        application/json content type: state-changing endpoints must not
+        accept the opaque form posts a cross-site <form> can produce."""
+        ctype = (self.headers.get("Content-Type") or
+                 "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            return None, "content-type must be application/json"
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None, "bad content-length"
+        try:
+            return json.loads(self.rfile.read(length) or b"{}"), None
+        except ValueError:
+            return None, "body is not valid JSON"
 
     def log_message(self, fmt, *args):  # quiet
         pass
@@ -2592,6 +2644,11 @@ class Handler(BaseHTTPRequestHandler):
                 # launch Windows Explorer for a folder (open) or file
                 # (select) -- localhost UI convenience, jailed to asset roots.
                 # Relative paths resolve against each asset root in turn.
+                # State-changing GET: a cross-site page could embed it as
+                # an <img> (no Origin header on those), so the Fetch
+                # Metadata half of _origin_ok is the guard that matters.
+                if not self._origin_ok():
+                    return self._json({"error": "cross-site request rejected"}, 403)
                 target = (params.get("path") or [""])[0]
                 roots = [AUDIO_ROOT, TEXTURES_ROOT, COLLECTION_ROOT] + \
                     [r.resolve() for r in CANONICAL_ROOTS]
@@ -2759,6 +2816,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._host_ok():
             return self._json({"error": "bad host"}, 403)
+        if not self._origin_ok():
+            return self._json({"error": "cross-origin request rejected"}, 403)
         """Bulk human re-tagging: {"ids": [...], "set": {domain|style} | "status"}.
         Same semantics as the host-app extension: validation_status becomes
         'human_verified' and confidence 1.0."""
@@ -2789,8 +2848,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "key": key})
             if path == "/api/pack_source":
                 # link a pack to the store page it was bought from
-                length = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body, err = self._json_body()
+                if err:
+                    return self._json({"error": err}, 415)
                 pid = body.get("id") or ""
                 surl = (body.get("url") or "").strip()
                 if not re.fullmatch(r"pack::[\w .()/+-]+", pid):
@@ -2805,8 +2865,9 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
                 return self._json({"ok": True, "updated": cur.rowcount})
             if path == "/api/collection/thumb":
-                length = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body, err = self._json_body()
+                if err:
+                    return self._json({"error": err}, 415)
                 try:
                     iid = int(body.get("id") or 0)
                 except (TypeError, ValueError):
@@ -2835,13 +2896,15 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
                 return self._json({"ok": True, "thumb": image or None})
             if path == "/api/collection/tag":
-                length = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body, err = self._json_body()
+                if err:
+                    return self._json({"error": err}, 415)
                 return self._json(api_collection_tag(params, body))
             if path != "/api/retag":
                 return self._json({"error": "not found"}, 404)
-            length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
+            body, err = self._json_body()
+            if err:
+                return self._json({"error": err}, 415)
             ids = [i for i in body.get("ids", [])
                    if isinstance(i, str) and re.fullmatch(r"pack::[\w .()/+-]+", i)]
             sets, params = [], []

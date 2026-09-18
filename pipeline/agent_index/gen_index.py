@@ -160,7 +160,7 @@ index = {
     "notes": {
         "tagging_method": "Folder-name + filename keyword rules (see keywords per category). Not audio ML.",
         "unsorted": "Files in Unsorted/Needs_Review could not be auto-tagged - inspect manually.",
-        "origin": "Consolidated from Sonniss GDC 2015-2024 bundles, USBStick, Minecraft SFX, Musik.",
+        "origin": "Consolidated from purchased and collected sound bundles (see the library's own notes).",
         "duplicates": "Exact duplicates were removed (kept newest pack); see _sort_logs/dedupe_plan.csv.",
         "non_audio": "Only audio files were moved here; PDFs/videos/instruments remained in their source folders.",
     },

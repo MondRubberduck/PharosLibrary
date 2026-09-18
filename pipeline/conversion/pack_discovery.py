@@ -7,8 +7,8 @@ Answers, from the filesystem alone (no engine needed):
   * which top-level folders directly under `Content` actually hold `.uasset` files?
     (this is the ONLY reliable way to learn the real `/Game/<Top>` path -- the
     folder name, the project name and the package folder all disagree in practice,
-    e.g. `Oriantel Building/OriantelBuilding.uproject` really contains
-    `Content\\OriantalBuilding`)
+    e.g. a pack whose `.uproject` is `GreatPack.uproject` may really contain
+    `Content\\GreatPackOld`)
   * what is the project name, as a cross-check
 
 Usage:

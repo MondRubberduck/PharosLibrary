@@ -109,6 +109,6 @@ scout (`recon_new.py`) → convert packs (chain 1) and/or export kits
   `*.json` (a glob must not pick them up).
 - Verify (verifier + fingerprints) after every engine run; the source
   tree fingerprint must be identical before/after.
-- HorrorMansion-class packs (0/493 wiring because master materials
-  expose no texture params) are authoring choices: the verifier warns
-  on low coverage, it never hard-fails on it.
+- Packs whose master materials expose no texture parameters can verify
+  with 0/N wiring — that is an authoring choice, not a pipeline failure:
+  the verifier warns on low coverage, it never hard-fails on it.

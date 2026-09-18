@@ -18,11 +18,10 @@ from _config import agent_files, library_root
 AGENT = agent_files()
 LIB = library_root() or "."
 T = str(Path(__file__).resolve().parent)
-SRC = os.path.join(T, "native_index_20260915-172648.jsonl")
-if not os.path.isfile(SRC):
-    # look for any recent native_index_*.jsonl
-    candidates = sorted(glob.glob(os.path.join(T, "native_index_*.jsonl")))
-    SRC = candidates[-1] if candidates else ""
+# newest index run wins: a hard-coded snapshot name here once pinned the
+# promotion to a stale 2026-09-15 file even after newer runs existed
+candidates = sorted(glob.glob(os.path.join(T, "native_index_*.jsonl")))
+SRC = candidates[-1] if candidates else ""
 
 if not SRC or not os.path.isfile(SRC):
     print("no native_index JSONL found to promote (run index_native_all.sh first)")

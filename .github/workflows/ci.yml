@@ -21,5 +21,6 @@ jobs:
         run: |
           python -B tests/test_db.py
           python -B tests/test_uasset_parser.py
+          python -B tests/test_pack_verify.py
       - name: Fresh-install smoke (init -> importers -> API -> scanner -> docs)
         run: python -B tests/test_fresh_install.py

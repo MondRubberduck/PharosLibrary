@@ -1,0 +1,132 @@
+"""Pipeline-layer regression checks (runs under pytest or standalone).
+
+Covers three verified pipeline defects that the service-layer suites
+cannot see (they only consume pipeline OUTPUTS):
+
+  1. verify_pack_export must HARD-FAIL a v2 manifest with no wiring
+     block -- that is a broken relink (the check existed as dead code:
+     `m.get("schema") == SCHEMA_V2` compared a string against a tuple,
+     so the guard never fired).
+  2. build_kb3d_index must absolutize the RELATIVE group FBX paths that
+     export_kb3d writes ("FBX/<grp>/<grp>.fbx"); they used to land in
+     kb3d_models.jsonl verbatim with exists=False.
+
+Run standalone: python -B tests/test_pack_verify.py
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_fresh_install import _min_fbx  # noqa: E402  (shared FBX fixture)
+
+
+def _run(script: str, env_extra: dict) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, "-B", str(REPO / script)],
+        capture_output=True, text=True, cwd=str(REPO), timeout=300, env=env)
+
+
+def _verify(exports: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-B",
+         str(REPO / "pipeline" / "conversion" / "verify_pack_export.py"),
+         str(exports)],
+        capture_output=True, text=True, cwd=str(REPO), timeout=300)
+
+
+def test_v2_manifest_without_wiring_hard_fails():
+    with tempfile.TemporaryDirectory() as tmp:
+        exports = Path(tmp) / "FixturePack" / "Exports"
+        (exports / "FBX").mkdir(parents=True)
+        (exports / "FBX" / "mesh0.fbx").write_bytes(_min_fbx())
+        base = {
+            "schema": "pharos.pack.export/v2",
+            "pack": "FixturePack",
+            "meshes": [{"name": "mesh0", "kind": "StaticMesh",
+                        "dimension_method": "engine",
+                        "fbx": "FBX/mesh0.fbx", "triangles": 1,
+                        "vertices": 3, "bbox_m": [1.0, 1.0, 0.5],
+                        "materials": []}],
+            "textures": [],
+            "counts": {"static_mesh": 1, "skeletal_mesh": 0,
+                       "fbx_written": 1, "texture_files_written": 0,
+                       "failures": 0},
+        }
+        # v2 WITHOUT a wiring block: a broken relink -- must HARD FAIL
+        (exports / "manifest.json").write_text(
+            json.dumps(base), encoding="utf-8")
+        r = _verify(exports)
+        combined = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode != 0, \
+            "v2 manifest without wiring verified as PASS (dead check is back)"
+        assert "wiring block is missing" in combined, combined[-400:]
+
+        # control: the SAME manifest with a well-formed wiring block must
+        # verify clean -- the hard fail above is the ONLY difference
+        base["wiring"] = {"method": "ue-param", "slots_total": 0,
+                          "slots_resolved": 0, "slots_unresolved": 0}
+        (exports / "manifest.json").write_text(
+            json.dumps(base), encoding="utf-8")
+        r2 = _verify(exports)
+        assert r2.returncode == 0, (r2.stdout or "")[-400:]
+        assert "wiring block is missing" not in (r2.stdout or "")
+
+
+def test_kb3d_index_absolutizes_relative_fbx_paths():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        lib = tmp / "lib"
+        kits = tmp / "kits"
+        exports = kits / "FixtureKit" / "Exports"
+        groups = []
+        for i in range(11):                      # > the 10-record guard
+            gid = f"grp_{i:02d}"
+            fbx_dir = exports / "FBX" / gid
+            fbx_dir.mkdir(parents=True)
+            (fbx_dir / f"{gid}.fbx").write_bytes(b"Kaydara FBX Binary  \x00")
+            groups.append({"group": gid,
+                           "fbx": f"FBX/{gid}/{gid}.fbx",   # RELATIVE
+                           "triangles": 10, "vertices": 5,
+                           "submeshes": 1, "materials": ["M_1"],
+                           "texture_count": 0})
+        (exports / "kit_manifest.json").write_text(
+            json.dumps({"schema": "pharos.kb3d.export/v1",
+                        "kit": "FixtureKit", "groups": groups}),
+            encoding="utf-8")
+        r = _run("pipeline/kitbash/build_kb3d_index.py", {
+            "PHAROS_CONFIG": str(tmp / "missing_config.json"),
+            "PHAROS_LIBRARY_ROOT": str(lib),
+            "PHAROS_KB3D_ROOT": str(kits),
+        })
+        assert r.returncode == 0, (r.stderr or "")[-400:]
+        assert "present on disk: 11" in (r.stdout or ""), (r.stdout or "")[-300:]
+        out = lib / "_Agent_Files" / "kb3d_models.jsonl"
+        assert out.is_file(), "index not written"
+        rows = [json.loads(line) for line in
+                out.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert len(rows) == 11
+        for row in rows:
+            assert os.path.isabs(row["fbx"]), row["fbx"]
+            assert row["exists"] is True, row["fbx"]
+            assert Path(row["fbx"]).is_file(), row["fbx"]
+
+
+if __name__ == "__main__":
+    failures = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                print(f"PASS {name}")
+            except AssertionError as exc:
+                failures += 1
+                print(f"FAIL {name}: {exc}")
+    raise SystemExit(1 if failures else 0)

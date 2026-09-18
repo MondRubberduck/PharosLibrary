@@ -5,6 +5,12 @@ Ground truth is the crawl agent's own index -- library_files.jsonl
 Category descriptions + keywords come from library_index.json and are
 merged into every record's search structures (dual-audience tagging like
 collection/textures: `tags` human words + themes, `meta` for the algo).
+
+Retention (mirrors meshes/textures): rows with source='scan' (written by
+scanner.py) survive every rebuild. UNIQUE(rel) forbids two rows for the
+same file, so a file the crawl also knows ends up with the CRAWL row
+(richer sr/ch/dur); scan rows for files absent from the jsonl are kept.
+Rows predating the source column count as crawl-owned and are replaced.
 """
 
 from __future__ import annotations
@@ -40,10 +46,22 @@ CREATE TABLE IF NOT EXISTS audio (
   playable INTEGER,
   desc TEXT,
   tags TEXT,
-  meta TEXT
+  meta TEXT,
+  source TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audio_cat ON audio(cat);
 """
+
+
+def ensure_source_column(conn: sqlite3.Connection) -> None:
+    """Self-migrate: tables built before scan-row retention have no
+    `source` column. Called by every writer (scanner + importer) because
+    either may run first against an older registry; legacy rows carry
+    NULL and are treated as crawl-owned (the next rebuild replaces them
+    from the jsonl)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(audio)")}
+    if "source" not in cols:
+        conn.execute("ALTER TABLE audio ADD COLUMN source TEXT")
 
 AUDIO_THEMES = {
     "explosions": ["explosion", "blast", "detonation", "boom", "firework",
@@ -132,6 +150,7 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(AUDIO_DDL)
+        ensure_source_column(conn)
         # no crawler jsonl -> this importer owns NOTHING; scanner-indexed
         # rows must survive a restart (previously the DELETE below ran
         # first and the later open() failure could take them with it)
@@ -140,8 +159,14 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
             print(f"audio import: no crawl index ({JSONL}) -- keeping "
                   f"{kept} scanner-indexed row(s)")
             return kept
-        conn.execute("DELETE FROM audio")
-        conn.execute("DELETE FROM sqlite_sequence WHERE name='audio'")
+        # scanner rows (source='scan') survive the rebuild: only this
+        # importer's own rows (NULL / 'crawl') are replaced. UNIQUE(rel)
+        # means a file indexed by BOTH sides cannot keep two rows -- the
+        # crawl row REPLACES the scan row (same file, richer metadata:
+        # sr/ch/dur from the crawl agent); scan rows for files the crawl
+        # does not know stay untouched. sqlite_sequence is deliberately
+        # NOT reset: surviving scan rows keep their ids.
+        conn.execute("DELETE FROM audio WHERE source IS NOT 'scan'")
 
         cat_meta: dict = {}
         if INDEX.is_file():
@@ -196,12 +221,13 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
                 tags = json.dumps(list(dict.fromkeys(words + themes)),
                                   ensure_ascii=False)
                 conn.execute(
-                    "INSERT INTO audio (name,cat,sub,rel,ext,bytes,dur,sr,ch,"
-                    "playable,desc,tags,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO audio "
+                    "(name,cat,sub,rel,ext,bytes,dur,sr,ch,"
+                    "playable,desc,tags,meta,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (_pretty(stem), cat, sub, rel, ext, e.get("bytes") or 0,
                      e.get("dur") if e.get("dur") is not None else 0.0, e.get("sr"), e.get("ch"),
                      1 if ext in PLAYABLE else 0,
-                     cm.get("desc") or "", tags, meta))
+                     cm.get("desc") or "", tags, meta, "crawl"))
                 n += 1
         conn.commit()
     finally:

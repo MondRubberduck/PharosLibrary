@@ -5,9 +5,11 @@ run with zero pip installs. Keep it that way (Engines/Blender/UE stay
 optional, pipeline-side).
 
 Before every commit: `python -B tests/test_db.py && python -B
-tests/test_uasset_parser.py && python -B tests/test_fresh_install.py`
-must pass. The fresh-install suite is the product contract: a stranger's
-machine, from `pharos.py init` to queryable data.
+tests/test_uasset_parser.py && python -B tests/test_pack_verify.py &&
+python -B tests/test_fresh_install.py` must pass (or just run `pytest` —
+the smoke suite is wired in via `tests/test_smoke_entry.py`). The
+fresh-install suite is the product contract: a stranger's machine, from
+`pharos.py init` to queryable data.
 
 - The library on disk is READ-ONLY. Tests must use fixtures under tmp.
 - Counts in docs are generated from the live registry, never typed.

@@ -39,3 +39,16 @@ Thumbs.db
 desktop.ini
 .DS_Store
 pipeline/agent_index/aa_meta.json
+
+# pipeline runtime scratch: worklists, index runs, engine logs and the
+# UE sandbox copy carry absolute local paths (and multi-GB content) --
+# never publishable, always regenerable
+pipeline/conversion/logs/
+pipeline/conversion/status/
+pipeline/conversion/sandbox/
+pipeline/native/native_manifest.json
+pipeline/native/native_blends.txt
+pipeline/native/native_index_*.jsonl
+pipeline/agent_index/tex_meta.json
+pipeline/agent_index/aliases.json
+pipeline/agent_index/audio_overrides.json

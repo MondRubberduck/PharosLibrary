@@ -22,9 +22,9 @@ Checks
  10. (advisory) when the wiring ratio is below DEGRADED_RATIO the run is reported as
      `degraded`: the ratio and the top unresolved_reason values are printed as a
      WARNING.  This NEVER changes PASS/FAIL -- several packs are legitimately below
-     the target and a blanket floor would fail correct packs (HorrorMansion 0/493 is
-     a real, explained 0: its masters hardcode their textures instead of exposing
-     texture parameters).
+     the target and a blanket floor would fail correct packs (a real pack in the
+     wild scores 0/493 and that is correct: its masters hardcode their textures
+     instead of exposing texture parameters).
 
 Usage:
   python verify_pack_export.py "<pack_dir>\\Exports" [--json out.json] [--sample 2]
@@ -279,7 +279,7 @@ def main():
     w = m.get("wiring")
     R["wiring"] = None
     R["degraded"] = None
-    is_v2 = m.get("schema") == SCHEMA_V2
+    is_v2 = m.get("schema") in SCHEMA_V2
     total = res = None
     if is_v2 and not isinstance(w, dict):
         problems.append("schema is %s but the wiring block is missing or not an object "

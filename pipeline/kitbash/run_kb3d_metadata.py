@@ -1,4 +1,5 @@
-"""Drive the KitBash3D material/texture metadata pass over all 11 kits."""
+"""Drive the KitBash3D material/texture metadata pass over every kit that
+already has an Exports/kit_manifest.json."""
 import glob, os, subprocess, sys
 from pathlib import Path
 
