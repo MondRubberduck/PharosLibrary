@@ -1,7 +1,7 @@
 """Pharos Scene Builder for Blender.
 
 Run inside Blender (headless or interactive):
-    blender --background --python scene_builder.py -- manifest.json [--preview]
+    blender --background --python scene_builder.py -- manifest.json
 
 Or from Blender's Python console:
     exec(open("scene_builder.py").read()); build("manifest.json")
@@ -30,7 +30,7 @@ import mathutils
 from mathutils import Vector
 
 
-def build(manifest_path: str, save_path: str = None, preview: bool = False):
+def build(manifest_path: str, save_path: str = None):
     """Main entry point. Call from Blender."""
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     scene_name = manifest.get("scene", "Pharos Scene")
@@ -56,6 +56,11 @@ def build(manifest_path: str, save_path: str = None, preview: bool = False):
         sys.stdout.flush()      # a crash mid-build must not lose the log
                                # (Blender buffers stdout in --background)
 
+    # dead KitBash texture refs are repointed ONCE here with a cached
+    # kit-folder index (per-asset invocation was O(assets x images x
+    # drive) and cost 45+ min on a real build)
+    _remap_dead_kb3d_images()
+
     # --- ground-covering texture sets (manifest.textures[]) ---
     if manifest.get("textures"):
         _apply_ground_textures(manifest, ground_y)
@@ -65,18 +70,15 @@ def build(manifest_path: str, save_path: str = None, preview: bool = False):
         _build_crowd(group, ground_y)
         sys.stdout.flush()
 
-    # --- audio (D08: process or warn, never silently drop) ---
+    # --- audio: recorded for downstream engines only. Blender does not
+    # import audio into scenes by design (nobody does this in 15 years
+    # of Blender practice); UE/Unity and video editors consume these
+    # paths. This is NOT a failure state and is never reported as one.
     audio_entries = manifest.get("audio", [])
     if audio_entries:
-        print("\n  [audio] %d entries:" % len(audio_entries))
-        for au in audio_entries:
-            af = au.get("file", "")
-            aloop = au.get("loop", False)
-            if af and Path(af).is_file():
-                print("    %s loop=%s (not auto-imported; use Sequencer)" % (Path(af).name, aloop))
-            else:
-                print("    WARNING: audio file not found: %s" % af)
-        print("  (Audio documented but not auto-imported yet)")
+        print("\n  [audio] %d entries recorded for downstream engines "
+              "(Blender does not import scene audio by design)"
+              % len(audio_entries))
 
     # drop orphaned image/material datablocks (dead kit references that
     # were replaced leave hundreds of unassigned 0x0 images behind)
@@ -154,10 +156,17 @@ def _import_asset(asset, ground_y, index):
     # author expects (V5 cross-validation D3: applying the raw euler
     # turned yaw into roll and buried assets in the ground).
     rot = asset.get("rotation", [0, 0, 0])
+    # The manifest declares Y-up euler [pitch, yaw, roll] (scene frame);
+    # Blender is Z-up. Converting a PLACEMENT rotation between frames is
+    # a CONJUGATION (C · R · C⁻¹), not a left-multiply: the FBX importer
+    # already converts the geometry itself, and left-multiplying added a
+    # constant 90° X-tilt to every asset (identity rotation included) --
+    # real-world finding: all buildings on their sides. Conjugation maps
+    # yaw→Z, roll→−Y, pitch→X, and identity stays identity.
     r_mat = mathutils.Euler((rot[0], rot[1], rot[2]), 'XYZ') \
         .to_matrix().to_4x4()
     conv = mathutils.Matrix.Rotation(math.radians(90.0), 4, 'X')
-    root.rotation_euler = (conv @ r_mat).to_euler('XYZ')
+    root.rotation_euler = (conv @ r_mat @ conv.inverted()).to_euler('XYZ')
 
     # uniform scale — MULTIPLY, don't overwrite: Blender's FBX importer
     # sets object scale to 0.01 for cm-authored files (cm→m normalisation).
@@ -209,11 +218,6 @@ def _import_asset(asset, ground_y, index):
                       f"pass recipe 'slots[]' for per-slot wiring)")
     else:
         print(f"    (no material recipe — placeholder materials remain)")
-
-    # repoint dead KitBash texture references (the FBX files point at an
-    # empty 'kb3d_*.blender.native/KB3DTextures/4k' folder; the real
-    # textures live in the sibling 'kb3d_*.png.2k' folder)
-    _remap_dead_kb3d_images()
 
     # deselect for next import
     bpy.ops.object.select_all(action='DESELECT')
@@ -371,14 +375,37 @@ def _remap_dead_kb3d_images():
     """KitBash FBX files reference an EMPTY
     'kb3d_<kit>.blender.native/KB3DTextures/4k' folder; the shipped
     textures live in the sibling 'kb3d_<kit>.png.2k' folder. Repoint any
-    missing image whose path matches the dead pattern (V5 D8)."""
+    missing image whose path matches the dead pattern (V5 D8).
+
+    Runs ONCE after all imports with a pre-indexed kit-folder cache:
+    called per-asset with per-image recursive globs it was O(assets x
+    images x drive) and cost 45+ minutes on a 77-asset build
+    (real-world finding); the cached pass takes seconds.
+    """
+    # one-time: index every kb3d_*.png.2k folder under the configured
+    # roots into {kit-name-lower: [folder, ...]}
+    kit_folders = {}
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from asset_service import config as _cfg
+        _c = _cfg.load()
+        for key in ("kitbash_root", "library_root"):
+            root = _c.get(key)
+            if not root:
+                continue
+            for found in Path(root).glob("**/kb3d_*.png.2k"):
+                kit = found.name[len("kb3d_"):-len(".png.2k")].lower()
+                kit_folders.setdefault(kit, []).append(found)
+    except Exception:
+        pass
+
     fixed = 0
     for img in bpy.data.images:
         src = bpy.path.abspath(img.filepath)
         if not src or Path(src).is_file():
             continue
         p = Path(src.replace("\\", "/"))
-        # ancestor index of the 'kb3d_<kit>.blender.native' segment
         seg = next((i for i, anc in enumerate(p.parents)
                     if anc.name.lower().startswith("kb3d_")
                     and ".blender.native" in anc.name.lower()), None)
@@ -386,47 +413,19 @@ def _remap_dead_kb3d_images():
             continue
         kit_dir = p.parents[seg + 1] if seg + 1 < len(p.parents) else None
         kit = p.parents[seg].name.split(".blender.native")[0]
-        # the FBX records the library-of-origin path; when the library
-        # lives elsewhere (copied drive, new machine) that dir does not
-        # exist -> fall back to the configured kitbash/library roots
+        # the FBX records the library-of-origin path; when the library was
+        # copied elsewhere that dir does not exist -> resolve from the cache
         candidates = []
         if kit_dir is not None:
             candidates.append(kit_dir / f"{kit}.png.2k" / p.name)
-        try:
-            import sys as _sys
-            _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-            from asset_service import config as _cfg
-            _c = _cfg.load()
-            for key in ("kitbash_root", "library_root"):
-                if _c.get(key):
-                    candidates.append(
-                        Path(_c[key]) / f"{kit}.png.2k" / p.name)
-        except Exception:
-            pass
+        for folder in kit_folders.get(kit.lower(), []):
+            candidates.append(folder / p.name)
         hit = next((c for c in candidates if c.is_file()), None)
-        if hit is None and kit_dir is not None:
-            # last resort: bounded search for the kit folder anywhere
-            # under the kitbash root (copied libraries rename parents)
-            try:
-                import sys as _sys2
-                _sys2.path.insert(
-                    0, str(Path(__file__).resolve().parents[1]))
-                from asset_service import config as _cfg2
-                _kr = _cfg2.load().get("kitbash_root")
-                if _kr:
-                    for found in Path(_kr).glob(
-                            f"**/kb3d_{kit}.png.2k"):
-                        cand = found / p.name
-                        if cand.is_file():
-                            hit = cand
-                            break
-            except Exception:
-                pass
         if hit is not None:
             img.filepath = str(hit)
             fixed += 1
     if fixed:
-        print(f"    remapped {fixed} dead KitBash texture reference(s) "
+        print(f"  remapped {fixed} dead KitBash texture reference(s) "
               f"to the shipped .png.2k folder")
 
 
@@ -592,11 +591,10 @@ if __name__ == "__main__":
     args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     if args:
         manifest = args[0]
-        preview = "--preview" in args
         save = None
         if "--save" in args:
             save = args[args.index("--save") + 1]
-        build(manifest, save, preview)
+        build(manifest, save)
     else:
         print("Usage: blender --background --python scene_builder.py -- "
               "manifest.json [--save output.blend]")

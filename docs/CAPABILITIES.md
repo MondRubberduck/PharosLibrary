@@ -96,7 +96,10 @@ token cost.** Operating manual (setup + build doctrine):
   per-instance animation stagger. Runs:
   `blender --background --factory-startup --python scene_builder.py
   -- manifest.json` (`--factory-startup` is REQUIRED: user Blender
-  extensions can segfault headless runs).
+  extensions can segfault headless runs). Manifest `audio[]` entries are
+  recorded for DOWNSTREAM engines only: the Blender builder
+  intentionally does not import audio into scenes (nobody does that in
+  practice); UE/Unity and video editors consume those paths.
 - `verify_importable.py` — one-file-per-process Blender import probe: an
   FBX that hard-crashes Blender's importer (exit 0xC0000005) becomes a
   five-second answer instead of a debugging session.

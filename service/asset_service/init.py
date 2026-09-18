@@ -274,6 +274,11 @@ def run_init(argv=None) -> int:
         print(f"  animation     : run indexer.py to index the clip packs ->"
               f" python service/asset_service/indexer.py"
               f" --root \"{root}\"")
+    if picks.get("audio"):
+        ap = root / picks["audio"][0]
+        print(f"  audio         : scanner.py indexes durations + folder"
+              f" categories -> python service/asset_service/scanner.py"
+              f" \"{ap}\"")
     print("-" * 67)
 
     # questions the RUNNING AGENT must relay to its user before building
