@@ -24,8 +24,25 @@ for man_path in sorted(glob.glob(os.path.join(ROOT, "*", "Exports", "kit_manifes
     exports = os.path.dirname(man_path)
     d = json.load(io.open(man_path, encoding="utf-8"))
     kits += 1
+    def _portable(path, base):
+        """kit_manifests record ABSOLUTE paths from the machine that
+        exported them; when the library was copied elsewhere those are
+        dead. Re-anchor to this library via the manifest's own dir."""
+        if not path:
+            return os.path.join(base, "")
+        if os.path.isabs(path) and not os.path.isfile(path):
+            rel = path.replace("/", os.sep)
+            # try the tail segments (up to 4) relative to exports/kit root
+            parts = rel.split(os.sep)
+            for keep in range(1, 5):
+                cand = os.path.join(base, *parts[-keep:])
+                if os.path.isfile(cand):
+                    return cand
+            return os.path.join(base, os.path.basename(path))
+        return path
+
     for g in d.get("groups") or []:
-        fbx_abs = os.path.join(exports, (g["fbx"] or "").replace("/", os.sep))
+        fbx_abs = _portable(g["fbx"], exports)
         bbox = g.get("bbox_m")
         rows.append({
             "pack": kit,
@@ -43,7 +60,8 @@ for man_path in sorted(glob.glob(os.path.join(ROOT, "*", "Exports", "kit_manifes
             "max_dim_m": (max(bbox) if bbox else None),
             "materials": g.get("materials") or [],
             "material_count": g.get("material_count", 0),
-            "texture_files": g.get("texture_files") or [],
+            "texture_files": [_portable(t, kit_dir)
+                             for t in (g.get("texture_files") or [])],
             "texture_count": g.get("texture_count", 0),
             "manifest": man_path,
         })

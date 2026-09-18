@@ -6,12 +6,14 @@ Discovers:
   - Mesh files (.fbx, .obj, .glb, .gltf, .stl, .usd, .blend) → mesh records
   - Texture folders (albedo/normal/roughness/… files grouped by stem) → texture sets
   - Audio files (.wav, .ogg, .mp3, .flac) → audio records with duration
-  - Any manifest.json in the tree (from the UE→FBX export pipeline) → exact wiring
+  - Any Exports/manifest.json in the tree → authoritative GEOMETRY STATS
+    (triangles/bbox) for matching meshes
 
 The scanner is honest about its limits:
   - FBX bounding boxes are extracted when possible (binary FBX parse for
     geometry extents); OBJ/GLB via trimesh if available
-  - Material wiring from Exports/manifest.json is authoritative and preferred
+  - Material wiring is NOT joined here — that lives in meshes_import.py
+    via the crawler indexes + export manifests
   - Without trimesh, OBJ/GLB/STL get no dimensions (recorded, not guessed)
 
 Writes into the same SQLite tables the HTTP API and MCP server read.
