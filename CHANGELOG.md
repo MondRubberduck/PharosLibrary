@@ -38,6 +38,13 @@ themselves, never hand-typed).
   headless Blender build from API-picked assets reopened and asserted
   (ground snapping, rotation conjugation, per-slot materials, live
   textures, textured ground plane).
+- CI actually green for the first time: a multi-line f-string expression
+  in `init.py` was a SyntaxError on Python 3.10 (legal on 3.12, so it
+  never failed locally) and had failed the first CI job -- and thereby,
+  via fail-fast, every single CI run since the workflow was added. Found
+  by auditing the CI history during the 0.2.1 release push; fixed and
+  covered by an AST scan across the codebase (this was the only
+  occurrence).
 - Release hygiene: README rewritten around a clear user/agent split;
   removed superseded and orphaned one-off scripts (convert_all.sh,
   tree_fingerprint.py, index_blends.sh, verify_kb3d_fbx.py,

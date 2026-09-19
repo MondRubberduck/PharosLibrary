@@ -258,8 +258,8 @@ def run_init(argv=None) -> int:
     print(f"  sections      : animation={picks.get('animation', ['-'])[0]}"
           f" | textures={picks.get('textures', ['-'])[0]}"
           f" | audio={picks.get('audio', ['-'])[0]}")
-    print(f"  collection csv: {report['catalog_csvs'][0]
-                          if report['catalog_csvs'] else '(none found)'}")
+    csvs = report["catalog_csvs"]
+    print(f"  collection csv: {csvs[0] if csvs else '(none found)'}")
     if report["manifest_roots"]:
         print(f"  manifest packs: {len(report.get('manifest_packs_found', []))}"
               f" under {', '.join(report['manifest_roots'])}"
