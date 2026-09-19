@@ -625,6 +625,10 @@ def test_native_driver_fails_loudly():
     """A Blender crash used to read as success (pipeline-to-grep lost
     every exit code, driver always exited 0). Stub Blender: nonzero stub
     exit must surface as driver exit 9."""
+    bash = _find_usable_bash()
+    if bash is None:
+        print("SKIP: no usable bash")
+        return
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         stub = tmp / "stub-blender.sh"
@@ -651,13 +655,13 @@ def test_native_driver_fails_loudly():
                         "BLENDER_EXE": str(stub),
                         "PHAROS_CONFIG": str(tmp / "missing.json")}
             r_bad = subprocess.run(
-                ["bash", str(native / "index_native_all.sh")],
+                [bash, str(native / "index_native_all.sh")],
                 capture_output=True, text=True, cwd=str(REPO),
                 timeout=120, env={**base_env, "STUB_RC": "1"})
             assert r_bad.returncode == 9, \
                 (r_bad.returncode, (r_bad.stdout or "")[-200:])
             r_ok = subprocess.run(
-                ["bash", str(native / "index_native_all.sh")],
+                [bash, str(native / "index_native_all.sh")],
                 capture_output=True, text=True, cwd=str(REPO),
                 timeout=120, env=base_env)
             assert r_ok.returncode == 0, (r_ok.stdout or "")[-200:]
