@@ -160,6 +160,12 @@ pipelines own.
   Windows a second run binds 8765 successfully (observed: two processes
   LISTENING on 8765 at the same time) and which one answers a request is
   not deterministic. Stop the old server first.
+- One library root at a time (by design, owner decision 2026-09-19):
+  pack ids are root-relative (`pack::<folder path>`). Cross-root PRUNING
+  is scoped correctly (indexing root B cannot delete root A's packs),
+  but indexing two roots whose packs share the same relative path
+  overwrites one registry row with the other. Pharos assumes a single
+  `library_root`; point it at one root and keep it there.
 
 ## 8. Regenerating everything
 
