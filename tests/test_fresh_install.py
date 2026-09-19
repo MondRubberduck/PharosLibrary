@@ -15,6 +15,7 @@ Writes only into a temp dir + the repo's own pharos_config.json slot
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import struct
 import sys
@@ -24,6 +25,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "service"))
+
+
+def _same_path(a: str, b: str) -> bool:
+    """Windows TEMP dirs can carry 8.3 short names (RUNNER~1) that init's
+    Path.resolve() expands -- compare resolved, case-insensitively there."""
+    pa, pb = Path(a).resolve(), Path(b).resolve()
+    if os.name == "nt":
+        return str(pa).lower() == str(pb).lower()
+    return str(pa) == str(pb)
 
 # minimal but valid binary FBX (one triangle, cm units) for the scanner
 FBX_TRIANGLES = 1
@@ -157,7 +167,8 @@ def main() -> int:
             capture_output=True, text=True, cwd=str(REPO), timeout=300)
         check("init exits 0", r.returncode == 0, r.stderr[-150:])
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        check("config library_root", cfg["library_root"] == str(lib))
+        check("config library_root", _same_path(cfg["library_root"], str(lib)),
+              f"cfg={cfg['library_root']}")
         check("init detected collection csv",
               cfg.get("collection_csv") == "purchases.csv")
 
@@ -175,7 +186,9 @@ def main() -> int:
               str(lib / "UE Packs") in det.get("manifest_roots", []),
               str(det.get("manifest_roots")))
         check("A1: config carries the manifest root",
-              str(lib / "UE Packs") in cfg.get("manifest_roots", []))
+              any(_same_path(str(lib / "UE Packs"), m)
+                  for m in cfg.get("manifest_roots", [])),
+              str(cfg.get("manifest_roots")))
 
         # 2. importers on a fresh registry (degradation path)
         from asset_service import db, collection_import, textures_import, \
