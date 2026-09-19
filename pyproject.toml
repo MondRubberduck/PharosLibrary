@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pharos"
-version = "0.2.1"
+version = "0.2.2"
 description = "Local asset-intelligence server for coding agents: indexes 3D meshes, PBR textures, audio and animation clips into a queryable SQLite registry served over HTTP and MCP."
 readme = "README.md"
 requires-python = ">=3.10"

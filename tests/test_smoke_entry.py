@@ -21,3 +21,10 @@ def test_fresh_install_smoke_contract():
     assert r.returncode == 0, (
         "fresh-install smoke suite failed -- run "
         "`python -B tests/test_fresh_install.py` directly for full output")
+
+
+if __name__ == "__main__":
+    # a bare `python tests/test_smoke_entry.py` used to exit 0 having run
+    # NOTHING (no __main__) -- the exact silent-no-op this repo despises
+    test_fresh_install_smoke_contract()
+    print("test_smoke_entry: contract PASS")

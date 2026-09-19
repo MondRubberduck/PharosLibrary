@@ -159,7 +159,7 @@ def pick_hero(files: list[dict]) -> Optional[dict]:
 
 
 def prettify_name(folder_name: str) -> str:
-    """'AlbertMansion_5.0' -> 'Albert Mansion 5.0' (camelCase-aware) so FTS
+    """'MansionExample_5.0' -> 'Mansion Example 5.0' (camelCase-aware) so FTS
     tokens match natural-language searches."""
     import re
     spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", folder_name)

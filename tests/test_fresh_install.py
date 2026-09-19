@@ -270,6 +270,25 @@ def main() -> int:
         check("both sources present after double rebuild",
               "scan" in srcs and "leartes" in srcs, str(srcs))
 
+        # 5a2. one cp1252 byte in the crawler jsonl must not abort the
+        # geometry rebuild (audio got the fallback chain first; meshes
+        # used strict utf-8 and died with 0 rows)
+        bad = ('{"name": "café crate", "pack": "FixturePack", '
+               '"source": "leartes", "fbx": "café_crate.obj", '
+               '"exists": true, "triangles": 1, "vertices": 3, '
+               '"bbox_m": [1.0, 1.0, 1.0], "materials": [], '
+               '"texture_files": []}').encode("cp1252")
+        (af / "models.jsonl").write_bytes(
+            (af / "models.jsonl").read_bytes() + bad + b"\n")
+        try:
+            meshes_import.import_meshes(dbp)
+            cp_ok = True
+        except UnicodeDecodeError:
+            cp_ok = False
+        m5 = browse.api_meshes({})
+        check("cp1252 jsonl survives the geometry rebuild",
+              cp_ok and m5["total"] == 5, f"total={m5['total']}")
+
         # 5c. A5: scanner audio keeps the folder taxonomy
         r = subprocess.run(
             [sys.executable, str(REPO / "service/asset_service/scanner.py"),
@@ -380,6 +399,22 @@ def main() -> int:
               "scan" in _srcs and "crawl" in _srcs and None not in _srcs,
               str(_srcs))
 
+        # 5e2. re-scanning the same folder must not duplicate texture
+        # sets (INSERT OR REPLACE was a plain INSERT without a unique
+        # index; every ingest doubled the rows)
+        r = subprocess.run(
+            [sys.executable, str(REPO / "service/asset_service/scanner.py"),
+             str(lib / "Textures_Materials")], capture_output=True,
+            text=True, cwd=str(REPO), timeout=120)
+        _c = _sq.connect(dbp)
+        _trows = [tuple(x) for x in _c.execute(
+            "SELECT name, folder FROM textures WHERE source='scan'")]
+        _dupes = len(_trows) - len(set(_trows))
+        _c.close()
+        check("re-scan does not duplicate texture sets",
+              r.returncode == 0 and _dupes == 0 and len(_trows) >= 1,
+              f"rows={len(_trows)} dupes={_dupes}")
+
         # 5f. Host-header guard (DNS-rebinding blocker): the server must
         # 403 any non-loopback Host on GET/POST/HEAD
         import time as _time
@@ -428,6 +463,19 @@ def main() -> int:
                   _post({"Content-Type": "text/plain"}) == 415)
             check("CSRF: JSON POST passes guard (handler 400 = no-op)",
                   _post({"Content-Type": "application/json"}) == 400)
+
+            # probes must never trigger the state-changing side effect:
+            # HEAD on open_explorer is a 405, not an Explorer launch
+            req3 = _ur.Request(
+                "http://127.0.0.1:8844/api/open_explorer?path=Animation"
+                "%2FWalkPacks%2Fwalk01.fbx", method="HEAD")
+            try:
+                _ur.urlopen(req3, timeout=3)
+                head_code = 200
+            except _ur.HTTPError as e:
+                head_code = e.code
+            check("open_explorer HEAD -> 405 (probes never launch)",
+                  head_code == 405, str(head_code))
         finally:
             srv.terminate()
 
@@ -502,6 +550,35 @@ def main() -> int:
               _anim >= 1, f"anim={_anim}")
         check("ingest kept meshes intact across rebuild",
               _mesh_n >= 3, f"meshes={_mesh_n}")
+
+        # 6c2. anim section token-bomb guard (every other section had
+        # it; q=??? used to return the WHOLE library). q=walk>=1 proves
+        # the section is non-empty, so the 0 is the guard, not emptiness
+        av = browse.api_anim_clips({"q": ["???"]})
+        check("anim q=??? -> 0 (token-bomb, animation section)",
+              av["total"] == 0, f"total={av['total']}")
+        av2 = browse.api_anim_clips({"q": ["walk"]})
+        check("anim q=walk still finds clips (non-vacuous)",
+              av2["total"] >= 1, f"total={av2['total']}")
+
+        # 6c3. ingest must survive a library with NO purchase CSV
+        # (fresh libraries crashed with FileNotFoundError before
+        # textures/audio/meshes ever ran)
+        lib2 = tmp / "lib_nocsv"
+        (lib2 / "Animation").mkdir(parents=True)
+        (lib2 / "Animation" / "w.fbx").write_bytes(b"stubfbx")
+        cfg_now = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg_now["library_root"] = str(lib2)
+        cfg_path.write_text(json.dumps(cfg_now), encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(REPO / "pharos.py"), "ingest"],
+            capture_output=True, text=True, cwd=str(REPO), timeout=600)
+        out6 = (r.stdout or "") + (r.stderr or "")
+        check("ingest survives a CSV-less library (exit 0, skip logged)",
+              r.returncode == 0 and "collection import skipped" in out6,
+              f"rc={r.returncode} tail={out6.strip()[-90:]!r}")
+        cfg_now["library_root"] = str(lib)
+        cfg_path.write_text(json.dumps(cfg_now), encoding="utf-8")
 
         # ...and a fresh install with no registry yet must get a plain,
         # actionable message, never a sqlite3 traceback

@@ -19,7 +19,7 @@ PATTERNS = [
     # library-content markers: specific pack/vendor names from the owner's
     # library that leaked into tracked sources once already. Specific
     # enough to never false-positive on generic prose.
-    "Oriantel", "HorrorMansion", "Sonniss",
+    "Oriantel", "HorrorMansion", "Sonniss", "AlbertMansion",
 ]
 
 

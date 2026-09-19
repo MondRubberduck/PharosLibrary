@@ -8,6 +8,10 @@ on:
 jobs:
   tests:
     strategy:
+      # one failing leg must never cancel the others: a py3.10
+      # SyntaxError once fail-fast-cancelled every other job and "CI
+      # green" stayed unverifiable for 20+ consecutive runs
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.10", "3.12"]

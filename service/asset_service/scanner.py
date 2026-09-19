@@ -199,15 +199,17 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
         # started -- create every table this scanner writes (all DDLs are
         # IF NOT EXISTS, so this is a no-op against an existing registry)
         from asset_service.meshes_import import MESHES_DDL
-        from asset_service.textures_import import TEXTURES_DDL
+        from asset_service.textures_import import (TEXTURES_DDL,
+                                                   ensure_scan_unique_index)
         from asset_service.audio_import import AUDIO_DDL, ensure_source_column
         conn.executescript(MESHES_DDL + TEXTURES_DDL + AUDIO_DDL)
-        # the audio source column post-dates some registries: make sure
-        # THIS writer can write before any importer ever ran
+        # the audio source column and the textures scan-unique index
+        # post-date some registries: make sure THIS writer can write
+        # before any importer ever ran
         ensure_source_column(conn)
+        ensure_scan_unique_index(conn)
         conn.commit()
 
-    # --- pass 1: find manifests (authoritative mesh data) ---
     manifests = {}
     for mf in folder.rglob("manifest.json"):
         # skip .bak files — only exact filename (handover instruction)
@@ -248,93 +250,114 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
             if fbx:
                 manifest_meshes[fbx] = me
 
-    for mf in mesh_files:
-        rel = mf.relative_to(folder).as_posix()
-        name = mf.stem
+    try:
+        for mf in mesh_files:
+            rel = mf.relative_to(folder).as_posix()
+            name = mf.stem
 
-        # check manifest first
-        me = manifest_meshes.get(mf.as_posix()) or manifest_meshes.get(rel)
-        if me:
-            bbox = me.get("bbox_m") or [0, 0, 0]
-            record = {
-                "name": name, "pack": folder.name, "source": "scan",
-                "kind": me.get("kind", "mesh"),
-                "fbx": mf.as_posix(), "on_disk": 1,
-                "bytes": mf.stat().st_size,
-                "triangles": me.get("triangles", 0),
-                "vertices": me.get("vertices", 0),
-                "bbox": bbox,
-            }
-        else:
-            # try to extract geometry
-            geo = None
-            if mf.suffix.lower() == ".fbx":
-                from asset_service.fbx_dims import fbx_bbox_m
-                g = fbx_bbox_m(mf)
-                if g:
-                    geo = {"bbox": g["bbox_m"],
-                           "triangles": g["triangles"],
-                           "vertices": g["vertices"]}
-            elif mf.suffix.lower() == ".obj":
-                bbox = obj_bbox(mf)
-                tri = obj_triangles(mf)
-                if bbox:
-                    geo = {"bbox": bbox, "triangles": tri, "vertices": 0}
-            elif mf.suffix.lower() in (".glb", ".gltf", ".stl"):
-                geo = try_trimesh(mf)
-            record = {
-                "name": name, "pack": folder.name, "source": "scan",
-                "kind": "mesh", "fbx": mf.as_posix(), "on_disk": 1,
-                "bytes": mf.stat().st_size,
-                "triangles": geo["triangles"] if geo else 0,
-                "vertices": geo["vertices"] if geo else 0,
-                "bbox": geo["bbox"] if geo else [0, 0, 0],
-            }
+            try:
+                # check manifest first
+                me = manifest_meshes.get(mf.as_posix()) or manifest_meshes.get(rel)
+                if me:
+                    bbox = me.get("bbox_m") or [0, 0, 0]
+                    record = {
+                        "name": name, "pack": folder.name, "source": "scan",
+                        "kind": me.get("kind", "mesh"),
+                        "fbx": mf.as_posix(), "on_disk": 1,
+                        "bytes": mf.stat().st_size,
+                        "triangles": me.get("triangles", 0),
+                        "vertices": me.get("vertices", 0),
+                        "bbox": bbox,
+                    }
+                else:
+                    # try to extract geometry; ONE corrupt file must skip
+                    # itself, never abort the whole scan (previously a poison
+                    # FBX raised IndexError out of fbx_dims and every row of
+                    # the run was lost)
+                    geo = None
+                    try:
+                        if mf.suffix.lower() == ".fbx":
+                            from asset_service.fbx_dims import fbx_bbox_m
+                            g = fbx_bbox_m(mf)
+                            if g:
+                                geo = {"bbox": g["bbox_m"],
+                                       "triangles": g["triangles"],
+                                       "vertices": g["vertices"]}
+                        elif mf.suffix.lower() == ".obj":
+                            bbox = obj_bbox(mf)
+                            tri = obj_triangles(mf)
+                            if bbox:
+                                geo = {"bbox": bbox, "triangles": tri, "vertices": 0}
+                        elif mf.suffix.lower() in (".glb", ".gltf", ".stl"):
+                            geo = try_trimesh(mf)
+                    except Exception as exc:                  # noqa: BLE001
+                        print(f"  [warn] geometry extraction failed for "
+                              f"{mf.name}: {type(exc).__name__}", flush=True)
+                        geo = None
+                    record = {
+                        "name": name, "pack": folder.name, "source": "scan",
+                        "kind": "mesh", "fbx": mf.as_posix(), "on_disk": 1,
+                        "bytes": mf.stat().st_size,
+                        "triangles": geo["triangles"] if geo else 0,
+                        "vertices": geo["vertices"] if geo else 0,
+                        "bbox": geo["bbox"] if geo else [0, 0, 0],
+                    }
 
-        if dry_run:
-            if verbose:
-                print(f"  [mesh] {record['name']} tri={record['triangles']}")
-            summary["meshes"] += 1
-        else:
-            _insert_mesh(conn, record, folder_str)
-            summary["meshes"] += 1
+                if dry_run:
+                    if verbose:
+                        print(f"  [mesh] {record['name']} tri={record['triangles']}")
+                    summary["meshes"] += 1
+                else:
+                    _insert_mesh(conn, record, folder_str)
+                    summary["meshes"] += 1
+            except Exception as exc:                          # noqa: BLE001
+                summary["errors"] += 1
+                print(f"  [warn] skipped mesh {mf.name}: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
 
-    # --- texture sets (group images by stem) ---
-    tex_groups: dict[str, list[Path]] = {}
-    for img in image_files:
-        stem = _texture_stem(img.stem)
-        tex_groups.setdefault(stem, []).append(img)
+        # --- texture sets (group images by stem) ---
+        tex_groups: dict[str, list[Path]] = {}
+        for img in image_files:
+            stem = _texture_stem(img.stem)
+            tex_groups.setdefault(stem, []).append(img)
 
-    for stem, files in sorted(tex_groups.items()):
-        channels = {}
-        for f in files:
-            ch = detect_channel(f.name)
-            if ch:
-                channels.setdefault(ch, f.as_posix())
-        if not channels and len(files) < 2:
-            continue  # single unidentifiable image — not a set
-        if dry_run:
-            summary["texture_sets"] += 1
-            if verbose:
-                print(f"  [tex]  {stem} -> {list(channels.keys())}")
-        else:
-            _insert_texture_set(conn, stem, files, channels, folder)
-            summary["texture_sets"] += 1
+        for stem, files in sorted(tex_groups.items()):
+            channels = {}
+            for f in files:
+                ch = detect_channel(f.name)
+                if ch:
+                    channels.setdefault(ch, f.as_posix())
+            if not channels and len(files) < 2:
+                continue  # single unidentifiable image — not a set
+            if dry_run:
+                summary["texture_sets"] += 1
+                if verbose:
+                    print(f"  [tex]  {stem} -> {list(channels.keys())}")
+            else:
+                _insert_texture_set(conn, stem, files, channels, folder)
+                summary["texture_sets"] += 1
 
-    # --- audio ---
-    for af in audio_files:
-        dur = wav_duration(af) if af.suffix.lower() == ".wav" else None
-        if dry_run:
-            summary["audio"] += 1
-            if verbose:
-                print(f"  [aud]  {af.name} dur={dur}")
-        else:
-            _insert_audio(conn, af, dur, folder)
-            summary["audio"] += 1
+        # --- audio ---
+        for af in audio_files:
+            dur = wav_duration(af) if af.suffix.lower() == ".wav" else None
+            if dry_run:
+                summary["audio"] += 1
+                if verbose:
+                    print(f"  [aud]  {af.name} dur={dur}")
+            else:
+                _insert_audio(conn, af, dur, folder)
+                summary["audio"] += 1
 
-    if conn:
-        conn.commit()
-        conn.close()
+        # durable per-section progress: a crash in a LATER section must
+        # not roll back the rows an EARLIER section already wrote
+        if conn:
+            conn.commit()
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:                             # noqa: BLE001
+                pass
 
     return summary
 

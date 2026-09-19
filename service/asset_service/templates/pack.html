@@ -52,14 +52,14 @@ const fmt=b=>b==null?'':b>1e9?(b/1e9).toFixed(1)+' GB':b>1e6?(b/1e6).toFixed(1)+
 async function load(){
  const p=new URLSearchParams({id:pack,q:query,ext,page});
  const d=await(await fetch('/api/pack_files?'+p)).json();
- if(d.error){pname.textContent='\\u26a0 '+d.error;return;}
+ if(d.error){pname.textContent='\u26a0 '+d.error;return;}
  total=d.total;
   if(!headerDone){headerDone=true;
   pname.textContent=d.pack.name;
   chips.innerHTML=`<span class="chip domain">${esc(d.pack.domain)}</span>`+
    (d.pack.sub_category?`<span class="chip">${esc(d.pack.sub_category)}</span>`:'')+
    `<span class="chip style">${esc(d.pack.style)}</span>`+
-   (d.pack.validation==='human_verified'?'<span class="chip human">human</span>':'');
+   (d.pack.validation_status==='human_verified'?'<span class="chip human">human</span>':'');
   hero=d.hero||'';
   meta.innerHTML=`${esc(d.pack.vendor||'—')} · hero: <span class="dir">${esc(hero)}</span>`+
    ` · absolute path prefix: <span class="dir">${esc(d.root)}</span>`;
@@ -77,13 +77,17 @@ async function load(){
    if(r.ok){msg.textContent='source URL saved';setTimeout(()=>msg.textContent='',2000);headerDone=false;load();}
    else msg.textContent='save failed: '+(r.error||'?');};}
  count.textContent=`${d.total} file(s)`;
- exts.innerHTML=`<button class="echip${ext===''?' on':''}" onclick="setExt('')">all</button>`+
-  d.ext_counts.map(e=>`<button class="echip${ext===e.ext?' on':''}" onclick="setExt('${e.ext}')">.${e.ext} <span style="opacity:.55">${e.n}</span></button>`).join('');
+ // ext values come from real filenames -> escaped, and the click travels
+ // in a data attribute (never spliced into an inline onclick string)
+ exts.innerHTML=`<button class="echip${ext===''?' on':''}" data-e="">all</button>`+
+  d.ext_counts.map(e=>`<button class="echip${ext===e.ext?' on':''}" data-e="${esc(e.ext)}">.${esc(e.ext)} <span style="opacity:.55">${e.n}</span></button>`).join('');
+ exts.addEventListener('click',ev=>{const b=ev.target.closest('button.echip');
+  if(b)setExt(b.dataset.e||'');});
  rows.innerHTML=d.files.map(f=>{
    const parts=f.relative_path.split('/'),name=parts.pop(),dir=parts.join('/');
-   const e=(name.match(/\\.([^.]+)$/)||[])[1]||'';
+   const e=(name.match(/\.([^.]+)$/)||[])[1]||'';
    const isHero=f.relative_path===hero;
-   const play=/\\.(fbx|bvh)$/i.test(f.relative_path)
+   const play=/\.(fbx|bvh)$/i.test(f.relative_path)
      ?`<a class="play" href="/viewer?pack=${encodeURIComponent(pack)}&file=${encodeURIComponent(f.relative_path)}">&#9654; 3D</a>`:'';
    return `<tr><td class="ft">.${esc(e)}</td>
     <td class="fname">${esc(name)}${isHero?' <span class="star" title="hero file">&#9733;</span>':''}${play}</td>

@@ -18,7 +18,7 @@ the per-pack export manifests (`Exports/manifest.json` and
 `Exports/kit_manifest.json` under every directory listed in
 `manifest_roots` in pharos_config.json) -- never derived from the flat
 `texture_files` list. That filename guessing produced a wrong recipe for every
-mesh of a pack (AlbertMansion: all 8 first meshes pointed at TX_Debris_01a),
+mesh of a pack (one real pack: all 8 first meshes pointed at the same debris map),
 and a wrong recipe is worse than no recipe because an agent will trust it.
 A mesh with no manifest entry, or a material chain that exposes no texture
 parameters, gets `resolved: false` and an empty `primary`: absent, not wrong.
@@ -589,8 +589,23 @@ def import_meshes(db_path: str | Path) -> int:
         for src in SOURCES:
             if not src.is_file():
                 continue
-            with open(src, encoding="utf-8") as f:
-                for line in f:
+            # cp1252/latin-1 fallback: strict utf-8 aborted the whole
+            # geometry rebuild when a crawler jsonl carried one
+            # non-UTF-8 filename byte (audio_import hit this first and
+            # got the chain; meshes never did)
+            raw = src.read_bytes()
+            text = None
+            for enc in ("utf-8", "cp1252", "latin-1"):
+                try:
+                    text = raw.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if text is None:
+                print(f"meshes import: skipping undecodable {src}",
+                      flush=True)
+                continue
+            for line in text.splitlines():
                     line = line.strip()
                     if not line:
                         continue

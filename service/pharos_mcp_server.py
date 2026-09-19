@@ -36,9 +36,36 @@ mcp = FastMCP("pharos")
 
 
 def _db() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.DB_PATH)
+    """Open the registry read-write WITHOUT ever creating it.
+
+    An unconfigured start used to sqlite3-connect the default path in
+    whatever CWD the MCP client launched from -- creating a stray empty
+    assets.sqlite there -- and then fail with raw sqlite errors on every
+    tool call. Preflight + mode=rw (no create) instead: clear errors,
+    zero side effects."""
+    if not config.is_configured():
+        raise FileNotFoundError(
+            "pharos_config.json has no library_root/registry_dir -- run "
+            "`python pharos.py init <assets-root>` first (this MCP server "
+            "refuses to invent a registry location)")
+    p = Path(config.DB_PATH)
+    if not p.is_file():
+        raise FileNotFoundError(
+            f"registry not found at {p} -- start the server once "
+            f"(`python pharos.py serve`) or run an import, then retry")
+    conn = sqlite3.connect(f"file:{p.as_posix()}?mode=rw", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _animation_clip_count(conn: sqlite3.Connection) -> int:
+    """Clips = FBX/BVH under the ANIMATION packs only (mesh packs contain
+    FBX too; counting everything inflated this number on mixed libs)."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM asset_files f JOIN assets a "
+        "ON a.id = f.asset_id WHERE a.id LIKE 'pack::Animation/%' "
+        "AND (lower(f.relative_path) LIKE '%.fbx' "
+        "OR lower(f.relative_path) LIKE '%.bvh')").fetchone()[0]
 
 
 @mcp.tool()
@@ -55,9 +82,7 @@ def pharos_stats() -> str:
         local = conn.execute(
             "SELECT COUNT(*) FROM collection WHERE availability='local'"
         ).fetchone()[0]
-        clips = conn.execute(
-            "SELECT COUNT(*) FROM asset_files WHERE lower(relative_path) "
-            "LIKE '%.fbx' OR lower(relative_path) LIKE '%.bvh'").fetchone()[0]
+        clips = _animation_clip_count(conn)
         return json.dumps({
             "packs": packs, "meshes": meshes, "texture_sets": textures,
             "audio_files": audio, "collection_items": collection,
@@ -193,10 +218,13 @@ def pharos_search_textures(
                 tags = (r.get("tags") or "") + (r.get("meta") or "")
                 return all(t in nl or t in tags.lower() for t in tokens)
             rows = [r for r in rows if hit(r)]
-        rows = rows[:min(100, max(1, limit))]
+        # filter BEFORE the limit (the mesh tool documents this exact
+        # rule): truncating first made resolution filters return false
+        # "no 4K sets" answers on libraries over the limit
         if resolution:
             rows = [r for r in rows
                     if resolution.lower() in (r.get("meta") or "")]
+        rows = rows[:min(100, max(1, limit))]
         out = [{
             "name": r["name"], "group": r["grp"], "sub": r["sub"],
             "file_count": r["file_count"],

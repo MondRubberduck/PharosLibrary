@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.2.2 (2026-09-19)
+External-review Batch 1: fresh-install crash, two XSS sinks, dead UI
+features, re-scan duplication, and importer/pipeline robustness — every
+fix regression-tested, live-verified against the real registry, and the
+whole contract re-run green.
+
+- `pharos.py ingest` no longer crashes on a library without a purchase
+  CSV (FileNotFoundError killed the chain before textures/audio/meshes
+  ran; each importer is now individually guarded, matching serve).
+- Stored-XSS closed on the registry grid and the pack page: every
+  interpolated value escaped, ids/exts travel in data-attributes read
+  by delegated listeners instead of inline onclick string splices
+  (pack ids are folder paths; `'` is a legal Windows filename char).
+- Template extraction artifacts fixed: the pack page's per-file "3D"
+  link never rendered and the type column always showed `.` (regexes
+  carried literal `\\.` from their Python-string origins); the assets
+  page stripped DIGITS from prices (`[^\\d.]`). Served-page scripts now
+  syntax-checked during verification.
+- Texture sets no longer duplicate on every re-scan: a partial unique
+  index (name, folder WHERE source='scan') makes the scanner's
+  INSERT OR REPLACE actually replace; legacy duplicates are collapsed
+  by a self-migration (verified on a copy of the live registry).
+- The animation section got the token-bomb guard every other section
+  had (`q=???` returned the whole library).
+- One corrupt FBX can no longer abort a whole scan: fbx_dims raises a
+  parse error instead of IndexError when a property length walks past
+  the buffer, and the scanner wraps per-file work with section-level
+  commits and a guaranteed close (a poison file now yields a zero-dims
+  row — recorded, never guessed).
+- meshes_import: cp1252/latin-1 fallback for crawler jsonls (one bad
+  filename byte aborted the geometry rebuild with 0 rows; audio had
+  the chain since 0.2.1).
+- Animation page in-page previews render again (`holderHelper` was
+  never declared — strict-mode ReferenceError on every render) and BVH
+  viewer playback works (the loader got an ArrayBuffer where it
+  string-splits; now TextDecoder-decoded).
+- MCP server: refuses to CREATE a registry (preflight + mode=rw — an
+  unconfigured start used to drop a stray empty assets.sqlite in the
+  client's CWD), the texture resolution filter runs BEFORE the limit,
+  and animation_clips counts only Animation packs (was every FBX in
+  the DB; live: 1313, not 10281).
+- promote_native can no longer feed the stage-2 blends file to the
+  wholesale overwrite (it sorts after every timestamped run; the
+  newest-wins glob introduced in 0.2.1 would have erased all
+  FBX/OBJ container records once run_blends had run).
+- `/api/open_explorer` answers HEAD with 405 (probes — link checkers,
+  curl -I — must never launch Explorer), and the server now prints the
+  loud non-loopback-bind warning SECURITY.md always promised.
+- Housekeeping: `__version__` re-synced (drift test added),
+  test_smoke_entry has a `__main__` (was a silent exit-0 no-op), CI
+  matrix sets `fail-fast: false` (one leg's failure no longer hides
+  the others — the run-1 lesson), leak_scan covers AlbertMansion and
+  the three occurrences are scrubbed, pack page reads
+  `validation_status` (the "human verified" chip can now appear).
+
 ## 0.2.1 (2026-09-18)
 Honesty + pipeline-correctness pass, then the setup-experience phase
 (Phase 0-2 of the audit roadmap; counts below are printed by the suites

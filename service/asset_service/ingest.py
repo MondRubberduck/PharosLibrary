@@ -114,16 +114,23 @@ def run_ingest(argv=None) -> int:
 
     print("", flush=True)
     if not dry:
-        c_n = collection_import.import_collection(config.DB_PATH)
-        print(f"  collection imported: {c_n}", flush=True)
-        t_n = textures_import.import_textures(config.DB_PATH)
-        print(f"  textures imported: {t_n}", flush=True)
-        a_n = audio_import.import_audio(config.DB_PATH)
-        print(f"  audio imported: {a_n}", flush=True)
-        m_n = meshes_import.import_meshes(config.DB_PATH)
-        print(f"  meshes imported: {m_n}", flush=True)
-        for p in agent_docs.generate(config.DB_PATH):
-            print(f"  wrote {p}", flush=True)
+        # one missing/moved source (e.g. no purchase CSV yet) must skip
+        # THAT importer, never kill the chain -- browse.py guards the same
+        # calls at server startup; ingest must match it
+        for name, fn in (("collection", collection_import.import_collection),
+                         ("textures", textures_import.import_textures),
+                         ("audio", audio_import.import_audio),
+                         ("meshes", meshes_import.import_meshes)):
+            try:
+                n = fn(config.DB_PATH)
+                print(f"  {name} imported: {n}", flush=True)
+            except Exception as exc:                  # noqa: BLE001
+                print(f"  {name} import skipped: {exc}", flush=True)
+        try:
+            for p in agent_docs.generate(config.DB_PATH):
+                print(f"  wrote {p}", flush=True)
+        except Exception as exc:                      # noqa: BLE001
+            print(f"  docs skipped: {exc}", flush=True)
 
     # ---- decisions: agent relays these to the user ------------------------
     print("\n" + "-" * 24 + " ASK YOUR USER " + "-" * 24)

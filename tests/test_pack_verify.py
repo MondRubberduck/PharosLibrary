@@ -280,6 +280,183 @@ def test_tex_index_self_builds_cache():
         assert "cache missing" not in (r2.stdout or "")
 
 
+def _poison_fbx() -> bytes:
+    """Corrupt binary FBX: a valid record header whose first property is
+    an S claiming a 2GB length -- the property walk jumps pos past the
+    buffer and the SECOND property read used to escape as IndexError
+    (not in fbx_dims' catch list), aborting entire scanner runs."""
+    import struct as _s
+    props = b"S" + _s.pack("<I", 0x7FFFFFFF) + b"I" + _s.pack("<i", 1)
+    name = b"X"
+    body_start = 27
+    end = body_start + 13 + len(name) + len(props)
+    out = bytearray(b"Kaydara FBX Binary  \x00\x1a\x00")
+    out += _s.pack("<I", 7400)
+    out += _s.pack("<III", end, 2, len(props))
+    out += bytes([len(name)]) + name + props
+    assert len(out) == end
+    return bytes(out)
+
+
+def test_fbx_dims_poison_returns_none():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "poison.fbx"
+        p.write_bytes(_poison_fbx())
+        from asset_service.fbx_dims import fbx_file_info
+        info = fbx_file_info(p)
+        assert info is None, f"poison FBX must yield None, got {info}"
+
+
+def test_scanner_survives_poison_fbx():
+    """One corrupt FBX must never abort the run (it used to raise
+    IndexError out of fbx_dims and lose every row). Contract: exit 0,
+    the good file keeps REAL dims, the poison file gets a zero-dims row
+    (recorded, not guessed) instead of fabricated numbers."""
+    import sqlite3
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        models = tmp / "models"
+        models.mkdir()
+        (models / "good.fbx").write_bytes(_min_fbx())
+        (models / "poison.fbx").write_bytes(_poison_fbx())
+        db = tmp / "reg.sqlite"
+        r = subprocess.run(
+            [sys.executable, "-B",
+             str(REPO / "service" / "asset_service" / "scanner.py"),
+             str(models), "--db", str(db)],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        assert r.returncode == 0, (r.stderr or "")[-300:]
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        rows = {r_["name"]: dict(r_) for r_ in
+                conn.execute("SELECT name, triangles, bbox_x FROM meshes")}
+        conn.close()
+        assert set(rows) == {"good", "poison"}, \
+            f"both files must be scanned, got {set(rows)}"
+        assert rows["good"]["triangles"] == 1, rows["good"]
+        assert abs(rows["good"]["bbox_x"] - 1.0) < 0.05, rows["good"]
+        assert rows["poison"]["triangles"] == 0, \
+            f"poison must yield zeros, not fabricated numbers: {rows['poison']}"
+
+
+def test_promote_native_never_reads_blends_file():
+    """native_index_blends.jsonl sorts AFTER every timestamped run
+    ('b' > '2'); a plain newest-wins glob fed blend records to this
+    wholesale overwrite and erased every FBX/OBJ container record."""
+    native_dir = REPO / "pipeline" / "native"
+    ts = native_dir / "native_index_20260101-000000.jsonl"
+    bl = native_dir / "native_index_blends.jsonl"
+
+    def row(name):
+        return json.dumps({"section": "S", "object": name,
+                           "kind": "mesh", "source": "c:/x.fbx",
+                           "triangles": 1, "vertices": 3,
+                           "bbox_m": [1, 1, 1], "materials": [],
+                           "collection": "C"})
+    with tempfile.TemporaryDirectory() as tmp:
+        lib = Path(tmp) / "lib"
+        lib.mkdir()
+        try:
+            ts.write_text("\n".join(row(f"ts_{i}")
+                                    for i in range(12)) + "\n",
+                          encoding="utf-8")
+            bl.write_text("\n".join(row(f"FROMBLENDS_{i}")
+                                    for i in range(12)) + "\n",
+                          encoding="utf-8")
+            r = _run("pipeline/native/promote_native.py", {
+                "PHAROS_CONFIG": str(Path(tmp) / "missing.json"),
+                "PHAROS_LIBRARY_ROOT": str(lib),
+            })
+            assert r.returncode == 0, (r.stderr or "")[-300:]
+            out = lib / "_Agent_Files" / "native_models.jsonl"
+            assert out.is_file(), "index not written"
+            body = out.read_text(encoding="utf-8")
+            assert "FROMBLENDS" not in body, "blend records leaked in"
+            assert "ts_0" in body, "timestamped records missing"
+        finally:
+            for f in (ts, bl):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+
+
+def test_version_single_source_of_truth():
+    """__init__.__version__ drifted to 0.2.0 while pyproject said 0.2.1."""
+    import re as _re
+    pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    m = _re.search(r'^version\s*=\s*"([^"]+)"', pyproject, _re.M)
+    import asset_service
+    assert m, "pyproject version not found"
+    assert m.group(1) == asset_service.__version__, \
+        f"pyproject {m.group(1)} != asset_service.__version__ " \
+        f"{asset_service.__version__}"
+
+
+def test_templates_have_no_extraction_artifacts():
+    """The templates were extracted from Python strings once; the double
+    backslashes that survived made the pack page's 3D-link regex never
+    match and the assets page strip DIGITS from prices."""
+    for f in (REPO / "service" / "asset_service" / "templates").glob("*.html"):
+        data = f.read_bytes()
+        assert b"\\\\" not in data, \
+            f"{f.name} still carries Python-string escape artifacts"
+    pk = (REPO / "service" / "asset_service" / "templates"
+          / "pack.html").read_text(encoding="utf-8")
+    assert "data-e=" in pk and "setExt('${" not in pk, \
+        "pack page still splices raw ext into inline onclick"
+    src = (REPO / "service" / "asset_service" / "browse.py").read_text(
+        encoding="utf-8")
+    assert "toggle('${" not in src and "open('${" not in src, \
+        "registry grid still splices pack ids into inline handlers"
+    assert 'data-id="${esc(a.id)}"' in src, "registry grid lost esc/data-id"
+
+
+def test_mcp_db_preflight_and_clip_scope():
+    """The MCP server must never CREATE a registry (stray assets.sqlite in
+    the client's CWD) and clips must count only Animation packs."""
+    try:
+        import importlib.util as ilu
+        spec = ilu.spec_from_file_location(
+            "pharos_mcp_server_test",
+            str(REPO / "service" / "pharos_mcp_server.py"))
+        srv = ilu.module_from_spec(spec)
+        spec.loader.exec_module(srv)
+    except Exception as exc:                       # noqa: BLE001
+        print(f"SKIP (no mcp package on this machine): {exc}")
+        return
+    import sqlite3
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "nope" / "assets.sqlite"
+        orig = srv.config.DB_PATH
+        srv.config.DB_PATH = str(missing)
+        try:
+            raised = False
+            try:
+                srv._db()
+            except FileNotFoundError:
+                raised = True
+            assert raised and not missing.exists(), \
+                "MCP preflight must fail loudly AND create nothing"
+        finally:
+            srv.config.DB_PATH = orig
+
+        dbp = Path(tmp) / "t.sqlite"
+        conn = sqlite3.connect(str(dbp))
+        conn.executescript("""
+        CREATE TABLE assets(id TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE asset_files(asset_id TEXT, relative_path TEXT);
+        INSERT INTO assets VALUES('pack::Animation/A','A');
+        INSERT INTO assets VALUES('pack::Stuff/B','B');
+        INSERT INTO asset_files VALUES('pack::Animation/A','x.fbx');
+        INSERT INTO asset_files VALUES('pack::Stuff/B','y.fbx');
+        """)
+        conn.commit()
+        assert srv._animation_clip_count(conn) == 1, \
+            "clip count must be scoped to pack::Animation/%"
+        conn.close()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

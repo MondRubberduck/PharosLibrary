@@ -50,6 +50,25 @@ CREATE TABLE IF NOT EXISTS textures (
 CREATE INDEX IF NOT EXISTS idx_textures_grp ON textures(grp);
 """
 
+
+def ensure_scan_unique_index(conn: sqlite3.Connection) -> None:
+    """The (name, folder) unique index that makes the scanner's
+    INSERT OR REPLACE actually replace. Called by every writer (scanner
+    + importer): without it OR REPLACE degenerates to a plain INSERT and
+    every re-scan of the same folder duplicates its rows. Registries
+    built before the index may already carry duplicates -- keep the
+    oldest row per (name, folder), then create the index."""
+    idx = ("CREATE UNIQUE INDEX IF NOT EXISTS idx_textures_name_folder_scan "
+           "ON textures(name, folder) WHERE source='scan'")
+    try:
+        conn.execute(idx)
+    except sqlite3.IntegrityError:
+        conn.execute(
+            "DELETE FROM textures WHERE source='scan' AND id NOT IN "
+            "(SELECT MIN(id) FROM textures WHERE source='scan' "
+            " GROUP BY name, folder)")
+        conn.execute(idx)
+
 # map-channel suffix tokens stripped when grouping loose files into families
 CHANNEL_TOKENS = {
     "albedo", "normal", "ao", "occlusion", "roughness", "rough", "height",
@@ -207,6 +226,7 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
             "PRAGMA table_info(textures)")}
         if "source" not in cols:
             conn.execute("ALTER TABLE textures ADD COLUMN source TEXT")
+        ensure_scan_unique_index(conn)
         # no textures root -> this importer owns NOTHING; scanner rows
         # must survive a restart (retention invariant, meshes/audio-style)
         if not root.is_dir():
@@ -223,6 +243,20 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
         scan_rows = [tuple(r) for r in conn.execute(
             "SELECT " + ",".join(scan_cols) +
             " FROM textures WHERE source='scan'")]
+        # keep-first dedupe on (name, folder): legacy buffers can still
+        # hold pre-index duplicates, and re-inserting them would trip the
+        # unique index created above
+        if scan_rows:
+            ni, fi = scan_cols.index("name"), scan_cols.index("folder")
+            seen: set = set()
+            unique_rows = []
+            for r in scan_rows:
+                key = (r[ni], r[fi])
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique_rows.append(r)
+            scan_rows = unique_rows
         conn.execute("DELETE FROM textures WHERE source IS NOT 'scan'")
         conn.execute("DELETE FROM sqlite_sequence WHERE name='textures'")
 
@@ -335,8 +369,12 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
                 f"VALUES ({','.join('?' * len(cols))})",
                 [r[c] for c in cols])
         if scan_rows:
+            # OR REPLACE against the (name, folder) scan-unique index:
+            # the buffer IS the desired state, and these rows were never
+            # deleted (a plain INSERT re-added them every rebuild -- the
+            # duplication the index exists to stop)
             conn.executemany(
-                f"INSERT INTO textures ({','.join(scan_cols)}) "
+                f"INSERT OR REPLACE INTO textures ({','.join(scan_cols)}) "
                 f"VALUES ({','.join('?' for _ in scan_cols)})", scan_rows)
         conn.commit()
     finally:

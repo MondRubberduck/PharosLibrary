@@ -18,9 +18,15 @@ from _config import agent_files, library_root
 AGENT = agent_files()
 LIB = library_root() or "."
 T = str(Path(__file__).resolve().parent)
-# newest index run wins: a hard-coded snapshot name here once pinned the
-# promotion to a stale 2026-09-15 file even after newer runs existed
-candidates = sorted(glob.glob(os.path.join(T, "native_index_*.jsonl")))
+# newest index run wins -- but NEVER the stage-2 blends file: it sorts
+# after every timestamped name ('b' > '2'), so a plain newest-wins glob
+# would feed blend-object records to this wholesale overwrite and erase
+# every FBX/OBJ container record (run_blends output is promote_blends'
+# input, not this script's). A hard-coded snapshot name here once pinned
+# promotion to one stale 2026-09-15 file instead.
+candidates = sorted(
+    f for f in glob.glob(os.path.join(T, "native_index_*.jsonl"))
+    if os.path.basename(f) != "native_index_blends.jsonl")
 SRC = candidates[-1] if candidates else ""
 
 if not SRC or not os.path.isfile(SRC):

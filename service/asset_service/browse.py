@@ -1034,7 +1034,8 @@ def _mesh_extras(r: dict) -> dict:
     `hero_textures` keeps its old shape (role -> absolute map path) but is now
     read out of the real per-slot wiring instead of guessed from the flat
     `texture_files` list, which gave every mesh of a pack the same recipe (e.g.
-    AlbertMansion's first eight meshes all resolved to TX_Debris_01a). A mesh
+    one inspected mansion pack: its first eight meshes all resolved to the
+    same debris texture). A mesh
     whose wiring did not resolve gets {} -- an absent recipe, not a wrong one.
     `recipe` is the full per-slot truth; `bbox_min`/`bbox_max` are world-space
     placement corners in metres, or None when the manifest carried no box.
@@ -1322,6 +1323,11 @@ def api_anim_clips(params: dict) -> dict:
     qstems: set = set()
     for t in qtokens:
         qstems |= _stems(t) | _synonyms(t)
+    if q and not qstems:
+        # every token was dropped (single letters / punctuation) -- such a
+        # query must match nothing, never the whole library. The guard every
+        # other item endpoint has; the animation section lacked it.
+        return {"total": 0, "page": page, "size": size, "q": q, "clips": []}
     related: set = set()
     if qstems:
         for cst in _cluster_stems():
@@ -1588,7 +1594,8 @@ async function loadFile(rel){
   catch(e){fail('load failed: '+((e&&e.message)||e)+' — if the server was just restarted, reload this page');return;}
   if(rel.toLowerCase().endsWith('.bvh')){
     mode='bvh';
-    try{const res=new BVHLoader().parse(buf);
+    // BVHLoader.parse string-splits its input; a raw ArrayBuffer throws
+    try{const res=new BVHLoader().parse(new TextDecoder('utf-8').decode(buf));
       try{
         holder=new THREE.Group();
         const root=res.skeleton.bones[0];
@@ -1884,7 +1891,7 @@ async function renderPreview(rel){
  clearTimeout(kill);
  const clips=obj.animations||[];
  if(!clips.length)throw new Error('no animation in file');
- let root=obj,hasMesh=false;obj.traverse(o=>{if(o.isMesh)hasMesh=true;});
+ let root=obj,hasMesh=false,holderHelper=null;obj.traverse(o=>{if(o.isMesh)hasMesh=true;});
  if(!hasMesh){try{
    const dummy=await pgetDummy();
    const db=new Set();dummy.traverse(o=>{if(o.isBone)db.add(o.name);});
@@ -2305,29 +2312,43 @@ padding:2px 10px;margin-top:7px;cursor:pointer;font-size:12px}
 <button onclick="clearSel()">clear selection</button></div>
 <script>
 let packs=[];const sel=new Set();
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const COLORS={Environment:'#3f7d4e','Human Animations':'#7a5fb5',Archviz:'#b5823f',Props:'#b5455f',Characters:'#3f7db5','Textures_HDRI':'#8a6db0'};
 const open=id=>location.href='/pack?id='+encodeURIComponent(id);
 async function loadStats(){const r=await(await fetch('/api/stats')).json();
- for(const d of r.domains){domain.insertAdjacentHTML('beforeend',`<option>${d}</option>`);setDomain.insertAdjacentHTML('beforeend',`<option>${d}</option>`)}
- for(const s of r.styles){style.insertAdjacentHTML('beforeend',`<option>${s}</option>`);setStyle.insertAdjacentHTML('beforeend',`<option>${s}</option>`)}
+ for(const d of r.domains){domain.insertAdjacentHTML('beforeend',`<option>${esc(d)}</option>`);setDomain.insertAdjacentHTML('beforeend',`<option>${esc(d)}</option>`)}
+ for(const s of r.styles){style.insertAdjacentHTML('beforeend',`<option>${esc(s)}</option>`);setStyle.insertAdjacentHTML('beforeend',`<option>${esc(s)}</option>`)}
  const st=r.extension_status&&r.extension_status[0];
  status.textContent=st?`last extension action: ${st.action} ${st.ok?'OK':'FAILED'} — ${st.target} — ${st.at}${st.detail?('\\n'+st.detail.replace(/\\n/g,' | ')):''}`:`no extension activity recorded yet`;
  status.style.color=st&&!st.ok?'#ff8a8a':'var(--dim)';}
 async function load(){const p=new URLSearchParams({q:q.value,domain:domain.value,style:style.value});
  packs=await(await fetch('/api/packs?'+p)).json();count.textContent=packs.length+' packs';
  for(const id of[...sel])if(!packs.some(a=>a.id===id))sel.delete(id);
- grid.innerHTML=packs.map((a)=>`<div class="card${sel.has(a.id)?' selected':''}">
- <input type="checkbox" class="selbox" ${sel.has(a.id)?'checked':''} onclick="event.stopPropagation();toggle('${a.id}')">
- <div onclick="event.stopPropagation();open('${a.id}')" title="open file list">
- ${a.thumb?`<img loading="lazy" src="${a.thumb}">`:`<div class="badge" style="background:${COLORS[a.domain]||'#444'}">${a.domain[0]}</div>`}
- <div class="body"><div class="name">${a.name}</div>
- <div class="chips" onclick="event.stopPropagation();const d=this.closest('.card').querySelector('.detail');d.style.display=d.style.display==='block'?'none':'block';event.stopPropagation()">
- <span class="chip domain">${a.domain}</span><span class="chip">${a.sub_category}</span>
- <span class="chip style">${a.style}</span>${a.validation==='human_verified'?'<span class="chip human">human</span>':''}</div>
- <div class="meta">${a.vendor||'—'} · <a href="/pack?id=${encodeURIComponent(a.id)}">${a.files} files</a> · ${(a.bytes/1e9).toFixed(1)} GB · ${a.formats.slice(0,4).join(', ')}</div>
+ // every interpolated value is esc()'d and ids travel in data-id
+ // attributes read by the delegated listener below -- NEVER inside inline
+ // onclick strings (pack ids are folder paths; ' is a legal filename
+ // character on Windows and broke out of the old string splices)
+ grid.innerHTML=packs.map((a)=>`<div class="card${sel.has(a.id)?' selected':''}" data-id="${esc(a.id)}">
+ <input type="checkbox" class="selbox" ${sel.has(a.id)?'checked':''}>
+ <div class="open" title="open file list">
+ ${a.thumb?`<img loading="lazy" src="${esc(a.thumb)}">`:`<div class="badge" style="background:${COLORS[a.domain]||'#444'}">${esc((a.domain||'?')[0])}</div>`}
+ <div class="body"><div class="name">${esc(a.name)}</div>
+ <div class="chips">
+ <span class="chip domain">${esc(a.domain)}</span><span class="chip">${esc(a.sub_category)}</span>
+ <span class="chip style">${esc(a.style)}</span>${a.validation==='human_verified'?'<span class="chip human">human</span>':''}</div>
+ <div class="meta">${esc(a.vendor||'—')} · <a href="/pack?id=${encodeURIComponent(a.id)}">${a.files} files</a> · ${(a.bytes/1e9).toFixed(1)} GB · ${esc(a.formats.slice(0,4).join(', '))}</div>
  <div class="bar"><i style="width:${Math.round((a.confidence||0)*100)}%"></i></div>
- ${a.formats.some(f=>f==='fbx'||f==='bvh')?`<button class="btn3d" onclick="event.stopPropagation();location.href='/viewer?pack='+encodeURIComponent('${a.id}')">3D &gt; play</button>`:''}</div></div>
- <div class="detail" style="display:none">${a.hero}<br>tags: ${a.tags.slice(0,8).join(', ')}<br>confidence ${(a.confidence||0).toFixed(2)} · updated ${a.updated_at} · status ${a.status||''}</div></div>`).join('');
+ ${a.formats.some(f=>f==='fbx'||f==='bvh')?`<button class="btn3d">3D &gt; play</button>`:''}</div></div>
+ <div class="detail" style="display:none">${esc(a.hero)}<br>tags: ${esc(a.tags.slice(0,8).join(', '))}<br>confidence ${(a.confidence||0).toFixed(2)} · updated ${esc(a.updated_at)} · status ${esc(a.status||'')}</div></div>`).join('');
+ grid.querySelectorAll('.card').forEach(card=>{
+  card.querySelector('.selbox').addEventListener('click',e=>{e.stopPropagation();toggle(card.dataset.id);});
+  const chips=card.querySelector('.chips');
+  chips.addEventListener('click',e=>{e.stopPropagation();
+   const d=card.querySelector('.detail');d.style.display=d.style.display==='block'?'none':'block';});
+  const b3=card.querySelector('.btn3d');
+  if(b3)b3.addEventListener('click',e=>{e.stopPropagation();
+   location.href='/viewer?pack='+encodeURIComponent(card.dataset.id);});
+  card.querySelector('.open').addEventListener('click',()=>open(card.dataset.id));});
  selAll.checked=packs.length>0&&packs.every(a=>sel.has(a.id));renderBar();}
 function toggle(id){sel.has(id)?sel.delete(id):sel.add(id);
  const card=grid.querySelector(`.card:nth-child(${packs.findIndex(a=>a.id===id)+1})`);
@@ -2649,6 +2670,11 @@ class Handler(BaseHTTPRequestHandler):
                 # Metadata half of _origin_ok is the guard that matters.
                 if not self._origin_ok():
                     return self._json({"error": "cross-site request rejected"}, 403)
+                if self.command == "HEAD":
+                    # HEAD is a probe (link checkers, curl -I) -- it must
+                    # never trigger the side effect
+                    return self._json(
+                        {"error": "HEAD is not supported on this endpoint"}, 405)
                 target = (params.get("path") or [""])[0]
                 roots = [AUDIO_ROOT, TEXTURES_ROOT, COLLECTION_ROOT] + \
                     [r.resolve() for r in CANONICAL_ROOTS]
@@ -2936,6 +2962,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
 
 
+def _loopback_warning(host: str) -> Optional[str]:
+    """The loud non-loopback-bind warning SECURITY.md promises. None on a
+    loopback bind; a plain-language warning paragraph otherwise."""
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return None
+    return (
+        f"WARNING: binding to {host} instead of a loopback address.\n"
+        "  Anything that can reach this address can READ your library\n"
+        "  metadata, filenames and thumbnails through this server.\n"
+        "  The Host allow-list accepts loopback names plus this address\n"
+        "  only. Rebind to 127.0.0.1 unless you explicitly wanted this.")
+
+
 def main(argv=None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     global _DB_PATH
@@ -2998,6 +3037,9 @@ def main(argv=None) -> int:
                 except OSError:
                     pass
     host = config.NETWORK["host"]
+    warn = _loopback_warning(host)
+    if warn:
+        print("!" * 70 + "\n" + warn + "\n" + "!" * 70, flush=True)
     # explicit completion feedback: counts + folders nobody indexed, so a
     # human watching the console never wonders whether it worked
     try:

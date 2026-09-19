@@ -39,6 +39,10 @@ class _FBXParseError(Exception):
 def _read_property(data: bytes, pos: int):
     """Read one property at pos. Returns (value, new_pos); (None, pos+1)
     for unknown type codes (cannot advance safely -> caller stops)."""
+    if pos >= len(data):
+        # a corrupt property length can walk pos past the buffer; the
+        # next read must fail as a parse error, never as IndexError
+        raise _FBXParseError(f"property at {pos} runs past end of buffer")
     t = chr(data[pos])
     pos += 1
     if t == "Y":
@@ -147,7 +151,8 @@ def fbx_file_info(path: str | Path) -> dict | None:
     version = struct.unpack_from("<I", data, 23)[0]
     try:
         top, _ = _parse_nodes(data, 27, len(data), top=True)
-    except (struct.error, zlib.error, _FBXParseError, RecursionError):
+    except (struct.error, zlib.error, _FBXParseError, RecursionError,
+            IndexError, ValueError):
         return None
 
     lo = [float("inf")] * 3
