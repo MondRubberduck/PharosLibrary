@@ -16,6 +16,7 @@ Run standalone: python -B tests/test_pack_verify.py
 
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -151,6 +152,27 @@ def test_make_sandbox_creates_usable_uproject():
         assert r2.returncode == 0 and "already exists" in (r2.stdout or "")
 
 
+def _find_usable_bash():
+    """A 'bash' on PATH may be the WSL launcher stub (C:\\Windows\\System32
+    \\bash.exe), which fails when no WSL distro exists -- CI windows
+    runners are exactly that case. Probe candidates and return one that
+    can actually run a command, or None."""
+    candidates = [shutil.which("bash"),
+                  r"C:\Program Files\Git\bin\bash.exe",
+                  r"C:\Program Files\Git\usr\bin\bash.exe"]
+    for cand in candidates:
+        if not cand or not Path(cand).is_file():
+            continue
+        try:
+            r = subprocess.run([cand, "-c", "true"],
+                               capture_output=True, timeout=15)
+            if r.returncode == 0:
+                return cand
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    return None
+
+
 def test_drivers_print_sandbox_remediation():
     """A virgin machine without a sandbox must get the exact regeneration
     command, not a bare 'missing' error (the sandbox is generated locally
@@ -158,6 +180,11 @@ def test_drivers_print_sandbox_remediation():
     # the test needs a machine WITHOUT a sandbox; a generated one may
     # legitimately exist in the repo tree -- move it aside, restore after
     # (same backup/restore pattern as the fresh-install suite's config)
+    bash = _find_usable_bash()
+    if bash is None:
+        print("SKIP: no usable bash on this machine -- the shell drivers "
+              "cannot run here, so their remediation cannot be tested")
+        return
     real_sandbox = REPO / "pipeline" / "conversion" / "sandbox"
     parked = None
     if real_sandbox.is_dir():
@@ -166,7 +193,7 @@ def test_drivers_print_sandbox_remediation():
     try:
         for driver in ("convert_packs.sh", "relink_pack.sh"):
             r = subprocess.run(
-                ["bash", str(REPO / "pipeline" / "conversion" / driver),
+                [bash, str(REPO / "pipeline" / "conversion" / driver),
                  "--pack", "FixturePack"],
                 capture_output=True, text=True, cwd=str(REPO), timeout=120,
                 env={**os.environ,
