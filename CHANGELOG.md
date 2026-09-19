@@ -38,6 +38,11 @@ themselves, never hand-typed).
   headless Blender build from API-picked assets reopened and asserted
   (ground snapping, rotation conjugation, per-slot materials, live
   textures, textured ground plane).
+- Release hygiene: README rewritten around a clear user/agent split;
+  removed superseded and orphaned one-off scripts (convert_all.sh,
+  tree_fingerprint.py, index_blends.sh, verify_kb3d_fbx.py,
+  verify_fbx_blender.py, hash_files.py, scan_corpus.py) and the
+  internal tagging plan.
 - Data retention now truly covers all three tables: the audio table
   gained a `source` column and `audio_import` no longer wipes
   scanner-indexed rows when a crawl jsonl exists (UNIQUE(rel) contract:

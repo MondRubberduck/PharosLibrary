@@ -1,65 +1,49 @@
-# Pharos
+# Pharos Library
 
-**A local asset-intelligence server for coding agents.**
-
-Point it at any folder of 3D assets, textures, audio, or animations. It
-indexes everything into a queryable SQLite registry and serves an HTTP
-API + dashboard that coding agents (Claude, GPT, Cursor, any MCP client)
-use to find, filter, and select assets by real-world dimensions,
-materials, themes, and availability — **without reading a single file
-from disk**.
-
-> *"Find me a door between 1.8 and 2.4 metres with textures"* →
-> structured JSON with absolute paths, triangle counts, material
-> recipes, and a 3D preview URL. In seconds.
-
-## Why: agents burn tokens crawling filesystems
-
-Measured on a 446 GiB / 92k-file library (three independent end-to-end
-dry runs plus an external QA agent):
-
-| | With Pharos API | Filesystem crawling | Saving |
-|---|---|---|---|
-| Tool calls per scene | ~320 | ~1,610 | **5×** |
-| Content tokens per scene | ~1.3 M | ~9.5 M | **~86%** |
-| Wall clock per scene | 1.5–3 h | 14–24 h | **~8×** |
-| Novel-scene discovery* | 6–9 calls / 16–24k tokens | 35–50 calls / 180–250k tokens | **~90%** |
-
-\* building a scene type that does not exist as a folder in the
-library (a Brazilian favela), routing across four asset sections —
-the generalization proof. An independent QA agent's own measurement of
-the geometry battery: ~14k tokens via the API vs 1.2 M+ for directory
-listings alone, before any binary parsing (~98.8%).
-
-Method note: these figures come from recorded agent runs on one private
-446 GiB library (three dry runs + two independent QA agents, logs
-archived by the author). They are directional evidence, not a
-controlled benchmark; a reproducible `bench/` harness is on the roadmap.
-
-## Screenshots
+A local asset-intelligence server for coding agents. Point it at a
+folder of 3D assets, textures, audio, or animations. Pharos indexes
+everything into a queryable SQLite registry and serves an HTTP API, a
+dashboard, and MCP tools, so a coding agent can find, filter, and
+select assets by real-world dimensions, materials, themes, and
+availability — without walking the filesystem.
 
 | Dashboard | Textures |
 |---|---|
 | ![dashboard](docs/screenshots/dashboard.png) | ![textures](docs/screenshots/textures.png) |
-
-| Animations (self-rendered previews) | 3D viewer (three.js) |
-|---|---|
+| **Animations** | **3D viewer** |
 | ![animations](docs/screenshots/animations.png) | ![viewer](docs/screenshots/viewer.png) |
 
-## You do three things (the human part)
+## Why it pays off
 
-You need [Python 3.10+](https://www.python.org/downloads/) and Git.
-No Blender, no Unreal needed, and the core server is stdlib-only (zero
-pip installs). Your agent does everything else.
+Measured on a 446 GiB, 92k-file library across three end-to-end runs
+and two independent QA agents:
 
-**1 — get the app:**
+| | With Pharos | Filesystem crawling | Saved |
+|---|---|---|---|
+| Tool calls per scene | ~320 | ~1,610 | 5× |
+| Content tokens per scene | ~1.3 M | ~9.5 M | ~86% |
+| Wall clock per scene | 1.5–3 h | 14–24 h | ~8× |
+| Novel-scene discovery* | 16–24k tokens | 180–250k tokens | ~90% |
+
+\* A scene type that exists nowhere in the library (a Brazilian
+favela), routed across four asset sections.
+
+These numbers come from recorded runs on one private library. They are
+directional evidence, not a controlled benchmark; a reproducible
+`bench/` harness is on the roadmap.
+
+## What you do
+
+Three steps. Everything else is agent work.
+
+**1. Get the app.**
+
 ```bash
 git clone https://github.com/MondRubberduck/PharosLibrary.git
 ```
 
-**2 — paste the starting prompt to your coding agent** (edit the paths
-in angle brackets — your agent runs every command itself, and will ask
-you the setup questions before touching any engine):
+**2. Paste the setup prompt into your coding agent.** Edit the two
+paths first.
 
 ```
 Set up Pharos for my asset library. Setup only.
@@ -67,103 +51,88 @@ Read <repo>/README.md, then <repo>/docs/STARTING_PROMPT.md and follow it
 exactly. My assets live at <D:/path/to/your/assets>.
 ```
 
-The full paste-ready prompt (and the interview it forces) lives in
-[`docs/STARTING_PROMPT.md`](docs/STARTING_PROMPT.md); the agent's side of
-the deal — the decision matrix and the questions it must relay to you —
-is [`docs/AGENT_SETUP_BRIEF.md`](docs/AGENT_SETUP_BRIEF.md).
-
-**3 — from then on, paste this BUILD prompt with your idea:**
+**3. Whenever you want a scene, paste the build prompt with your idea.**
 
 ```
-Build me a scene with my Pharos library: <your one-line idea — e.g. "a
-rainy neon night market alley" or "a medieval market square at dusk">.
-Read <library>/_Agent_Files/AGENT_START_HERE.md first, then follow
-docs/AGENT_PLAYBOOK.md PHASE 2: use what is on disk, ask me before
-downloading anything, model missing pieces yourself and tell me which.
-Validate the manifest, check the budget, build headless in Blender,
-verify the .blend, and render a preview if you can.
+Build me a scene with my Pharos library: <your one-line idea>.
+Read <library>/_Agent_Files/AGENT_START_HERE.md first and follow
+docs/AGENT_PLAYBOOK.md phase 2.
 ```
 
-That's the whole human workflow. The dashboard
-(`http://127.0.0.1:8765`) opens whenever the server runs — browse what
-your agent found. Everything else (API, MCP, engines, pipelines) is in
-the sections below and your agent will read it on its own.
+The dashboard opens at http://127.0.0.1:8765 whenever the server runs.
 
-### Manual quick start (what the agent does for you)
+## What your agent does
 
-```bash
-python pharos.py init "D:/path/to/your/assets"
-#    config lands at service/asset_service/pharos_config.json
-#    (pharos_config.example.json in the repo root is only a template)
+**Setup** — driven by `docs/STARTING_PROMPT.md`, checked by
+`docs/AGENT_SETUP_BRIEF.md`:
 
-python pharos.py serve          # → http://127.0.0.1:8765
-python service/asset_service/scanner.py "D:/path/to/models"   # raw folders
-python pharos.py docs           # agent entry files into YOUR library
-```
+1. `pharos.py doctor` probes the machine and reports every gap with the
+   exact command that fixes it.
+2. `pharos.py init` detects your asset folders and writes
+   `pharos_config.json`.
+3. `pharos.py ingest` indexes everything that needs no engine, then
+   asks you the decisions that are yours: crawl the Unreal packs for
+   material recipes? export KitBash3D kits? enumerate .blend files or
+   leave them alone? where is the purchase CSV?
+4. Nothing with an engine runs without your answer. After your answers
+   the server starts and prints INGESTION COMPLETE with per-section
+   counts.
 
-Optional MCP for your agent client (`pip install "mcp<2"`, see
-`docs/MCP_SETUP.md`; Blender itself needs **no** plugin or MCP — the
-builder runs headless):
+**Building** — `docs/AGENT_PLAYBOOK.md`, phase 2: query the API, author
+a scene manifest, validate it, check the triangle budget, build
+headless in Blender, reopen the .blend and verify the result. The
+priority ladder: on disk → use it; owned but not downloaded → ask you;
+absent → model it and say so.
 
-```json
-{ "mcpServers": { "pharos": {
-    "command": "python", "args": ["-m", "service.pharos_mcp_server"],
-    "cwd": "<repo root>" } } }
-```
+## What works with and without engines
 
-## What you get, with and without engines
-
-| Capability | Base (Python only) | + Blender | + Unreal Editor 5.x |
+| Capability | Python only | + Blender | + Unreal Editor 5.x |
 |---|---|---|---|
 | Search: names, paths, tags, themes, availability | ✅ | ✅ | ✅ |
-| FBX dimensions + triangle counts (`scanner`) | ✅ | ✅ | ✅ |
-| Texture sets, audio with durations, purchase catalog | ✅ | ✅ | ✅ |
+| FBX dimensions + triangle counts | ✅ | ✅ | ✅ |
+| Texture sets, audio durations, purchase catalog | ✅ | ✅ | ✅ |
 | OBJ/GLB/STL measured geometry | + trimesh | ✅ | ✅ |
-| Native container enumeration (.blend/USD) | — | ✅ (`pipeline/native/`) | ✅ |
-| KitBash-style kits → per-assembly FBX + manifests | — | ✅ (`pipeline/kitbash/`) | ✅ |
-| Engine-exact material recipes & wiring (`hero_textures`) | — | — | ✅ (`pipeline/conversion/`) |
-| Scene manifest → Blender build | — | ✅ | ✅ |
+| .blend / USD container enumeration | — | ✅ | ✅ |
+| Kits → per-assembly FBX + manifests | — | ✅ | ✅ |
+| Engine-exact material recipes | — | — | ✅ |
+| Scene manifest → headless Blender build | — | ✅ | ✅ |
 
-Everything degrades gracefully: a section without content (or without
-its engine) serves empty results, never errors.
-
-## The agent contract
-
-- `docs/AGENT_PLAYBOOK.md` — the two-phase operating manual: SETUP
-  (crawl, then **interview the user** — "are these all your folders?")
-  and BUILD (the priority doctrine: on disk → use · on demand → ask ·
-  absent → model it yourself and say so; same ladder for textures)
-- `docs/CAPABILITIES.md` — the full capability matrix (what the system
-  can and cannot do; the honest-limits list)
-- `AGENT_START_HERE.md` / `AGENT_API.md` — generated into your library
-  by `pharos docs`, with live counts (never hand-maintained)
-- Search semantics: AND-first with ranked OR fallback, rarity-ranked,
-  tier/mode/exact disclosed per response; short tokens match on word
-  boundaries; all-dropped-token queries return zero, never everything
-- Safety: file routes path-jailed to configured roots; asset files are
-  never modified — the only writes into a library are generated index
-  files (see `docs/CAPABILITIES.md` §6)
+A section without content or without its engine serves empty results,
+never errors.
 
 ## Requirements
 
-- Python 3.10+ (stdlib only for the core server — no pip installs;
-  the optional MCP integration adds one: `pip install "mcp<2"`)
-- Optional: Blender 5.x, UE 5.x, Git Bash — only for the `pipeline/` chains
-- Windows and Linux are CI-verified. macOS should work (stdlib core,
-  config-driven paths) but is not covered by CI.
+- Python 3.10+. The core server is stdlib-only; the optional MCP
+  integration adds one package (`pip install "mcp<2"`).
+- Optional: Blender 5.x, Unreal Editor 5.x, Git Bash — only for the
+  pipeline chains.
+- Windows and Linux are CI-verified. macOS should work but is not
+  covered by CI.
 
-## Architecture
+## How it fits together
 
 ```
-service/asset_service/    HTTP server + importers + MCP + scanner
+service/asset_service/    HTTP server, importers, MCP, scanner, doctor, ingest
 templates/ static/        dashboard pages, vendored three.js
-pipeline/                 optional conversion & index chains (UE/Blender)
-tools/ docs/ tests/       utilities, capability matrix, test suite
-pharos.py                 CLI: init | serve | docs
+pipeline/                 optional conversion and index chains (UE, Blender)
+tools/ tests/ docs/       PII gate, test suite, documentation
+pharos.py                 CLI: init | doctor | ingest | serve | docs
 ```
 
-The SQLite registry is **derived data**: importers rebuild it from
-crawler outputs and disk on every start. Delete it; restart; it's back.
+The SQLite registry is derived data: importers rebuild it from crawler
+outputs and disk on every start. Delete it, restart, it comes back.
+Asset files are never modified — the only writes into a library are
+generated index files.
+
+## Documentation
+
+| For | Read |
+|---|---|
+| The paste-ready setup prompt | [docs/STARTING_PROMPT.md](docs/STARTING_PROMPT.md) |
+| The agent's setup contract: decisions and interview | [docs/AGENT_SETUP_BRIEF.md](docs/AGENT_SETUP_BRIEF.md) |
+| The two-phase doctrine and priority ladders | [docs/AGENT_PLAYBOOK.md](docs/AGENT_PLAYBOOK.md) |
+| Every capability and limit, verifiable | [docs/CAPABILITIES.md](docs/CAPABILITIES.md) |
+| MCP client configuration | [docs/MCP_SETUP.md](docs/MCP_SETUP.md) |
 
 ## License
 

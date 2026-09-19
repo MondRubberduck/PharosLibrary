@@ -28,10 +28,10 @@ round-trip check), Git Bash.**
 | `export_pack.py` | runs INSIDE UnrealEditor (via `AMCONV_JOB` env JSON set by the driver) |
 | `relink_pack.sh` + `relink_materials.py` | re-wire materials with engine-exact texture params → manifest v2 (`--preview` dry-runs against a copy first) |
 | `verify_pack_export.py` | independent verifier (no engine): every manifest link + FBX header + texture dims |
-| `tree_fingerprint.py`, `source_fingerprint.py` | SHA-256 tree proofs (byte-identity of sources) |
+| `source_fingerprint.py` | SHA-256 proof that pack sources are byte-identical before/after an engine run |
 | `pack_discovery.py` | filesystem-only pack/content-root discovery |
 | `blender_inspect_fbx.py` | headless Blender import measurement (round-trip proof) |
-| `batch_packs.sh`, `convert_all.sh` | batch drivers over a pack root |
+| `batch_packs.sh` | batch driver over a pack root (resume, skip-if-done, failure isolation) |
 
 ```bash
 export UE_EXE="/c/Program Files/Epic Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
