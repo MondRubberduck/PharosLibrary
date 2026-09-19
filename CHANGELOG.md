@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.2.3 (2026-09-19)
+External-review Batch 2: the pipeline layer's silent-success failure
+modes. Fixes proven where engines allow (two real-Blender end-to-end
+runs in verification), code-verified where they need UE (noted below).
+
+- `verify_pack_export`: SkeletalMesh packs verify again — editor
+  metrics expose no triangle count, so the exporter legitimately writes
+  null and every skeletal pack FAILED verification forever; the count
+  is now derived at verify time from the exported FBX (engine-free,
+  regression-tested with real FBX bytes).
+- `relink_pack.sh`: the verdict honors the relink report's `ok` flag —
+  a FATAL/ignored relink left the v1 manifest, the verifier PASSed the
+  valid v1 file, and the run exited 0 with the tool's purpose silently
+  no-opped. Failing verdicts now exit 7 (code-verified; runtime proof
+  needs UE).
+- KitBash export failures are no longer permanent: an all-failed export
+  writes NO manifest (drivers skip on its existence) and exits 1 with a
+  `KB3D_EXPORT_FAILED` marker; the batch driver requires the completion
+  marker AND a clean Blender exit, re-exports zero-group or corrupt
+  manifest residue instead of skipping it, and exits nonzero when kits
+  were lost. Proven end-to-end in headless Blender (good kit exports;
+  empty kit leaves no manifest; residue gets re-exported).
+- The audio index cache is root-stamped: switching `AGENT_AUDIO_ROOT`
+  rescans instead of serving another root's data; `--rescan` forces and
+  `AGENT_AUDIO_META` overrides the cache path (the texture chain got
+  all three in 0.2.1; audio now matches).
+- The native indexing worklist is written LF-only (CRLF rode through
+  Git Bash `read -r` as `path\r` and Blender silently failed on every
+  entry), and `index_native_all.sh` checks Blender's exit codes — a
+  crashed run now exits 9 instead of always 0 (stub-tested), honors
+  `BLENDER_EXE`, and fails loudly when no output was written at all.
+- scene_builder's KitBash texture remap cache can hit again: the cache
+  keys stripped `kb3d_` while the lookup kept it (the O(N)→cached
+  optimization was dead code since its birth); both sides now share
+  pure helpers in `asset_service.kb3d_paths`, symmetry pinned by unit
+  test, and the full build+reopen regression still passes.
+- indexer pruning is scoped to the indexed root's `canonical_root`: an
+  offline second library root is no longer wiped from the registry when
+  another root gets re-indexed (regression-tested with two roots).
+- `convert_packs.sh --no-replace` checks the REAL target layout when
+  `--out-root` redirects output (the gate was vacuous in exactly that
+  case).
+
 ## 0.2.2 (2026-09-19)
 External-review Batch 1: fresh-install crash, two XSS sinks, dead UI
 features, re-scan duplication, and importer/pipeline robustness — every
@@ -51,9 +94,10 @@ whole contract re-run green.
 - Housekeeping: `__version__` re-synced (drift test added),
   test_smoke_entry has a `__main__` (was a silent exit-0 no-op), CI
   matrix sets `fail-fast: false` (one leg's failure no longer hides
-  the others — the run-1 lesson), leak_scan covers AlbertMansion and
-  the three occurrences are scrubbed, pack page reads
-  `validation_status` (the "human verified" chip can now appear).
+  the others — the run-1 lesson), leak_scan covers one more
+  library-content marker and its three occurrences are scrubbed, pack
+  page reads `validation_status` (the "human verified" chip can now
+  appear).
 
 ## 0.2.1 (2026-09-18)
 Honesty + pipeline-correctness pass, then the setup-experience phase

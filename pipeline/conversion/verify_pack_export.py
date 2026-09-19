@@ -9,7 +9,9 @@ Checks
   1. manifest.json parses as JSON and carries a known schema
      (v1 = export_pack.py inventory, v2 = v1 + relink_materials.py exact wiring)
   2. every meshes[].fbx exists and has a real binary FBX header
-  3. every meshes[] has non-null triangles, vertices, bbox_m (no nulls, no guesses)
+  3. every meshes[] has non-null triangles, vertices, bbox_m (no nulls, no guesses;
+     ONE exception: SkeletalMesh triangles are null by design -- editor metrics
+     expose no count -- and are derived here from the exported FBX file)
   4. every materials[].textures[].file, when non-null, exists on disk
   5. every textures[].file exists; its real pixel dimensions match the manifest
   6. counts block agrees with the arrays
@@ -122,6 +124,23 @@ def image_dims(path):
     return (None, None)
 
 
+def fbx_triangle_count(path):
+    """Triangle count straight from the exported FBX (engine-free).
+
+    SkeletalMesh editor metrics expose no triangle count, so the exporter
+    legitimately writes triangles: null for them; the exported file is
+    the authority and the count is derived HERE, at verify time."""
+    try:
+        svc = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), "service")
+        if svc not in sys.path:
+            sys.path.insert(0, svc)
+        from asset_service.fbx_dims import fbx_file_info
+        return (fbx_file_info(path) or {}).get("triangles")
+    except Exception:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("exports_dir", help="<pack>\\Exports")
@@ -193,6 +212,13 @@ def main():
         for k in ("triangles", "vertices", "bbox_m"):
             v = rec.get(k)
             if v is None or (k == "bbox_m" and (len(v) != 3)):
+                if k == "triangles" and rec.get("kind") == "SkeletalMesh" \
+                        and os.path.isfile(p):
+                    tri = fbx_triangle_count(p)
+                    if tri:
+                        m_stat["skm_tri_from_fbx"] = \
+                            m_stat.get("skm_tri_from_fbx", 0) + 1
+                        continue       # derived from the exported file: ok
                 m_stat["null_metrics"] += 1
                 problems.append("mesh %s: %s is null/short -> %r" % (rec.get("name"), k, v))
         bb = rec.get("bbox_m")
@@ -395,6 +421,9 @@ def main():
     print("meshes       : %d  (fbx missing=%d bad header=%d null metrics=%d zero-face=%d zero-volume=%d)"
           % (m_stat["count"], m_stat["fbx_missing"], m_stat["fbx_bad_header"],
              m_stat["null_metrics"], m_stat["zero_face"], m_stat["zero_volume"]))
+    if m_stat.get("skm_tri_from_fbx"):
+        print("skm tris     : %d SkeletalMesh triangle count(s) derived from the "
+              "exported FBX (editor metrics expose none)" % m_stat["skm_tri_from_fbx"])
     print("mesh->tex    : %d resolvable links, %d null (reasons: %s)"
           % (m_stat["texture_links"], m_stat["texture_links_null"],
              json.dumps(m_stat["null_reasons"])))

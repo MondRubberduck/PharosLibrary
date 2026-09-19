@@ -313,6 +313,15 @@ for k, v in list((w.get("unresolved_reasons") or {}).items())[:6]:
 print("broken links      : %s (verifier: %s)" % (ver.get("broken_links"), ver.get("result")))
 
 verdict = "PASS" if (ver.get("result") == "PASS" and not ver.get("problems")) else "FAIL"
+# the relink report is the AUTHORITY on whether the relink ran: a FATAL or
+# refused relink leaves the v1 manifest in place, the verifier then PASSes
+# the (valid) v1 file, and the run used to exit 0 -- the tool's whole
+# purpose silently no-opped
+relink_ok = rep.get("ok")
+if rep and relink_ok is False:
+    verdict = "FAIL"
+    print("RELINK REPORT SAYS ok=false -- the relink itself failed;")
+    print("a verifier PASS on the untouched v1 manifest is NOT a pass")
 st = {
     "pack": pack, "label": label, "status": verdict,
     "at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -328,6 +337,7 @@ st = {
     "ue_exit_code": int(ue_rc) if ue_ran else None, "ue_ran": ue_ran,
     "verify_exit_code": int(ver_rc),
     "relink_report": rep,
+    "relink_report_ok": relink_ok,
 }
 json.dump(st, open(st_p, "w", encoding="utf-8"), indent=1)
 with open(os.path.join(os.path.dirname(st_p), "relink.log"), "a", encoding="utf-8") as fh:
@@ -336,8 +346,16 @@ with open(os.path.join(os.path.dirname(st_p), "relink.log"), "a", encoding="utf-
                 ver.get("broken_links"), m.get("schema")))
 print()
 print("PACK RESULT: %s -> %s" % (verdict, os.path.abspath(man_p)))
+sys.exit(0 if verdict == "PASS" else 1)
 PY
 
+# the status writer itself decides pass/fail now (verifier + relink
+# report ok flag); its exit code is the run's verdict
+PY_RC=$?
+if [[ $PY_RC -ne 0 ]]; then
+  echo "relink_pack: FAIL (details: $STATUS_JSON / $REPORT)" >&2
+  exit 7
+fi
 if [[ "$VERIFY_RC" -ne 0 ]]; then
   exit 6
 fi

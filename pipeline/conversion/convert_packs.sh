@@ -82,11 +82,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$PACK" ]] || { echo "ERROR: --pack required" >&2; exit 2; }
-# --no-replace is a safety gate: refuse to silently reuse an Exports folder
-# a previous run (or a previous pack version) left behind
+# --no-replace is a safety gate: refuse to silently reuse an existing
+# Exports folder a previous run (or a previous pack version) left behind.
+# The path must match the REAL target layout: <pack>/Exports normally,
+# just <pack> when --out-root redirects the output.
 if [[ "$NO_REPLACE" == "1" ]]; then
-  EXISTING_EXPORTS="$OUT_ROOT/$PACK/Exports"
-  [[ -z "$OUT_ROOT" ]] && EXISTING_EXPORTS="$ASSETS_ROOT/$PACK/Exports"
+  EXISTING_EXPORTS="$ASSETS_ROOT/$PACK/Exports"
+  [[ -n "$OUT_ROOT" ]] && EXISTING_EXPORTS="$OUT_ROOT/$PACK"
   if [[ -e "$EXISTING_EXPORTS" ]]; then
     echo "ERROR: --no-replace: $EXISTING_EXPORTS already exists" >&2
     echo "       (delete it first, or drop the flag to merge into it)" >&2

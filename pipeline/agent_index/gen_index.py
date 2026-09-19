@@ -40,13 +40,39 @@ def _scan_audio_root():
     return out
 
 
-_meta_path = os.path.join(TMP, "aa_meta.json")
-if os.path.isfile(_meta_path):
-    meta = json.load(open(_meta_path, encoding="utf-8"))
-else:
-    print("no aa_meta.json cache -- scanning %s (cached for next run)" % AA)
-    meta = _scan_audio_root()
+_meta_path = (os.environ.get("AGENT_AUDIO_META")
+              or os.path.join(TMP, "aa_meta.json"))
+_rescan = "--rescan" in sys.argv
+
+
+def _normroot(p):
+    return os.path.normcase(os.path.realpath(p))
+
+
+def _cache_valid(cache):
+    """Stamped caches only: a legacy bare list, a corrupt file, or a
+    cache built against a DIFFERENT audio root must rescan -- stale
+    caches once served another root's paths into a live index."""
+    return (isinstance(cache, dict)
+            and cache.get("root") == _normroot(AA)
+            and isinstance(cache.get("files"), list))
+
+
+meta = None
+if not _rescan and os.path.isfile(_meta_path):
+    try:
+        meta = json.load(open(_meta_path, encoding="utf-8"))
+    except ValueError:
+        meta = None
+    if not _cache_valid(meta):
+        print("aa_meta cache stale (%s) -- rescanning" % _meta_path)
+        meta = None
+if meta is None:
+    print("scanning %s (cache written to %s%s)"
+          % (AA, _meta_path, ", --rescan forced" if _rescan else ""))
+    meta = {"root": _normroot(AA), "files": _scan_audio_root()}
     json.dump(meta, open(_meta_path, "w", encoding="utf-8"))
+meta = meta["files"]
 # LOUD target: these outputs are LIVE index files; a wrong root here once
 # silently overwrote a real library's index with fixture data
 print("WRITE TARGET: %s (library_files.jsonl + library_index.json)" % AA)

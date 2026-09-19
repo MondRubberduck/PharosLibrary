@@ -56,10 +56,13 @@ blends = [i for i in items if i["ext"] == ".blend"]
 others = [i for i in items if i["ext"] not in (".blend", ".max")]
 
 json.dump({"importable": others, "blend_files": blends},
-          io.open(OUT, "w", encoding="utf-8"), indent=1)
+          io.open(OUT, "w", encoding="utf-8", newline="\n"), indent=1)
 
-# plain list so the bash launcher does not need to parse JSON
-with io.open(BLENDS, "w", encoding="utf-8") as fh:
+# plain list so the bash launcher does not need to parse JSON.
+# newline="\n" matters: the Windows text-mode default writes CRLF, Git
+# Bash `read -r` keeps the \r, Blender receives "path\r" and every
+# import silently fails while the driver still exits 0
+with io.open(BLENDS, "w", encoding="utf-8", newline="\n") as fh:
     for b in blends:
         fh.write(b["path"] + "\n")
         fh.write(b["section"] + "\n")

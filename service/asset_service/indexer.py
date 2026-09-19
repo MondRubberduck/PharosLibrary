@@ -332,8 +332,14 @@ def index_root(root: Path, db_path: Path, limit: int = 0, dry_run: bool = False,
                   "re-run when the drive is mounted", flush=True)
             stale = []
         else:
+            # prune ONLY this root's rows: ids and hero paths are
+            # root-relative, so an unscoped pass deleted every OTHER
+            # root's packs too (an offline second root was wiped from
+            # the registry the moment this root was re-indexed)
+            can_root = str(root).replace("\\", "/")
             stale = [r["id"] for r in conn.execute(
-                "SELECT id, hero_file_path FROM assets")
+                "SELECT id, hero_file_path FROM assets "
+                "WHERE canonical_root = ?", (can_root,))
                 if not Path(r["hero_file_path"]).exists()]
         for pack_id in stale:
             conn.execute("DELETE FROM assets WHERE id = ?", (pack_id,))

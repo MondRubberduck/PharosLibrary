@@ -23,31 +23,49 @@ for i, blend in enumerate(kits, 1):
     man = os.path.join(kit_dir, "Exports", "kit_manifest.json")
     name = os.path.basename(kit_dir)
     if os.path.isfile(man):
+        # a manifest only counts as DONE when it exported something (and
+        # parses): a zero-group or corrupt manifest is the residue of a
+        # failed run and must be re-exported, never skipped
+        healthy = False
+        reason = "manifest present"
         try:
             d = json.load(io.open(man, encoding="utf-8"))
             n = (d.get("counts") or {}).get("groups_exported", 0)
-            print("[%d/%d] SKIP %-18s (already exported: %s groups)" % (i, len(kits), name, n), flush=True)
-        except Exception:
-            print("[%d/%d] SKIP %-18s (manifest present)" % (i, len(kits), name), flush=True)
-        skipped += 1
-        continue
+            if n > 0:
+                healthy = True
+                reason = "already exported: %s groups" % n
+            else:
+                reason = "manifest exports 0 groups (failed run?)"
+        except Exception as exc:
+            reason = "manifest unparseable (%s)" % type(exc).__name__
+        if healthy:
+            print("[%d/%d] SKIP %-18s (%s)" % (i, len(kits), name, reason), flush=True)
+            skipped += 1
+            continue
+        print("[%d/%d] re-exporting %-18s (%s)" % (i, len(kits), name, reason), flush=True)
     print("[%d/%d] EXPORT %-18s %6.0f MB" % (i, len(kits), name, os.path.getsize(blend) / 1e6), flush=True)
     try:
         r = subprocess.run([BLENDER, "--background", "--factory-startup", blend, "--python", SCRIPT],
                            capture_output=True, text=True, timeout=3600)
         out = (r.stdout or "") + (r.stderr or "")
-        line = [l for l in out.splitlines() if "KB3D_EXPORT" in l]
-        if line:
+        line = [l for l in out.splitlines()
+                if "KB3D_EXPORT" in l and "KB3D_EXPORT_FAILED" not in l]
+        # success = the completion marker AND a clean process exit: a
+        # Blender that dies after printing the marker is NOT a success
+        if line and r.returncode == 0:
             print("         " + line[-1].strip(), flush=True)
             ok += 1
         else:
             failed += 1
             print("         FAILED rc=%s" % r.returncode, flush=True)
             for l in out.splitlines():
-                if "Error" in l or "Traceback" in l:
+                if ("Error" in l or "Traceback" in l
+                        or "KB3D_EXPORT_FAILED" in l):
                     print("         " + l.strip()[:150], flush=True)
     except subprocess.TimeoutExpired:
         failed += 1
         print("         TIMEOUT", flush=True)
 
 print("\n==== done: exported=%d skipped=%d failed=%d ====" % (ok, skipped, failed), flush=True)
+# fail loudly: a batch that lost kits must not read as success downstream
+sys.exit(1 if failed else 0)

@@ -387,11 +387,20 @@ def _remap_dead_kb3d_images():
     (real-world finding); the cached pass takes seconds.
     """
     # one-time: index every kb3d_*.png.2k folder under the configured
-    # roots into {kit-name-lower: [folder, ...]}
-    kit_folders = {}
+    # roots into {kit-key: [folder, ...]} -- keys come from the SAME
+    # helper the lookup uses, so the two sides cannot drift apart again
+    # (they once did: cache stripped 'kb3d_', lookup kept it, and the
+    # cache could never hit)
     try:
         import sys as _sys
         _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from asset_service.kb3d_paths import (kit_key_from_native_dir,
+                                              kit_key_from_texture_dir)
+    except Exception:
+        return    # cannot remap without the helpers; imports stay as-is
+
+    kit_folders = {}
+    try:
         from asset_service import config as _cfg
         _c = _cfg.load()
         for key in ("kitbash_root", "library_root"):
@@ -399,8 +408,8 @@ def _remap_dead_kb3d_images():
             if not root:
                 continue
             for found in Path(root).glob("**/kb3d_*.png.2k"):
-                kit = found.name[len("kb3d_"):-len(".png.2k")].lower()
-                kit_folders.setdefault(kit, []).append(found)
+                kit_folders.setdefault(
+                    kit_key_from_texture_dir(found.name), []).append(found)
     except Exception:
         pass
 
@@ -416,13 +425,14 @@ def _remap_dead_kb3d_images():
         if seg is None:
             continue
         kit_dir = p.parents[seg + 1] if seg + 1 < len(p.parents) else None
-        kit = p.parents[seg].name.split(".blender.native")[0]
+        raw_kit = p.parents[seg].name.split(".blender.native")[0]
+        kit = kit_key_from_native_dir(p.parents[seg].name)
         # the FBX records the library-of-origin path; when the library was
         # copied elsewhere that dir does not exist -> resolve from the cache
         candidates = []
         if kit_dir is not None:
-            candidates.append(kit_dir / f"{kit}.png.2k" / p.name)
-        for folder in kit_folders.get(kit.lower(), []):
+            candidates.append(kit_dir / f"{raw_kit}.png.2k" / p.name)
+        for folder in kit_folders.get(kit, []):
             candidates.append(folder / p.name)
         hit = next((c for c in candidates if c.is_file()), None)
         if hit is not None:

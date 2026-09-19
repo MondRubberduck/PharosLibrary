@@ -114,6 +114,16 @@ for r in roots:
     except Exception as exc:
         failed.append({"group": r.name, "error": "%s: %s" % (type(exc).__name__, exc)})
 
+if not records:
+    # a total failure must NOT leave a manifest behind: the drivers skip
+    # on the manifest's existence, so an all-failed export used to hide
+    # the kit FOREVER on re-runs
+    print("KB3D_EXPORT_FAILED " + json.dumps(
+        {"kit": KIT, "failed": len(failed), "errors": failed[:5]}))
+    print("no groups exported -- kit_manifest.json NOT written")
+    import sys as _sys
+    _sys.exit(1)
+
 man = {
     "schema": "pharos.kb3d.export/v1",
     "kit": KIT,
