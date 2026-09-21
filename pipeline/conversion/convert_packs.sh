@@ -331,7 +331,10 @@ PY
     # pack names can contain spaces -- an unquoted $SAMPLE split on IFS and
     # Blender was handed path fragments.
     SAMPLE="${SAMPLE//$'\r'/}"   # python heredoc output is CRLF; a trailing \r broke Blender
-    mapfile -t SAMPLE_ARR <<< "$SAMPLE"
+  # while-read instead of mapfile: stock macOS ships bash 3.2
+  while IFS= read -r _sp; do
+    SAMPLE_ARR+=("$_sp")
+  done <<< "$SAMPLE"
     echo "files: ${#SAMPLE_ARR[@]}"
     "$BLENDER_EXE" --background --factory-startup --python "$TOOLS/blender_inspect_fbx.py" -- "${SAMPLE_ARR[@]}" \
       > "$LOGDIR/blender_${SLUG}.log" 2>&1

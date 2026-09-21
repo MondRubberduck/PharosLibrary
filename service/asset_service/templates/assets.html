@@ -156,7 +156,7 @@ async function openItem(id){
   const i2=+e.target.dataset.i;modalSel=i2;$('mmain').src=imgs[i2];
   [...$('strip').children].forEach((el2,i)=>el2.classList.toggle('on',i===i2));};
  let act='';
- if(it.url)act+=`<a class="b" href="${esc(it.url)}" target="_blank" rel="noopener">open store page &#8599;</a>`;
+ if(it.url&&/^https?:\/\//i.test(it.url))act+=`<a class="b" href="${esc(it.url)}" target="_blank" rel="noopener">open store page &#8599;</a>`;
  if(it.asset_path)act+=`<button class="b" id="mexp2" data-p="${esc(it.asset_path)}">&#128193; open asset folder in Explorer</button>`;
  if(it.asset_path)act+=`<button class="b" id="mcopyp" data-copy="${esc(it.asset_path)}">copy asset path</button>`;
  if(it.folder)act+=`<button class="b" id="mcopy" data-copy="${esc(it.folder)}">copy images path</button>`;

@@ -76,7 +76,12 @@ def _min_fbx() -> bytes:
 
 def build_fixture(root: Path) -> None:
     (root / "Animation" / "WalkPacks").mkdir(parents=True)
-    (root / "Animation" / "WalkPacks" / "walk01.fbx").write_bytes(b"stubfbx")
+    # the stub carries AnimationStack/Curve node names: since .fbx also
+    # counts as a MESH extension, init breaks the anim-vs-mesh tie with
+    # binary evidence -- a marker-less clip stub would misclassify the
+    # whole Animation folder as a model folder
+    (root / "Animation" / "WalkPacks" / "walk01.fbx").write_bytes(
+        b"stubfbx\x00\x00AnimationStack\x00AnimationCurve\x00")
     (root / "Textures_Materials" / "Brick").mkdir(parents=True)
     (root / "Textures_Materials" / "Brick" / "brick_albedo.png").write_bytes(
         b"\x89PNG fake")
@@ -116,9 +121,19 @@ def build_fixture(root: Path) -> None:
         "schema": "pharos.pack.export/v2", "pack": "TestPack",
         "meshes": []}), encoding="utf-8")
     (root / "Collected Files").mkdir(parents=True)
+    # Local Folder points at a real dir: ingest's availability pass must
+    # mark this purchase 'local' (the CSV folder is the on-disk evidence)
+    (root / "Collected Files" / "OldMill").mkdir()
+    (root / "Collected Files" / "OldMill" / "mill.png").write_bytes(
+        b"\x89PNG fake")
     (root / "Collected Files" / "purchases.csv").write_text(
-        "Name,Product URL,Price (USD)\nOld Mill,https://example.com/m,9.99\n",
+        "Name,Product URL,Price (USD),Local Folder\n"
+        "Old Mill,https://example.com/m,9.99,"
+        + str(root / "Collected Files" / "OldMill") + "\n",
         encoding="utf-8")
+    # a loose asset file at the ROOT: invisible to every section, must be
+    # reported loudly, never silently dropped (flat-library finding)
+    (root / "loose_at_root.fbx").write_bytes(b"stubfbx")
 
 
 def main() -> int:
@@ -190,6 +205,37 @@ def main() -> int:
                   for m in cfg.get("manifest_roots", [])),
               str(cfg.get("manifest_roots")))
 
+        # A-gen: the classification rules that once broke strangers
+        check("GEN: Animation section survives the .fbx tie-break "
+              "(marker evidence)",
+              det["sections"].get("animation") == ["Animation"],
+              str(det["sections"]))
+        check("GEN: static FBX-only folder is a MODEL folder, not "
+              "animation", "MyModels" in det["mesh_folders"]
+              and "MyModels" not in det["sections"].get("animation", []),
+              str(det["mesh_folders"]))
+        check("GEN: config carries scan_folders for ingest",
+              "MyModels" in (cfg.get("scan_folders") or []),
+              str(cfg.get("scan_folders")))
+        # A2: loose files at the library root are reported loudly
+        check("GEN: root-level files reported (invisible to sections)",
+              det.get("root_files", {}).get(".fbx") == 1,
+              str(det.get("root_files")))
+        # A3: weighted section picks (textures wins on asset count, not
+        # alphabetical order; the CSV folder never wins a section)
+        check("GEN: textures pick is the real texture folder",
+              cfg["sections"].get("textures") == "Textures_Materials",
+              cfg["sections"].get("textures"))
+        # A9: init without --force on a DIFFERENT root fails loudly
+        (tmp / "other_root").mkdir(exist_ok=True)
+        r = subprocess.run(
+            [sys.executable, str(REPO / "pharos.py"), "init",
+             str(tmp / "other_root")],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        check("GEN: init refuses a different root without --force",
+              r.returncode == 2 and "DIFFERENT library" in (r.stdout or ""),
+              f"rc={r.returncode}")
+
         # 2. importers on a fresh registry (degradation path)
         from asset_service import db, collection_import, textures_import, \
             audio_import, meshes_import
@@ -218,6 +264,24 @@ def main() -> int:
         a = browse.api_audio_items({"q": [""]})
         check("empty audio section serves 200-shape", a["total"] == 0)
 
+        # B9: a semicolon CSV (German Excel default) parses, not
+        # N rows of empty strings reported as success
+        import sqlite3 as _sq9
+        semic = lib / "Collected Files" / "semicolons.csv"
+        semic.write_text(
+            "Name;Product URL;Price (USD)\n"
+            "Semi Mill;https://example.com/s;4.99\n", encoding="utf-8")
+        db2 = str(reg / "semi.sqlite")
+        db.init_db(db2)
+        n2 = collection_import.import_collection(db2, csv_path=semic)
+        conn2 = _sq9.connect(db2)
+        semi_name = conn2.execute(
+            "SELECT name FROM collection").fetchone()
+        conn2.close()
+        check("B9: semicolon CSV parses (delimiter sniffed)",
+              n2 == 1 and semi_name and semi_name[0] == "Semi Mill",
+              f"n={n2} name={semi_name}")
+
         # 4. scanner: real FBX dims on the fixture mesh
         rc_scan = subprocess.run(
             [sys.executable, str(REPO / "service/asset_service/scanner.py"),
@@ -245,10 +309,61 @@ def main() -> int:
             check("triangles exact", plate["triangles"] == FBX_TRIANGLES,
                   str(plate["triangles"]))
 
+        # B1: unmeasured meshes must be EXCLUDED from dimension filters.
+        # The fixture's OBJ rows parse fine, so plant a genuinely
+        # unmeasured row (corrupt FBX -> all-zero dims) first.
+        import sqlite3 as _sq1
+        _c0 = _sq1.connect(dbp)
+        _c0.execute(
+            "INSERT INTO meshes (name,pack,source,kind,fbx,on_disk,bytes,"
+            "triangles,vertices,submeshes,bbox_x,bbox_y,bbox_z,max_dim,"
+            "materials,texture_count,texture_files,tags,meta) VALUES "
+            "('ghost','MyModels','scan','mesh','x://ghost.fbx',1,1,0,0,0,"
+            "0,0,0,0,'[]',0,'[]','[]','{\"stems\":[],\"themes\":[],"
+            "\"facets\":{}}')")
+        _c0.commit()
+        _c0.close()
+        mf = browse.api_meshes({"min_dim": ["0.9"], "max_dim": ["1.1"]})
+        check("B1: dims filter returns only measured hits",
+              all(0.9 <= (i["max_dim_m"] or 0) <= 1.1 for i in mf["items"])
+              and any(i["name"] == "plate" for i in mf["items"])
+              and not any(i["name"] == "ghost" for i in mf["items"]),
+              f"items={[i['name'] for i in mf['items']]} "
+              f"unmeasured={mf.get('unmeasured_excluded')}")
+        check("B1: unmeasured count disclosed",
+              mf.get("unmeasured_excluded", 0) >= 1,
+              str(mf.get("unmeasured_excluded")))
+        # B7: unicode names are findable by their accented and plain forms
+        _c = _sq1.connect(dbp)
+        _c.execute(
+            "INSERT INTO meshes (name,pack,source,kind,fbx,on_disk,bytes,"
+            "triangles,vertices,submeshes,bbox_x,bbox_y,bbox_z,max_dim,"
+            "materials,texture_count,texture_files,tags,meta) VALUES "
+            "('Vâse Ümlaut','Misc','scan','mesh','x://v.fbx',1,1,1,3,0,"
+            "1,1,1,1,'[]',0,'[]','[\"vâse\",\"umlaut\"]',"
+            "'{\"stems\":[\"vâse\"],\"themes\":[],\"facets\":{}}')")
+        _c.commit()
+        _c.close()
+        u1 = browse.api_meshes({"q": ["vâse"]})
+        u2 = browse.api_meshes({"q": ["vase"]})
+        check("B7: accented query finds accented asset",
+              any("âse" in (i["name"] or "") for i in u1["items"])
+              or u1["total"] >= 1, f"q=vâse total={u1['total']}")
+        check("B7: plain query finds accented asset too",
+              u2["total"] >= 1, f"q=vase total={u2['total']}")
+        # B8: OR-fallback items carry the same fields as primary items
+        mf_all = browse.api_meshes({"q": ["plate lid"]})   # AND fails -> OR
+        fb_items = mf_all["items"]
+        if fb_items and mf_all.get("mode") == "or-fallback":
+            check("B8: OR-fallback items keep fbx_path/view_url/height_m",
+                  all(i.get("fbx_path") and i.get("view_url")
+                      and "height_m" in i for i in fb_items),
+                  str([i.get("view_url") for i in fb_items][:2]))
+
         # 5. scanner rows survive a server-style rebuild
         meshes_import.import_meshes(dbp)
         m3 = browse.api_meshes({})
-        check("scan rows survive rebuild", m3["total"] == 3)
+        check("scan rows survive rebuild", m3["total"] == 5)
 
         # 5a. crawler rows + scan rows across TWO rebuilds (laptop-run
         # finding: preserving scan rows WITH their ids collided fatally
@@ -265,7 +380,7 @@ def main() -> int:
         meshes_import.import_meshes(dbp)      # the collision case
         m4 = browse.api_meshes({})
         check("crawler + scan rows stable across double rebuild",
-              m4["total"] == 4, f"total={m4['total']}")
+              m4["total"] == 6, f"total={m4['total']}")
         srcs = {i["source"] for i in m4["items"]}
         check("both sources present after double rebuild",
               "scan" in srcs and "leartes" in srcs, str(srcs))
@@ -287,7 +402,7 @@ def main() -> int:
             cp_ok = False
         m5 = browse.api_meshes({})
         check("cp1252 jsonl survives the geometry rebuild",
-              cp_ok and m5["total"] == 5, f"total={m5['total']}")
+              cp_ok and m5["total"] == 7, f"total={m5['total']}")
 
         # 5c. A5: scanner audio keeps the folder taxonomy
         r = subprocess.run(
@@ -485,7 +600,15 @@ def main() -> int:
         start_file = config.AGENT_FILES / "AGENT_START_HERE.md"
         body = paths[0].read_text(encoding="utf-8")
         check("AGENT_START_HERE generated with live counts",
-              "Meshes" in body and "(2 packs)" in body)
+              "Meshes" in body and "(3 packs)" in body)
+        # E1: the generated docs carry the CONFIGURED port, not a
+        # hardcoded 8765; and the honest zero-section wording
+        check("E1: docs carry the configured port",
+              f":{config.NETWORK['port']}/api/stats" in body,
+              body.split("api/stats")[0][-40:])
+        check("A10: docs distinguish zero from not-indexed",
+              "doctor" in body and "never indexed" in body,
+              body[-500:-300])
 
         # This check used to be `generate(...) is not []`, an identity test
         # against a fresh list literal -- True for every possible return
@@ -550,6 +673,17 @@ def main() -> int:
               _anim >= 1, f"anim={_anim}")
         check("ingest kept meshes intact across rebuild",
               _mesh_n >= 3, f"meshes={_mesh_n}")
+
+        # B10: purchases whose Local Folder exists on disk must read
+        # 'local' after ingest (the CSV folder is the on-disk evidence)
+        _c = _sq.connect(dbp)
+        _avail = _c.execute(
+            "SELECT availability FROM collection "
+            "WHERE name='Old Mill'").fetchone()
+        _c.close()
+        check("B10: on-disk purchase marked local after ingest",
+              _avail and _avail[0] == "local",
+              str(_avail))
 
         # 6c2. anim section token-bomb guard (every other section had
         # it; q=??? used to return the WHOLE library). q=walk>=1 proves

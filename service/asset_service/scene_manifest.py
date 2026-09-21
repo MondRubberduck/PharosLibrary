@@ -75,13 +75,15 @@ def validate_manifest(data: dict) -> list[str]:
     if not isinstance(data, dict):
         return ["manifest must be a JSON object"]
 
-    # unknown top-level keys -> warning (D09)
+    # unknown top-level keys are INFORMATIONAL, not errors: a cosmetic
+    # unknown key ("notes") once failed validation outright, and (worse)
+    # suppressed the file-existence checks via the old early-return
     KNOWN_KEYS = {"schema", "scene", "units", "up_axis", "ground_y",
                   "assets", "textures", "crowd", "audio"}
     unknown = set(data.keys()) - KNOWN_KEYS
     if unknown:
-        errors.append(f"unknown top-level key(s) ignored: "
-                      f"{sorted(unknown)} (known: {sorted(KNOWN_KEYS)})")
+        print(f"note: unknown top-level key(s) ignored: "
+              f"{sorted(unknown)} (known: {sorted(KNOWN_KEYS)})")
     schema = data.get("schema")
     if schema is not None and schema not in (
             "pharos.scene/v1", "kiosk.scene/v1"):
@@ -235,14 +237,16 @@ def budget_check(data: dict, meshes_db: Optional[str] = None) -> dict:
 
 
 def load_manifest(path: str | Path) -> tuple[Optional[dict], list[str]]:
-    """Load + validate a manifest file. Returns (manifest, errors)."""
+    """Load + validate a manifest file. Returns (manifest, errors).
+
+    Path problems are ALWAYS checked: an early schema error once
+    suppressed the file-existence pass, so one cosmetic unknown key hid
+    every missing asset."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         return None, [f"cannot read manifest: {exc}"]
-    errors = validate_manifest(data)
-    if not errors:
-        errors = check_paths(data)
+    errors = validate_manifest(data) + check_paths(data)
     return data if not errors else None, errors
 
 

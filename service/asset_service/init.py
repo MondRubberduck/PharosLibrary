@@ -24,13 +24,14 @@ ever written inside the asset library itself.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from . import config
 
 CLIP_EXTS = {".fbx", ".bvh"}
-MESH_EXTS = {".obj", ".glb", ".gltf", ".stl", ".blend", ".usd", ".usda",
+MESH_EXTS = {".fbx", ".obj", ".glb", ".gltf", ".stl", ".blend", ".usd", ".usda",
              ".usdc", ".usdz", ".uasset", ".umodel", ".max"}
 AUDIO_EXTS = {".wav", ".ogg", ".mp3", ".flac", ".m4a", ".aif", ".aiff",
               ".aac", ".wma"}
@@ -38,11 +39,16 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp",
               ".exr", ".hdr", ".dds", ".tga"}
 SAMPLE_LIMIT = 2000          # files censused per folder; classification
                              # does not need the whole tree
+FBX_PROBE_LIMIT = 3          # FBXs opened for animation evidence when a
+                             # folder's classification is fbx-ambiguous
 
 
-def _census(folder: Path) -> dict[str, int]:
-    """Bounded extension census of a folder tree."""
+def _census(folder: Path) -> tuple[dict[str, int], list[Path]]:
+    """Bounded extension census of a folder tree. Also returns up to
+    FBX_PROBE_LIMIT fbx paths -- the animation-vs-mesh evidence probe
+    needs real files when a folder's classification is fbx-ambiguous."""
     counts: dict[str, int] = {}
+    fbx_samples: list[Path] = []
     n = 0
     try:
         for p in folder.rglob("*"):
@@ -52,22 +58,45 @@ def _census(folder: Path) -> dict[str, int]:
                 ext = p.suffix.lower()
                 counts[ext] = counts.get(ext, 0) + 1
                 n += 1
+                if ext == ".fbx" and len(fbx_samples) < FBX_PROBE_LIMIT:
+                    fbx_samples.append(p)
     except OSError:
         pass
-    return counts
+    return counts, fbx_samples
 
 
-def _dominant(counts: dict[str, int]) -> str:
+def _fbx_is_animation(samples: list[Path]) -> bool:
+    """Binary evidence: FBX files carrying AnimStack/AnimationCurve
+    nodes are animation clips, static geometry is not. A folder of FBX
+    models must classify as MESHES even though .fbx also counts as a
+    clip extension (and an animation library must stay animation)."""
+    try:
+        from asset_service.auto_classifier import probe_fbx_markers
+    except Exception:
+        return False
+    for p in samples:
+        try:
+            with open(p, "rb") as fh:
+                blob = fh.read(16 * 1024 * 1024)
+            marks = probe_fbx_markers(blob) or {}
+            if marks.get("has_anim"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _dominant(counts: dict[str, int], fbx_samples: list[Path]) -> str:
     total = sum(counts.values()) or 1
     clips = sum(counts.get(e, 0) for e in CLIP_EXTS)
     audio = sum(counts.get(e, 0) for e in AUDIO_EXTS)
     images = sum(counts.get(e, 0) for e in IMAGE_EXTS)
     meshes = sum(counts.get(e, 0) for e in MESH_EXTS)
-    # model files present -> model folder, regardless of image counts:
-    # 3D packs ship 4-8 texture maps per mesh, so images ALWAYS outnumber
-    # meshes and a dominance rule misfiles every model pack as "textures"
-    # (laptop-run finding). Animation clips keep priority for fbx/bvh.
+    # .fbx counts as BOTH mesh and clip extension; break the ambiguity
+    # with binary evidence (bvh presence or AnimStack markers)
     if meshes > 0 and meshes >= clips:
+        if clips > 0 and meshes == clips and counts.get(".fbx"):
+            return "animation" if _fbx_is_animation(fbx_samples) else "meshes"
         return "meshes"
     best = max(clips, audio, images, meshes)
     if best == 0:
@@ -105,28 +134,51 @@ def detect(root: Path) -> dict:
     report: dict = {"root": str(root), "sections": {}, "mesh_folders": [],
                     "manifest_roots": [], "catalog_csvs": [],
                     "agent_files": (root / "_Agent_Files").is_dir(),
-                    "unknown": []}
+                    "unknown": [], "folder_counts": {}}
     if not root.is_dir():
         report["error"] = f"root does not exist: {root}"
         return report
 
+    # census of files DIRECTLY in the root (not in any subfolder): these
+    # are invisible to sections and the scanner -- they must be reported
+    # loudly, never silently dropped (fresh-library finding: a flat
+    # folder of assets indexed NOTHING with every signal green)
+    root_counts: dict[str, int] = {}
+    try:
+        for p in sorted(root.iterdir()):
+            if p.is_file() and not p.name.startswith((".", "_")):
+                ext = p.suffix.lower()
+                if ext:
+                    root_counts[ext] = root_counts.get(ext, 0) + 1
+    except OSError:
+        pass
+    if root_counts:
+        report["root_files"] = root_counts
+
     for child in sorted(root.iterdir()):
         if not child.is_dir() or child.name.startswith(("_", ".")):
             continue
-        counts = _census(child)
-        kind = _dominant(counts)
+        counts, fbx_samples = _census(child)
+        report["folder_counts"][child.name] = counts
+        kind = _dominant(counts, fbx_samples)
         if counts.get(".blend"):
             # .blend files need an explicit decision (enumerate containers,
-            # export kits, or leave them alone) -- surface the candidates
+            # export kits, or leave them alone) -- the folder is surfaced
+            # as that decision and never auto-scanned as a model folder
             report.setdefault("blend_folders", []).append(child.name)
         if kind == "meshes":
-            report["mesh_folders"].append(child.name)
+            if child.name not in report.get("blend_folders", []):
+                report["mesh_folders"].append(child.name)
         elif kind:
             report["sections"].setdefault(kind, []).append(child.name)
         else:
             # a folder may still be a manifest root even when its census is
             # mixed (converted packs are .uasset + .fbx + .png)
             report["unknown"].append(child.name)
+        if sum(counts.get(e, 0) for e in (".uasset", ".umap")):
+            report.setdefault("uasset_folders", []).append(child.name)
+            report["uasset_total"] = report.get("uasset_total", 0) + \
+                sum(counts.get(e, 0) for e in (".uasset", ".umap"))
 
     # manifest roots: packs carrying Exports/manifest.json at ANY depth
     # (fresh libraries nest packs under category folders like "UE Packs/")
@@ -156,9 +208,25 @@ def detect(root: Path) -> dict:
     return report
 
 
-def _pick(sections: dict, kind: str) -> str | None:
-    cands = sections.get(kind) or []
-    return cands[0] if cands else None
+def _pick(sections: dict, kind: str, counts_by_folder: dict,
+          exclude: set = ()) -> str | None:
+    """Pick a section's folder by ASSET WEIGHT, not alphabetical order.
+
+    Alphabetical picks once let a purchase-CSV folder (2 screenshots)
+    hijack the textures section from the real PBR library. Weight =
+    number of files of the section's own kind, censused per folder;
+    excluded folders (e.g. the one carrying the catalog CSV) never win."""
+    weights = {"animation": CLIP_EXTS, "textures": IMAGE_EXTS,
+               "audio": AUDIO_EXTS}
+    exts = weights.get(kind, MESH_EXTS)
+    best, best_name = -1, None
+    for name in sections.get(kind) or []:
+        if name in exclude:
+            continue
+        w = sum(counts_by_folder.get(name, {}).get(e, 0) for e in exts)
+        if w > best:
+            best, best_name = w, name
+    return best_name
 
 
 def build_config(report: dict, registry_dir: Path) -> dict:
@@ -168,11 +236,21 @@ def build_config(report: dict, registry_dir: Path) -> dict:
     cfg["library_root"] = str(root)
     cfg["registry_dir"] = str(registry_dir)
     cfg["previews_dir"] = str(registry_dir / "previews")
+    counts_by_folder = report.get("folder_counts", {})
+    # the folder carrying the catalog CSV is the COLLECTION -- it must
+    # never win a content-section pick (alphabetical order once let a
+    # 2-screenshot CSV folder become the textures section)
+    csv_folders = {Path(c).parent.name for c in report["catalog_csvs"]}
     for kind, key in (("animation", "animation"), ("audio", "audio"),
                       ("textures", "textures")):
-        pick = _pick(report["sections"], kind)
+        pick = _pick(report["sections"], kind, counts_by_folder,
+                     exclude=csv_folders)
         if pick:
             cfg["sections"][key] = pick
+    # scanned model folders become a CONFIG KEY: ingest must drive the
+    # scanner from the config (the contract), not from re-detection
+    cfg["scan_folders"] = [f for f in report["mesh_folders"]
+                           if f not in csv_folders]
     # textures_main: keep the default relative name; harmless if absent
     coll_csv = report["catalog_csvs"][0] if report["catalog_csvs"] else None
     if coll_csv:
@@ -217,6 +295,7 @@ def run_init(argv=None) -> int:
     if "error" in report:
         print(f"  ERROR: {report['error']}")
         return 1
+    py = sys.executable
     for kind in ("animation", "textures", "audio"):
         picks = report["sections"].get(kind) or []
         print(f"  {kind:<10} -> {picks[0] if picks else '(not found)'}"
@@ -227,10 +306,14 @@ def run_init(argv=None) -> int:
              if csvs else "(no catalog CSV found)"))
     print(f"  manifest packs: "
           + (f"{len(report.get('manifest_packs_found', []))} found"
-             + (f" under {root}" if report["manifest_roots"] else "")
-             if report["manifest_roots"] else "(none)"))
+              + (f" under {root}" if report["manifest_roots"] else "")
+              if report["manifest_roots"] else "(none)"))
     print(f"  agent index (_Agent_Files): "
           + ("present" if report["agent_files"] else "absent"))
+    if report.get("uasset_total"):
+        print(f"  raw UE packs : {report['uasset_total']} .uasset/.umap files "
+              f"in {', '.join(report.get('uasset_folders', []))} "
+              f"(chain 1 candidates -- ASK before crawling)")
     if report["mesh_folders"]:
         print("  model folders (index via scanner, not a section): "
               + ", ".join(report["mesh_folders"]))
@@ -238,12 +321,30 @@ def run_init(argv=None) -> int:
         print("  blend folders (decision needed: enumerate containers, "
               "export kits, or leave as-is): "
               + ", ".join(report["blend_folders"]))
+    if report.get("root_files"):
+        n = sum(report["root_files"].values())
+        print(f"  !! {n} asset file(s) DIRECTLY in the library root -- "
+              f"sections and the scanner only see SUBFOLDERS.")
+        print("     move them into a subfolder or they will never be indexed")
     if report["unknown"]:
         print("  unclassified (mixed/other content): "
               + ", ".join(report["unknown"]))
 
     cfg_file = config._CONFIG_FILE
     if cfg_file.is_file() and not args.force:
+        current_root = ""
+        try:
+            current_root = json.loads(
+                cfg_file.read_text(encoding="utf-8")).get("library_root", "")
+        except (ValueError, OSError):
+            pass
+        if current_root and Path(current_root) != root:
+            print(f"\nERROR: config already points at a DIFFERENT library:"
+                  f"\n  config : {current_root}"
+                  f"\n  asked  : {root}"
+                  f"\nRe-run with --force to switch libraries (the old "
+                  f"registry will be rebuilt for the new root).")
+            return 2
         print(f"\nconfig already exists: {cfg_file}"
               "\n(re-run with --force to overwrite, or edit it by hand)")
         return 0
@@ -281,12 +382,12 @@ def run_init(argv=None) -> int:
               "or scan them with scanner.py")
     if picks.get("animation"):
         print(f"  animation     : run indexer.py to index the clip packs ->"
-              f" python service/asset_service/indexer.py"
+              f" \"{sys.executable}\" service/asset_service/indexer.py"
               f" --root \"{root}\"")
     if picks.get("audio"):
         ap = root / picks["audio"][0]
         print(f"  audio         : scanner.py indexes durations + folder"
-              f" categories -> python service/asset_service/scanner.py"
+              f" categories -> \"{sys.executable}\" service/asset_service/scanner.py"
               f" \"{ap}\"")
     print("-" * 67)
 
@@ -300,14 +401,16 @@ def run_init(argv=None) -> int:
     print("  4. Animation previews render once in a browser tab -- OK?")
 
     print("\nnext steps:")
-    print("  check setup     : python pharos.py doctor")
-    print("  auto-run chains : python pharos.py ingest  (relays the "
+    py = sys.executable
+    print(f'  check setup     : "{py}" pharos.py doctor')
+    print(f'  auto-run chains : "{py}" pharos.py ingest  (relays the '
           "decision questions to your user)")
-    print("  start the server: python pharos.py serve"
+    print(f'  start the server: "{py}" pharos.py serve'
           "   (or python service/asset_service/browse.py)")
     print("  agent setup flow: docs/STARTING_PROMPT.md + "
           "docs/AGENT_SETUP_BRIEF.md")
     if report["mesh_folders"]:
-        print("  index model folders: python service/asset_service/scanner.py "
-              f"\"{root / report['mesh_folders'][0]}\"")
+        print(f'  index model folders: "{py}" '
+              f"service/asset_service/scanner.py "
+              f'"{root / report["mesh_folders"][0]}"')
     return 0

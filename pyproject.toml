@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pharos"
-version = "0.2.3"
+version = "0.3.0"
 description = "Local asset-intelligence server for coding agents: indexes 3D meshes, PBR textures, audio and animation clips into a queryable SQLite registry served over HTTP and MCP."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,10 +14,6 @@ authors = [{ name = "Pharos Contributors" }]
 [project.optional-dependencies]
 # stdio MCP server (see docs/MCP_SETUP.md)
 mcp = ["mcp<2"]
-# preview/image tooling for the classifier (optional, off by default)
-vision = [
-    "pillow>=10.0",
-]
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",

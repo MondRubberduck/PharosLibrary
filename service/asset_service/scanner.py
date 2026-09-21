@@ -33,6 +33,8 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
 
+AUDIO_ROOT = config.AUDIO_ROOT
+
 # ---------------------------------------------------------------------------
 # format detection
 # ---------------------------------------------------------------------------
@@ -233,6 +235,11 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
     for p in folder.rglob("*"):
         if not p.is_file():
             continue
+        # macOS metadata noise (AppleDouble ._<name>.ext on exFAT/SMB/ZIP,
+        # .DS_Store) is not an asset -- it once indexed as 0-geometry
+        # meshes/audio and polluted every size filter
+        if p.name.startswith("._") or p.name == ".DS_Store":
+            continue
         ext = p.suffix.lower()
         if ext in MESH_EXTS or ext in BLEND_EXTS:
             mesh_files.append(p)
@@ -315,13 +322,16 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
                 print(f"  [warn] skipped mesh {mf.name}: "
                       f"{type(exc).__name__}: {exc}", flush=True)
 
-        # --- texture sets (group images by stem) ---
-        tex_groups: dict[str, list[Path]] = {}
+        # --- texture sets (group images by PARENT FOLDER + stem) ---
+        # keying on the stem alone merged same-named sets from different
+        # packs and turned resolution subfolders (2K/, 4K/) into phantom
+        # map channels; the parent folder keeps every real set separate
+        tex_groups: dict[tuple, list[Path]] = {}
         for img in image_files:
             stem = _texture_stem(img.stem)
-            tex_groups.setdefault(stem, []).append(img)
+            tex_groups.setdefault((img.parent, stem), []).append(img)
 
-        for stem, files in sorted(tex_groups.items()):
+        for (parent, stem), files in sorted(tex_groups.items()):
             channels = {}
             for f in files:
                 ch = detect_channel(f.name)
@@ -334,7 +344,7 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
                 if verbose:
                     print(f"  [tex]  {stem} -> {list(channels.keys())}")
             else:
-                _insert_texture_set(conn, stem, files, channels, folder)
+                _insert_texture_set(conn, stem, files, channels, parent)
                 summary["texture_sets"] += 1
 
         # --- audio ---
@@ -409,7 +419,14 @@ def _insert_texture_set(conn, stem, files, channels, folder):
 
 
 def _insert_audio(conn, af, duration, folder):
-    rel = af.relative_to(folder).as_posix()
+    # rel is section-relative when the file lives under the configured
+    # AUDIO section (matching the crawl jsonl format), else ABSOLUTE:
+    # UNIQUE(rel) once made two separately-scanned folders silently
+    # overwrite each other's same-named files
+    try:
+        rel = af.resolve().relative_to(AUDIO_ROOT).as_posix()
+    except ValueError:
+        rel = af.resolve().as_posix()
     # folder taxonomy beats a generic label: Impacts/Metal/x.wav ->
     # cat "Impacts", sub "Metal"; loose root files fall back to SFX
     parts = Path(rel).parts

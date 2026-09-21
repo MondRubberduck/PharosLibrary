@@ -75,10 +75,13 @@ CREATE TABLE IF NOT EXISTS meshes (
 );
 CREATE INDEX IF NOT EXISTS idx_meshes_pack ON meshes(pack);
 CREATE INDEX IF NOT EXISTS idx_meshes_maxdim ON meshes(max_dim);
--- scanner.py owns rows with source='scan'; one per (name, pack) so
--- re-scanning a folder replaces instead of duplicating
-CREATE UNIQUE INDEX IF NOT EXISTS idx_meshes_name_pack_scan
-  ON meshes(name, pack) WHERE source='scan';
+-- scanner.py owns rows with source='scan'; one per FILE PATH so
+-- re-scanning replaces instead of duplicating AND same-named files in
+-- sibling folders (PackA/Chair.fbx, PackB/Chair.fbx under one scan)
+-- both survive -- the old (name, pack) key collapsed them silently
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meshes_fbx_scan
+  ON meshes(fbx) WHERE source='scan';
+DROP INDEX IF EXISTS idx_meshes_name_pack_scan;
 -- per-pack material-wiring health, straight from the export manifests
 CREATE TABLE IF NOT EXISTS mesh_pack_wiring (
   pack TEXT PRIMARY KEY,
@@ -636,10 +639,21 @@ def import_meshes(db_path: str | Path) -> int:
                     n += 1
 
         if scan_rows:
+            # OR IGNORE against the fbx-keyed scan index: keep-first on
+            # (fbx) for any legacy buffer that still carries duplicates
+            # from the old (name, pack) key era
+            fi = scan_cols.index("fbx")
+            seen: set = set()
+            unique_rows = []
+            for r in scan_rows:
+                if r[fi] in seen:
+                    continue
+                seen.add(r[fi])
+                unique_rows.append(r)
             conn.executemany(
-                f"INSERT INTO meshes ({','.join(scan_cols)}) "
-                f"VALUES ({','.join('?' for _ in scan_cols)})", scan_rows)
-            n += len(scan_rows)
+                f"INSERT OR IGNORE INTO meshes ({','.join(scan_cols)}) "
+                f"VALUES ({','.join('?' for _ in scan_cols)})", unique_rows)
+            n += len(unique_rows)
 
         # A pack that owns mesh rows but no manifest FILE at all (CGTrader, ...)
         # still gets a row, with a ratio of None: no wiring exists to report. This

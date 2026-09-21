@@ -33,6 +33,16 @@ from mathutils import Vector
 def build(manifest_path: str, save_path: str = None):
     """Main entry point. Call from Blender."""
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    # validate BEFORE building: agents author manifests, and a bad one
+    # used to fail half-way through with objects already in the scene
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from scene_manifest import validate_manifest, check_paths
+    problems = validate_manifest(manifest) + check_paths(manifest)
+    if problems:
+        print("MANIFEST INVALID -- nothing was built:")
+        for p in problems[:25]:
+            print(f"  - {p}")
+        sys.exit(2)
     scene_name = manifest.get("scene", "Pharos Scene")
     ground_y = manifest.get("ground_y", 0.0)
 
@@ -146,9 +156,12 @@ def _import_asset(asset, ground_y, index, roots_by_id=None):
     root.location = (0, 0, 0)
     bpy.context.view_layer.update()
 
-    # position
+    # position: the manifest is Y-up ([x, y=height, z]); Blender is Z-up.
+    # Same frame conversion the rotations get (Rx90 mapping y->z, z->-y):
+    # applied VERBATIM, a manifest height of y=2 once floated the asset
+    # 2 m sideways, and manifest z moved it INTO the air.
     pos = asset.get("position", [0, 0, 0])
-    root.location = Vector(pos)
+    root.location = Vector((pos[0], -pos[2], pos[1]))
 
     # rotation: the manifest declares Y-up euler [pitch, yaw, roll]
     # (pharos.scene/v1 contract); Blender is Z-up. Convert the rotation
@@ -604,24 +617,34 @@ def _build_crowd(group, ground_y):
         new.name = f"{src.name}_+{frames}f"
         return new
 
-    # place instances
+    # place instances. The manifest base position is Y-up (y = height):
+    # convert with the same Rx90 mapping assets get, then lay the ring
+    # out over Blender's GROUND PLANE (X/Y) at that height -- the old
+    # code rang over X/Z, which is the vertical axis in Blender, and put
+    # 4 of 6 instances ±1.7 m above and below the ground.
+    bx, by, bz = (base_pos[0], -base_pos[2], base_pos[1])
     for i in range(count):
         if i == 0:
             inst = body_root
         else:
-            # linked duplicate (shares mesh data — memory efficient)
+            # linked duplicate of the WHOLE hierarchy (shares mesh data):
+            # duplicating only the armature root once left every extra
+            # instance an invisible empty skeleton
             bpy.ops.object.select_all(action='DESELECT')
-            body_root.select_set(True)
+            for o in [body_root] + body_root.children_recursive:
+                o.select_set(True)
             bpy.ops.object.duplicate(linked=True)
-            inst = bpy.context.selected_objects[0]
+            roots = [o for o in bpy.context.selected_objects
+                     if o.parent is None]
+            inst = roots[0] if roots else bpy.context.selected_objects[0]
 
-        # grid layout
+        # ring layout on the ground plane around the converted base
         angle = (i / max(count, 1)) * 2 * math.pi
         radius = spacing * max(1, count // 6)
         inst.location = Vector((
-            base_pos[0] + math.cos(angle) * radius,
-            base_pos[1],
-            base_pos[2] + math.sin(angle) * radius,
+            bx + math.cos(angle) * radius,
+            by + math.sin(angle) * radius,
+            bz,
         ))
 
         # assign animation to the ARMATURE with a real per-instance offset

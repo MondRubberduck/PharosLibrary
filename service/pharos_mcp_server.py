@@ -71,7 +71,11 @@ def _animation_clip_count(conn: sqlite3.Connection) -> int:
 @mcp.tool()
 def pharos_stats() -> str:
     """Get a library overview: total counts per section (meshes, textures,
-    audio, collection, animations). Call this FIRST to understand scale."""
+    audio, collection, animations). Call this FIRST to understand scale.
+    Doctrine for everything you find: prefer assets already in the
+    library; owned-not-downloaded -> ask the user (requisition list,
+    never silent substitution); absent -> model it yourself and SAY SO
+    in your report."""
     conn = _db()
     try:
         packs = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
@@ -161,6 +165,8 @@ def pharos_search_meshes(
                 tags = (r.get("tags") or "") + (r.get("meta") or "")
                 return all(t in nl or t in tags.lower() for t in tokens)
             rows = [r for r in rows if hit(r)]
+        # total is the TRUE match count; items are the limited window
+        total = len(rows)
         rows = rows[:min(100, max(1, limit))]
         out = []
         for r in rows:
@@ -175,7 +181,7 @@ def pharos_search_meshes(
                 "hero_textures": recipe.get("primary") if recipe else None,
                 "themes": meta.get("themes", []),
             })
-        return json.dumps({"total": len(out), "items": out})
+        return json.dumps({"total": total, "items": out})
     finally:
         conn.close()
 
@@ -220,17 +226,19 @@ def pharos_search_textures(
             rows = [r for r in rows if hit(r)]
         # filter BEFORE the limit (the mesh tool documents this exact
         # rule): truncating first made resolution filters return false
-        # "no 4K sets" answers on libraries over the limit
+        # "no 4K sets" answers on libraries over the limit. The meta blob
+        # is matched CASE-INSENSITIVELY: '"res": "4K"' must match "4k".
         if resolution:
             rows = [r for r in rows
-                    if resolution.lower() in (r.get("meta") or "")]
+                    if resolution.lower() in (r.get("meta") or "").lower()]
+        total = len(rows)
         rows = rows[:min(100, max(1, limit))]
         out = [{
             "name": r["name"], "group": r["grp"], "sub": r["sub"],
             "file_count": r["file_count"],
             "bytes": r["bytes"], "folder": r["folder"],
         } for r in rows]
-        return json.dumps({"total": len(out), "items": out})
+        return json.dumps({"total": total, "items": out})
     finally:
         conn.close()
 
@@ -277,6 +285,7 @@ def pharos_search_audio(
                 tags = (r.get("tags") or "") + (r.get("meta") or "")
                 return all(t in nl or t in tags.lower() for t in tokens)
             rows = [r for r in rows if hit(r)]
+        total = len(rows)
         rows = rows[:min(100, max(1, limit))]
         out = [{
             "name": r["name"], "category": r["cat"], "sub": r["sub"],
@@ -284,7 +293,7 @@ def pharos_search_audio(
             "channels": r["ch"],
             "path": str(config.AUDIO_ROOT / (r["rel"] or "")),
         } for r in rows]
-        return json.dumps({"total": len(out), "items": out})
+        return json.dumps({"total": total, "items": out})
     finally:
         conn.close()
 
@@ -327,6 +336,7 @@ def pharos_search_collection(
                 tags = (r.get("tags") or "") + (r.get("meta") or "")
                 return all(t in nl or t in tags.lower() for t in tokens)
             rows = [r for r in rows if hit(r)]
+        total = len(rows)
         rows = rows[:min(100, max(1, limit))]
         out = [{
             "name": r["name"], "store": r["store"],
@@ -334,14 +344,14 @@ def pharos_search_collection(
             "availability": r["availability"],
             "asset_path": r["asset_path"], "product_url": r["url"],
         } for r in rows]
-        return json.dumps({"total": len(out), "items": out})
+        return json.dumps({"total": total, "items": out})
     finally:
         conn.close()
 
 
 @mcp.tool()
 def pharos_list_packs() -> str:
-    """List exact pack names with mesh counts and wiring ratios.
+    """List exact pack names with mesh counts (wiring ratios: HTTP only).
     Use this before filtering search_meshes by pack= (names must match)."""
     conn = _db()
     try:

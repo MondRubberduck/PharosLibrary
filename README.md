@@ -113,14 +113,16 @@ never errors.
 
 ```
 service/asset_service/    HTTP server, importers, MCP, scanner, doctor, ingest
-templates/ static/        dashboard pages, vendored three.js
+                          (templates/ + static/ live inside it)
 pipeline/                 optional conversion and index chains (UE, Blender)
 tools/ tests/ docs/       PII gate, test suite, documentation
 pharos.py                 CLI: init | doctor | ingest | serve | docs
 ```
 
 The SQLite registry is derived data: importers rebuild it from crawler
-outputs and disk on every start. Delete it, restart, it comes back.
+outputs and disk on every start. Crawler-sourced tables rebuild
+automatically; scanner-indexed rows return on the next
+`pharos.py ingest`.
 Asset files are never modified — the only writes into a library are
 generated index files.
 

@@ -77,22 +77,46 @@ def run_ingest(argv=None) -> int:
           f"animation={picks.get('animation', ['-'])[0] if picks.get('animation') else '-'} | "
           f"textures={picks.get('textures', ['-'])[0] if picks.get('textures') else '-'} | "
           f"audio={picks.get('audio', ['-'])[0] if picks.get('audio') else '-'}")
-    if report["mesh_folders"]:
-        print(f"  model folders     : {', '.join(report['mesh_folders'])}")
+
+    # ---- THE CONFIG IS THE CONTRACT ---------------------------------------
+    # scan folders come from pharos_config.json (written by init); a fresh
+    # detection only fills the gap for configs that predate the key. When
+    # both exist and disagree, that is DRIFT: report it, prefer the config
+    # (the user may have hand-curated it), never silently re-detect.
+    cfg_scan = [f for f in (cfg.get("scan_folders") or [])
+                if (root / f).is_dir()]
+    det_scan = [f for f in report["mesh_folders"] if (root / f).is_dir()]
+    scan_folders = cfg_scan or det_scan
+    if cfg_scan and sorted(cfg_scan) != sorted(det_scan):
+        print(f"  config/detect drift on model folders "
+              f"(config wins): {', '.join(cfg_scan)} | "
+              f"detector now says: {', '.join(det_scan) or '-'}")
+    elif not cfg_scan and det_scan:
+        print(f"  note: config has no scan_folders key; using the "
+              f"detector's picks (re-run init --force to pin them)")
+    if scan_folders:
+        print(f"  model folders     : {', '.join(scan_folders)}")
     if report.get("manifest_roots"):
         print(f"  manifest packs    : "
               f"{len(report.get('manifest_packs_found', []))} "
               f"under {', '.join(report['manifest_roots'])}")
     if report.get("blend_folders"):
-        print(f"  blend folders     : {', '.join(report['blend_folders'])}")
+        print(f"  blend folders     : {', '.join(report['blend_folders'])}"
+              f"  (decision needed -- NOT scanned)")
+    if report.get("root_files"):
+        n = sum(report["root_files"].values())
+        print(f"  !! {n} asset file(s) DIRECTLY in the library root are "
+              f"invisible to every section -- move them into a subfolder")
 
     # ---- automatic chains -------------------------------------------------
     from asset_service import collection_import, textures_import, \
         audio_import, meshes_import, agent_docs
 
-    for folder in report["mesh_folders"]:
-        _run([py, str(Path(REPO) / "service" / "asset_service" /
-                      "scanner.py"), str(root / folder)], dry)
+    failed_steps = 0
+    for folder in scan_folders:
+        failed_steps += 1 if _run([py, str(
+            Path(REPO) / "service" / "asset_service" / "scanner.py"),
+            str(root / folder)], dry) else 0
 
     audio_jsonl = (root / (picks.get("audio", [""])[0])
                    / "library_files.jsonl") if picks.get("audio") else None
@@ -102,13 +126,14 @@ def run_ingest(argv=None) -> int:
                   f"skipping the folder scan (the crawl's own metadata is "
                   f"richer; scanner rows survive regardless)")
         else:
-            _run([py, str(Path(REPO) / "service" / "asset_service" /
-                          "scanner.py"),
-                  str(root / picks["audio"][0])], dry)
+            failed_steps += 1 if _run([py, str(
+                Path(REPO) / "service" / "asset_service" / "scanner.py"),
+                str(root / picks["audio"][0])], dry) else 0
 
     if picks.get("animation"):
-        _run([py, str(Path(REPO) / "service" / "asset_service" /
-                      "indexer.py"), "--root", str(root)], dry)
+        failed_steps += 1 if _run([py, str(
+            Path(REPO) / "service" / "asset_service" / "indexer.py"),
+            "--root", str(root)], dry) else 0
     else:
         print("\n  animation: no clip folder detected -- skipping indexer")
 
@@ -125,7 +150,38 @@ def run_ingest(argv=None) -> int:
                 n = fn(config.DB_PATH)
                 print(f"  {name} imported: {n}", flush=True)
             except Exception as exc:                  # noqa: BLE001
-                print(f"  {name} import skipped: {exc}", flush=True)
+                # an absent source is a SKIP (a library without a
+                # purchase CSV is a valid state); anything else (corrupt
+                # file, locked DB) is a failed step
+                if name == "collection" and isinstance(exc, FileNotFoundError):
+                    print(f"  {name} import skipped: {exc}", flush=True)
+                else:
+                    failed_steps += 1
+                    print(f"  {name} import FAILED: {exc}", flush=True)
+        # owned vs on-disk: the purchase CSV's Local Folder is on-disk
+        # evidence -- mark rows 'local' when the folder REALLY exists,
+        # then the (optional) availability catalog refines the rest via
+        # name matching. Without this, every purchase read as
+        # owned-not-downloaded even when the files sit on disk.
+        try:
+            import sqlite3
+            conn = sqlite3.connect(config.DB_PATH)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, folder FROM collection "
+                "WHERE folder IS NOT NULL AND folder != ''").fetchall()
+            local_ids = [r["id"] for r in rows if Path(r["folder"]).is_dir()]
+            if local_ids:
+                conn.executemany(
+                    "UPDATE collection SET availability='local' WHERE id=?",
+                    [(i,) for i in local_ids])
+                conn.commit()
+            conn.close()
+            if local_ids:
+                print(f"  availability: {len(local_ids)} purchase(s) with "
+                      f"a folder on disk marked local", flush=True)
+        except Exception as exc:                      # noqa: BLE001
+            print(f"  availability marking skipped: {exc}", flush=True)
         try:
             for p in agent_docs.generate(config.DB_PATH):
                 print(f"  wrote {p}", flush=True)
@@ -144,6 +200,10 @@ def run_ingest(argv=None) -> int:
         qs.append(f"2. Crawl the {len(report['manifest_packs_found'])} Unreal "
                   f"pack(s) for material recipes? (needs UE 5.x + "
                   f"pipeline/conversion sandbox; chain 1)")
+    elif report.get("uasset_total"):
+        qs.append(f"2. {report['uasset_total']} RAW .uasset/.umap files "
+                  f"detected in {', '.join(report.get('uasset_folders', []))} "
+                  f"-- convert them with chain 1? (needs UE 5.x)")
     else:
         qs.append("2. Any Unreal .uasset packs to convert? (none detected; "
                   "chain 1 needs UE 5.x)")
@@ -163,8 +223,38 @@ def run_ingest(argv=None) -> int:
         print("  " + q)
     print("-" * 66)
     print("\nnext steps:")
-    print(f'  verify setup   : python "{REPO}/pharos.py" doctor')
-    print(f'  start serving  : python "{REPO}/pharos.py" serve --no-open')
+    print(f'  verify setup   : "{sys.executable}" "{REPO}/pharos.py" doctor')
+    print(f'  start serving  : "{sys.executable}" "{REPO}/pharos.py" '
+          f"serve --no-open")
     print("  build prompts  : docs/STARTING_PROMPT.md + "
           "docs/AGENT_SETUP_BRIEF.md")
+    # ---- exit codes are the agent's signal (no prose parsing) ----------
+    if dry:
+        return 0
+    if failed_steps:
+        print(f"\npharos ingest: {failed_steps} step(s) FAILED -- "
+              f"see the warnings above", flush=True)
+        return 4
+    try:
+        import sqlite3
+        conn = sqlite3.connect(config.DB_PATH)
+        totals = {}
+        for tbl in ("meshes", "textures", "audio", "collection"):
+            try:
+                totals[tbl] = conn.execute(
+                    f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            except sqlite3.OperationalError:
+                totals[tbl] = 0
+        anim = conn.execute(
+            "SELECT COUNT(*) FROM assets WHERE id LIKE 'pack::%'"
+        ).fetchone()[0]
+        conn.close()
+    except Exception:                                     # noqa: BLE001
+        return 0
+    if all(v == 0 for v in totals.values()) and anim == 0:
+        print("\npharos ingest: NOTHING WAS INDEXED -- the library shape "
+              "was not recognized (loose files at the root? unknown "
+              "layouts?). Run doctor and check pharos_config.json.",
+              flush=True)
+        return 3
     return 0

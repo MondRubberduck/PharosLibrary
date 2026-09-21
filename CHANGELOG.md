@@ -1,5 +1,76 @@
 # Changelog
 
+## 0.3.0 (2026-09-21)
+Generalization: the second external-review batch. Pharos now works on
+libraries that do not look like the author's own — verified with a
+stranger-layout end-to-end simulation, MCP-over-stdio, and a real
+Blender crowd regression.
+
+- `.fbx` counts as a MESH extension now; the animation-vs-mesh tie is
+  broken by binary evidence (AnimStack/AnimationCurve markers via the
+  existing probe). A folder of static FBX models is a MODEL folder and
+  gets scanned (it used to become the "animation" section and index
+  nothing). Pure-BVH or marker-positive folders stay animation.
+- Files DIRECTLY in the library root are counted and reported loudly
+  (they are invisible to every section; a flat library used to index
+  NOTHING with every signal green).
+- Section picks are weighted by per-kind asset count, and the
+  catalog-CSV folder never wins a content section (alphabetical order
+  once let a 2-screenshot CSV folder hijack "textures").
+- init fails loudly (exit 2) when an existing config points at a
+  DIFFERENT library and --force is absent; the old silent success
+  indexed the wrong library.
+- ingest: scan folders come from the config (`scan_folders`, written by
+  init) with drift reporting; purchases whose Local Folder exists on
+  disk are marked 'local' (the availability ladder ran only via a
+  script nothing invoked); exit codes are honest (4 = a step failed,
+  3 = nothing was indexed at all).
+- Dimension/height filters exclude unmeasured meshes and disclose how
+  many were hidden (`unmeasured_excluded`); generated docs carry the
+  configured port/interpreter and the "zero means EITHER no content OR
+  not indexed — run doctor" honesty.
+- Scan rows are keyed by file path (meshes) and section-relative path
+  (audio): same-named assets in sibling folders both survive one scan,
+  and separately-scanned audio folders no longer overwrite each other.
+- Texture sets group by (folder, stem): same-named sets from different
+  packs stay separate and resolution subfolders stop becoming phantom
+  map channels. macOS AppleDouble (._*) and .DS_Store files are
+  skipped.
+- scene_builder: manifest positions convert Y-up -> Blender Z-up (the
+  same Rx90 mapping rotations get — verbatim positions once floated
+  assets at manifest-depth as height); the crowd ring lies on the
+  GROUND plane (it was vertical: 4 of 6 instances ±1.7 m in the air);
+  every crowd instance duplicates the WHOLE hierarchy (linked armature
+  duplicates used to leave 5 of 6 instances as invisible skeletons);
+  build() validates the manifest first and refuses invalid ones.
+  All proven by reopened-.blend measurement.
+- scene_manifest: path checks always run (one cosmetic unknown key used
+  to suppress every missing-file error); unknown top-level keys are
+  informational notes, not errors.
+- MCP: `total` is the true match count (it was the truncated window);
+  texture resolution filters match case-insensitively; the
+  library-first doctrine ladder is in the pharos_stats docstring.
+- HTTP: search tokenizers accept non-ASCII word characters AND fold
+  accents both sides ("vase" finds "Vâse"); OR-fallback mesh items
+  carry the same fields as primary items (fbx_path/view_url/height_m);
+  pack-id regex accepts &, ', ,, !, # (legal vendor names);
+  open_explorer dispatches per-OS (os.startfile was Windows-only ->
+  500 elsewhere); socket timeout + connection-drop guard; audiofile
+  suffix ranges (bytes=-N) and out-of-range clamps fixed; LIKE
+  wildcards escaped in pack-file queries; non-loopback bind warning
+  now says what actually happens (LAN browsers get 403 from the Host
+  allow-list).
+- collection_import sniffs the CSV delimiter (semicolon Excel exports
+  used to import N rows of empty strings as success).
+- Pipeline: verify_pack_export accepts SkeletalMesh with null triangles
+  by deriving the count from the exported FBX; macos-latest added to
+  the CI matrix; convert_packs.sh replaced mapfile (bash 3.2 on stock
+  macOS); the dead `vision` extra is gone; THIRD_PARTY_NOTICES carries
+  the full MIT text; README's "delete the registry" claim scoped
+  honestly (crawler tables rebuild automatically; scan rows return on
+  the next ingest).
+
+
 ## 0.2.3 (2026-09-19)
 External-review Batch 2: the pipeline layer's silent-success failure
 modes. Fixes proven where engines allow (two real-Blender end-to-end

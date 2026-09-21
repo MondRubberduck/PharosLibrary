@@ -759,6 +759,56 @@ def test_no_replace_checks_the_real_target():
         assert "--no-replace" in combined and "already exists" in combined
 
 
+def test_scan_keying_same_name_different_folders():
+    """B2/B6: same-named assets in sibling folders must BOTH survive a
+    scan (the old (name, pack) key collapsed them silently; audio's
+    UNIQUE(rel) cross-scan overwrite had the same effect)."""
+    import wave as _w
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        parent = tmp / "MyPacks"
+        for sub in ("PackA", "PackB"):
+            (parent / sub).mkdir(parents=True)
+            (parent / sub / "Chair.fbx").write_bytes(_min_fbx())
+        db = tmp / "reg.sqlite"
+        r = subprocess.run(
+            [sys.executable, "-B",
+             str(REPO / "service" / "asset_service" / "scanner.py"),
+             str(parent), "--db", str(db)],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        assert r.returncode == 0, (r.stderr or "")[-200:]
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        n_mesh = conn.execute("SELECT COUNT(*) FROM meshes").fetchone()[0]
+        conn.close()
+        assert n_mesh == 2, \
+            f"B2: same-named meshes collapsed: {n_mesh} rows (want 2)"
+
+        # B6: two separately-scanned audio folders with same-named files
+        aud_root = tmp / "audio"
+        for sub in ("FolderA", "FolderB"):
+            d = aud_root / sub
+            d.mkdir(parents=True)
+            with _w.open(str(d / "beep.wav"), "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+                w.writeframes(b"\x00\x00" * 4000)
+        db2 = tmp / "aud.sqlite"
+        for sub in ("FolderA", "FolderB"):
+            r = subprocess.run(
+                [sys.executable, "-B",
+                 str(REPO / "service" / "asset_service" / "scanner.py"),
+                 str(aud_root / sub), "--db", str(db2)],
+                capture_output=True, text=True, cwd=str(REPO),
+                timeout=120)
+            assert r.returncode == 0, (r.stderr or "")[-200:]
+        conn = sqlite3.connect(str(db2))
+        n_aud = conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]
+        rels = [r_[0] for r_ in conn.execute("SELECT rel FROM audio")]
+        conn.close()
+        assert n_aud == 2, \
+            f"B6: cross-scan audio overwrite: {n_aud} rows (want 2): {rels}"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

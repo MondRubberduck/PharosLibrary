@@ -80,9 +80,21 @@ def _audio_hero_uri() -> str:
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
+def _fold(s: str) -> str:
+    """Accent-fold for search: 'vâse' <-> 'vase'. Names in non-English
+    libraries are full of umlauts/accents; folding BOTH sides of the
+    comparison keeps plain-keyboard queries working."""
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFD", s)
+                   if not unicodedata.combining(c))
+
+
 def _name_hit(tok: str, name_l: str) -> bool:
     """Short tokens match on word boundaries only ('lamp' != 'clamp');
-    longer tokens may substring ('hologram' in 'holograms02')."""
+    longer tokens may substring ('hologram' in 'holograms02'). Both
+    sides are accent-folded so 'vase' finds 'Vâse'."""
+    name_l = _fold(name_l)
+    tok = _fold(tok)
     if len(tok) >= 5:
         return tok in name_l
     return re.search(r"\b" + re.escape(tok), name_l) is not None
@@ -194,6 +206,16 @@ def _normalize_pack_id(raw: str) -> str:
     if not raw.startswith("pack::"):
         return raw
     return "pack::" + raw[len("pack::"):].replace("::", "/")
+
+
+def _anim_prefix() -> str:
+    """Pack-id prefix for the animation section, FROM THE CONFIG. The
+    section name is configurable; this prefix was hardcoded 'Animation'
+    in six queries, so any library with a different folder name read
+    '0 clips' everywhere. substr-prefix matching (not LIKE) also makes
+    the bare-section id 'pack::<name>' (clips directly in the section
+    folder) count, which LIKE '.../%' never matched."""
+    return "pack::" + (config.SECTIONS.get("animation") or "Animation")
 
 
 _thumb_lock = threading.Lock()
@@ -370,7 +392,7 @@ def api_clips(params: dict) -> dict:
 def api_pack_files(params: dict) -> dict:
     """File-level contents of one pack (server-side pagination + filters)."""
     pack_id = _normalize_pack_id((params.get("id") or [""])[0])
-    if not re.fullmatch(r"pack::[\w .()/+-]+", pack_id):
+    if not re.fullmatch(r"pack::[\w .()&!',#%-]+", pack_id):
         return {"error": "bad pack id"}
     q = (params.get("q") or [""])[0].strip()
     ext = re.sub(r"[^a-z0-9]", "", (params.get("ext") or [""])[0].lower())
@@ -387,8 +409,11 @@ def api_pack_files(params: dict) -> dict:
         return {"error": "pack not found in registry"}
     where, args = "asset_id = ?", [pack_id]
     if q:
-        where += " AND lower(relative_path) LIKE ?"
-        args.append(f"%{q.lower()}%")
+        where += " AND lower(relative_path) LIKE ? ESCAPE '/'"
+        # % and _ are LIKE wildcards: a literal % in the query must not
+        # match everything
+        args.append("%" + q.lower().replace("/", "//")
+                    .replace("%", "/%").replace("_", "/_") + "%")
     if ext:
         where += " AND lower(relative_path) LIKE ?"
         args.append(f"%.{ext}")
@@ -534,7 +559,7 @@ def api_collection_items(params: dict) -> dict:
         size = 24
 
     qstems: set = set()
-    for t in re.findall(r"[a-z0-9]+", q):
+    for t in re.findall(r"[^\W_]+", q, re.UNICODE):
         qstems |= _stems(t)
     qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
     if q and not qstems:
@@ -757,7 +782,7 @@ def api_textures_items(params: dict) -> dict:
     except ValueError:
         size = 24
     qstems: set = set()
-    for t in re.findall(r"[a-z0-9]+", q):
+    for t in re.findall(r"[^\W_]+", q, re.UNICODE):
         qstems |= _stems(t)
     qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
     if q and not qstems:
@@ -924,7 +949,7 @@ def api_audio_items(params: dict) -> dict:
     except ValueError:
         size = 24
     qstems: set = set()
-    for t in re.findall(r"[a-z0-9]+", q):
+    for t in re.findall(r"[^\W_]+", q, re.UNICODE):
         qstems |= _stems(t)
     qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
     if q and not qstems:
@@ -1100,13 +1125,39 @@ def api_meshes(params: dict) -> dict:
         size = 50
 
     qstems: set = set()
-    for t in re.findall(r"[a-z0-9]+", q):
+    for t in re.findall(r"[^\W_]+", q, re.UNICODE):
         qstems |= _stems(t)
     qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
     if q and not qstems:
         # every token was dropped -- match nothing, never the whole library
         return {"total": 0, "exact": 0, "mode": "and", "page": page,
                 "size": size, "q": q, "items": []}
+
+    # a dimension/height filter is a MEASUREMENT query: rows without a
+    # measured dimension must be EXCLUDED, never silently passed through
+    # (unmeasured assets with max_dim 0 once won every size filter)
+    dim_filter = (min_dim > 0 or max_dim < 1e9)
+    h_filter = (min_h > 0 or max_h < 1e9)
+    unmeasured = 0
+
+    def _mesh_item(r, tier):
+        return {
+            "id": r["id"], "name": r["name"], "pack": r["pack"],
+            "source": r["source"], "kind": r["kind"],
+            "fbx": r["fbx"], "fbx_path": r["fbx"],
+            "on_disk": r["on_disk"], "triangles": r["triangles"],
+            "vertices": r["vertices"], "submeshes": r["submeshes"],
+            "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],
+            "max_dim_m": r["max_dim"], "max_dim": r["max_dim"],
+            "height_m": r["bbox_y"],
+            "materials": r["materials"] if isinstance(r["materials"], list)
+                         else [],
+            "texture_count": r["texture_count"],
+            "view_url": "/viewer?file=" + url_quote(r["fbx"]),
+            "themes": r["meta"].get("themes") or [],
+            **_mesh_extras(r),
+            "tier": tier,
+        }
 
     items = []
     or_items = []
@@ -1117,10 +1168,14 @@ def api_meshes(params: dict) -> dict:
             continue
         if theme and theme not in (r["meta"].get("themes") or []):
             continue
-        if r["max_dim"] and not (min_dim <= r["max_dim"] <= max_dim):
-            continue
-        if r["bbox_y"] and not (min_h <= r["bbox_y"] <= max_h):
-            continue
+        if dim_filter or h_filter:
+            if not r["max_dim"] and not r["bbox_y"]:
+                unmeasured += 1
+                continue
+            if r["max_dim"] and not (min_dim <= r["max_dim"] <= max_dim):
+                continue
+            if r["bbox_y"] and not (min_h <= r["bbox_y"] <= max_h):
+                continue
         if r["triangles"] > max_tri:
             continue
         if only_tex and not r["texture_count"]:
@@ -1141,23 +1196,7 @@ def api_meshes(params: dict) -> dict:
                 or_items.append(r)
                 continue
             q_tier = 1 if all(_name_hit(x, name_l) for x in direct) else 2
-        items.append({
-            "id": r["id"], "name": r["name"], "pack": r["pack"],
-            "source": r["source"], "kind": r["kind"],
-            "fbx": r["fbx"], "fbx_path": r["fbx"],
-            "on_disk": r["on_disk"], "triangles": r["triangles"],
-            "vertices": r["vertices"], "submeshes": r["submeshes"],
-            "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],
-            "max_dim_m": r["max_dim"], "max_dim": r["max_dim"],
-            "height_m": r["bbox_y"],
-            "materials": r["materials"] if isinstance(r["materials"], list)
-                         else [],
-            "texture_count": r["texture_count"],
-            "view_url": "/viewer?file=" + url_quote(r["fbx"]),
-            "themes": r["meta"].get("themes") or [],
-            **_mesh_extras(r),
-            "tier": q_tier if qstems else 0,
-        })
+        items.append(_mesh_item(r, q_tier if qstems else 0))
     fallback_ranked = False
     if not items and or_items and qstems:
         # OR fallback, ranked by token RARITY (inverse frequency among the
@@ -1165,25 +1204,14 @@ def api_meshes(params: dict) -> dict:
         # ~24 rows) outranks one hitting only the broad token ('medieval',
         # ~1400 rows). Name hits count double.
         for r in or_items:
-            name_l = (r["name"] or "").lower()
-            searchable = set(r["tags"]) | set(r["meta"].get("stems") or []) \
-                | set(r["meta"].get("themes") or [])
             toks = {x for x in qstems
-                    if _name_hit(x, name_l) or x in searchable}
-            items.append({
-                "id": r["id"], "name": r["name"], "pack": r["pack"],
-                "source": r["source"], "kind": r["kind"], "fbx": r["fbx"],
-                "on_disk": r["on_disk"], "triangles": r["triangles"],
-                "vertices": r["vertices"], "submeshes": r["submeshes"],
-                "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],
-                "max_dim_m": r["max_dim"], "max_dim": r["max_dim"],
-                "materials": r["materials"] if isinstance(r["materials"], list) else [],
-                "texture_count": r["texture_count"],
-                "themes": r["meta"].get("themes") or [],
-                **_mesh_extras(r),
-                "tier": 3,
-                "_toks": toks,
-            })
+                    if _name_hit(x, (r["name"] or "").lower())
+                    or x in (set(r["tags"])
+                             | set(r["meta"].get("stems") or [])
+                             | set(r["meta"].get("themes") or []))}
+            e = _mesh_item(r, 3)
+            e["_toks"] = toks
+            items.append(e)
         freq: dict = {}
         for e in items:
             for t in e["_toks"]:
@@ -1205,12 +1233,18 @@ def api_meshes(params: dict) -> dict:
     total = len(items)
     exact = sum(1 for e in items if e.get("tier", 0) < 3)
     lo = (page - 1) * size
-    return {"total": total,
+    resp = {"total": total,
             "exact": exact if qstems else total,
             "mode": ("or-fallback" if qstems and exact == 0 and total
                      else "and"),
             "page": page, "size": size, "q": q,
             "items": items[lo:lo + size]}
+    if dim_filter or h_filter:
+        # disclose the hidden set: rows excluded because no measurement
+        # exists (the agent should know it is filtering over measured
+        # assets only, and how much it cannot see)
+        resp["unmeasured_excluded"] = unmeasured
+    return resp
 
 
 def api_meshes_packs() -> dict:
@@ -1273,20 +1307,22 @@ def api_meshes_themes() -> dict:
 
 def api_anim_tree() -> dict:
     """Left-panel outliner: the Animation subfolders = packs, with clip counts."""
+    prefix = _anim_prefix()
     conn = db.connect(_DB_PATH)
     rows = conn.execute(
         "SELECT a.id AS id, a.name AS name, COUNT(f.rowid) AS n FROM assets a "
         "JOIN asset_files f ON f.asset_id = a.id "
-        "WHERE a.id LIKE 'pack::Animation/%' AND "
+        "WHERE substr(a.id, 1, ?) = ? AND "
         "(lower(f.relative_path) LIKE '%.fbx' OR lower(f.relative_path) LIKE '%.bvh') "
-        "GROUP BY a.id ORDER BY a.id").fetchall()
+        "GROUP BY a.id ORDER BY a.id",
+        (len(prefix), prefix)).fetchall()
     conn.close()
     return {"rig_body": "Animation/Actor/motion-dummy_male/Render_Dummy.fbx",
             "rig_note": "skeleton-only clips retarget onto this body "
                         "(bone-name match, CC rig family)",
             "folders": [
         {"pack": r["id"],
-         "folder": r["id"][len("pack::Animation/"):],
+         "folder": r["id"][len("pack::"):],
          "name": r["name"], "clips": r["n"]}
         for r in rows]}
 
@@ -1296,8 +1332,9 @@ def api_anim_clips(params: dict) -> dict:
     tier 1 = query in title, tier 2 = related concept in title,
     tier 3 = query in folder name; no query -> everything, folder-sorted."""
     q = (params.get("q") or [""])[0].strip().lower()
+    prefix = _anim_prefix()
     packs = [p for p in ((params.get("packs") or [""])[0]).split("|")
-             if p.startswith("pack::Animation/")]
+             if p.startswith(prefix)]
     try:
         page = max(1, int((params.get("page") or ["1"])[0]))
     except ValueError:
@@ -1307,9 +1344,9 @@ def api_anim_clips(params: dict) -> dict:
     except ValueError:
         size = 24
     conn = db.connect(_DB_PATH)
-    where = ("a.id LIKE 'pack::Animation/%' AND "
+    where = ("substr(a.id, 1, ?) = ? AND "
              "(lower(f.relative_path) LIKE '%.fbx' OR lower(f.relative_path) LIKE '%.bvh')")
-    args: list = []
+    args: list = [len(prefix), prefix]
     if packs:
         where += " AND a.id IN (%s)" % ",".join("?" * len(packs))
         args += packs
@@ -1319,7 +1356,7 @@ def api_anim_clips(params: dict) -> dict:
         "WHERE " + where + " ORDER BY f.relative_path", args).fetchall()
     conn.close()
 
-    qtokens = re.findall(r"[a-z0-9]+", q)
+    qtokens = re.findall(r"[^\W_]+", q, re.UNICODE)
     qstems: set = set()
     for t in qtokens:
         qstems |= _stems(t) | _synonyms(t)
@@ -1339,7 +1376,7 @@ def api_anim_clips(params: dict) -> dict:
     for r in rows:
         base = r["rel"].rsplit("/", 1)[-1]
         stem = base.rsplit(".", 1)[0].lower()
-        folder = r["pack"][len("pack::Animation/"):]
+        folder = r["pack"][len(prefix):]
         if qstems:
             if any(s in stem for s in qstems):
                 tier = 1
@@ -2448,6 +2485,17 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet
         pass
 
+    # a client that declares more body than it sends must not park a
+    # worker thread forever; and a dropped connection must not dump a
+    # traceback per aborted request into the console
+    timeout = 60
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, BrokenPipeError, TimeoutError):
+            self.close_connection = True
+
     def _json(self, payload, code=200):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -2496,14 +2544,17 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(url.query)
         try:
             if url.path == "/":
+                _prefix = _anim_prefix()
                 anim = _pack_thumb.get("pack::Animation/Actor")
                 conn = db.connect(_DB_PATH)
                 aclips = conn.execute(
                     "SELECT COUNT(*) FROM asset_files f JOIN assets a ON a.id=f.asset_id "
-                    "WHERE a.id LIKE 'pack::Animation/%' AND (lower(f.relative_path) "
-                    "LIKE '%.fbx' OR lower(f.relative_path) LIKE '%.bvh')").fetchone()[0]
+                    "WHERE substr(a.id, 1, ?) = ? AND (lower(f.relative_path) "
+                    "LIKE '%.fbx' OR lower(f.relative_path) LIKE '%.bvh')",
+                    (len(_prefix), _prefix)).fetchone()[0]
                 afold = conn.execute(
-                    "SELECT COUNT(*) FROM assets WHERE id LIKE 'pack::Animation/%'").fetchone()[0]
+                    "SELECT COUNT(*) FROM assets WHERE substr(id, 1, ?) = ?",
+                    (len(_prefix), _prefix)).fetchone()[0]
                 apacks = conn.execute("SELECT COUNT(*) FROM collection").fetchone()[0]
                 tcount = conn.execute("SELECT COUNT(*) FROM textures").fetchone()[0]
                 acount = conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]
@@ -2635,9 +2686,16 @@ class Handler(BaseHTTPRequestHandler):
                 if rng and rng.startswith("bytes="):
                     try:
                         sp = rng[6:].split("-")
-                        start = int(sp[0]) if sp[0] else 0
-                        end = int(sp[1]) if len(sp) > 1 and sp[1] else size - 1
-                        end = min(end, size - 1)
+                        if sp[0]:                     # "bytes=A-B" / "bytes=A-"
+                            start = int(sp[0])
+                            end = int(sp[1]) if len(sp) > 1 and sp[1] \
+                                else size - 1
+                        else:                         # "bytes=-N": LAST N bytes
+                            n = int(sp[1]) if len(sp) > 1 and sp[1] else 0
+                            start = max(0, size - n)
+                            end = size - 1
+                        start = max(0, min(start, size - 1))
+                        end = max(start, min(end, size - 1))
                         code = 206
                     except ValueError:
                         start, end, code = 0, size - 1, 200
@@ -2694,11 +2752,21 @@ class Handler(BaseHTTPRequestHandler):
                 if not t.exists():
                     return self._json({"error": "path does not exist"}, 404)
                 if (params.get("dry") or [""])[0] != "1":
-                    if t.is_dir():
-                        os.startfile(str(t))
+                    # platform dispatch: os.startfile/explorer are
+                    # Windows-only and used to raise -> HTTP 500 on
+                    # macOS/Linux, killing every "show in Explorer" button
+                    if sys.platform == "win32":
+                        if t.is_dir():
+                            os.startfile(str(t))
+                        else:
+                            subprocess.Popen(
+                                ["explorer", "/select," + str(t)])
+                    elif sys.platform == "darwin":
+                        args = ["open"] + (["-R"] if not t.is_dir() else []) \
+                            + [str(t)]
+                        subprocess.Popen(args)
                     else:
-                        subprocess.Popen(
-                            ["explorer", "/select," + str(t)])
+                        subprocess.Popen(["xdg-open", str(t)])
                 return self._json({"ok": True, "abs": t.as_posix()})
             elif url.path.startswith("/timg"):
                 # texture previews/maps, jailed to Textures_Materials
@@ -2879,7 +2947,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": err}, 415)
                 pid = body.get("id") or ""
                 surl = (body.get("url") or "").strip()
-                if not re.fullmatch(r"pack::[\w .()/+-]+", pid):
+                if not re.fullmatch(r"pack::[\w .()&!',#%-]+", pid):
                     return self._json({"error": "bad pack id"}, 400)
                 if surl and not (surl.startswith("http://") or surl.startswith("https://")) \
                         or len(surl) > 500:
@@ -2932,7 +3000,7 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self._json({"error": err}, 415)
             ids = [i for i in body.get("ids", [])
-                   if isinstance(i, str) and re.fullmatch(r"pack::[\w .()/+-]+", i)]
+                   if isinstance(i, str) and re.fullmatch(r"pack::[\w .()&!',#%-]+", i)]
             sets, params = [], []
             payload = body.get("set") or {}
             if payload.get("domain") in DOMAINS:
@@ -2969,10 +3037,12 @@ def _loopback_warning(host: str) -> Optional[str]:
         return None
     return (
         f"WARNING: binding to {host} instead of a loopback address.\n"
-        "  Anything that can reach this address can READ your library\n"
-        "  metadata, filenames and thumbnails through this server.\n"
-        "  The Host allow-list accepts loopback names plus this address\n"
-        "  only. Rebind to 127.0.0.1 unless you explicitly wanted this.")
+        "  The Host allow-list accepts ONLY loopback names plus this\n"
+        "  exact address: normal LAN browsers (whose Host is the machine's\n"
+        "  LAN IP/hostname) will be REJECTED with 403. If you meant to\n"
+        "  share Pharos over the network, add that name to the bind host\n"
+        "  AND expect anyone who can reach it to read your library\n"
+        "  metadata, filenames and thumbnails. When in doubt: 127.0.0.1.")
 
 
 def main(argv=None) -> int:
@@ -3044,8 +3114,10 @@ def main(argv=None) -> int:
     # human watching the console never wonders whether it worked
     try:
         _c = db.connect(_DB_PATH)
+        _prefix = _anim_prefix()
         _afold = _c.execute(
-            "SELECT COUNT(*) FROM assets WHERE id LIKE 'pack::Animation/%'"
+            "SELECT COUNT(*) FROM assets WHERE substr(id, 1, ?) = ?",
+            (len(_prefix), _prefix)
         ).fetchone()[0]
         _c.close()
     except Exception:                                     # noqa: BLE001

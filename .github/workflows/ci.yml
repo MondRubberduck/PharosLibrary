@@ -13,7 +13,7 @@ jobs:
       # green" stayed unverifiable for 20+ consecutive runs
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.10", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:

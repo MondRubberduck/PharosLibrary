@@ -13,6 +13,7 @@ new content: `python pharos.py docs`.
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 
 from . import config
@@ -67,13 +68,13 @@ measured against the live registry at that moment.
 
 ## Step 1 — probe the local API (fastest path, prefer it)
 
-    GET http://127.0.0.1:8765/api/stats
+    GET {base}/api/stats
 
 If it answers, use the HTTP API for everything — full reference in
 `AGENT_API.md` (same folder). If it does not answer, the server is
 simply not started; ask the human to run:
 
-    python {repo}/pharos.py serve
+    "{py}" {repo}/pharos.py serve
 
 ## Step 2 — what is in this library (live counts)
 
@@ -85,9 +86,12 @@ simply not started; ask the human to run:
 | Purchases | {collection} owned ({local} on disk) | `/api/collection/items?avail=local` |
 | Animations| {clips} clips ({previews} previewed) | `/api/anim/clips?q=walk` |
 
-Missing/zero sections mean the library genuinely has no such content
-(or its import source is absent) — the system serves them as empty
-results, never errors.
+{unmeasured_note}
+
+A zero section means EITHER the library has no such content OR setup
+never indexed it — the count alone cannot tell them apart. Run
+`"{py}" {repo}/pharos.py doctor` (it names every not-indexed section
+with the command that fills it) before concluding anything is absent.
 
 ## Step 3 — the rules that matter
 
@@ -229,9 +233,20 @@ def generate(db_path: str | None = None, repo_hint: str | None = None) -> list[P
     target = config.AGENT_FILES
     target.mkdir(parents=True, exist_ok=True)
 
+    host = (config.NETWORK or {}).get("host", "127.0.0.1")
+    port = (config.NETWORK or {}).get("port", 8765)
+    base = f"http://{host}:{port}"
+    py = sys.executable
+    c["unmeasured_note"] = (
+        f"**{c.get('unmeasured', 0)} meshes have NO measured dimensions** "
+        "(scan-only/unparseable sources): size filters exclude them, and "
+        "the API response's `unmeasured_excluded` field says how many "
+        "the active filter hides.") if c.get("unmeasured") else ""
     start = START_TEMPLATE.format(
-        library_root=config.LIBRARY_ROOT, generated=stamp, repo=repo, **c)
-    api = API_TEMPLATE.replace("{generated}", stamp)
+        library_root=config.LIBRARY_ROOT, generated=stamp, repo=repo,
+        base=base, py=py, **c)
+    api = (API_TEMPLATE.replace("{generated}", stamp)
+           .replace("http://127.0.0.1:8765", base))
 
     paths = []
     for name, body in (("AGENT_START_HERE.md", start), ("AGENT_API.md", api)):
@@ -244,6 +259,14 @@ def generate(db_path: str | None = None, repo_hint: str | None = None) -> list[P
 
 
 def run_docs(argv=None) -> int:
+    argv = list(argv if argv is not None else sys.argv[2:])
+    # `pharos.py docs --help` used to WRITE the agent files (argv was
+    # ignored entirely) -- consume the standard flags honestly
+    if any(a in ("-h", "--help") for a in argv):
+        print("usage: python pharos.py docs\n"
+              "  regenerate AGENT_START_HERE.md / AGENT_API.md into the "
+              "library's _Agent_Files with live counts")
+        return 0
     for p in generate():
         print(f"wrote {p}")
     return 0

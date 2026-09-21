@@ -176,7 +176,13 @@ def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
         for enc in ("utf-8-sig", "cp1252", "latin-1"):
             try:
                 with open(csv_path, encoding=enc, newline="") as f:
-                    rows = list(csv.DictReader(f))
+                    # delimiter sniff: German/regional Excel exports are
+                    # SEMICOLON-separated; a comma DictReader once imported
+                    # every row as one empty column and reported success
+                    head = f.readline() or ""
+                    f.seek(0)
+                    delim = ";" if head.count(";") > head.count(",") else ","
+                    rows = list(csv.DictReader(f, delimiter=delim))
                 break
             except UnicodeDecodeError:
                 continue

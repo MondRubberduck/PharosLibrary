@@ -66,7 +66,7 @@ async function load(){
   const su=d.pack.source_url||'';
   const search=`https://www.google.com/search?q=${encodeURIComponent((d.pack.vendor?d.pack.vendor+' ':'')+d.pack.name)}`;
   source.innerHTML=`<b style="color:var(--dim);font-weight:500">source:</b> `+
-   (su?`<a href="${esc(su)}" target="_blank" rel="noopener" style="color:#7cc4ff">view where I got it &#8599;</a> · `
+   (su&&/^https?:/.test(su)?`<a href="${esc(su)}" target="_blank" rel="noopener" style="color:#7cc4ff">view where I got it &#8599;</a> · `
       :`<a href="${search}" target="_blank" rel="noopener" style="color:#7cc4ff">find where I got this &#8599;</a> · `)+
    `<input id="su" placeholder="paste store URL of this pack" value="${esc(su)}" size="34"> `+
    `<button id="suSave" style="background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:3px 10px;cursor:pointer">save</button>`;
