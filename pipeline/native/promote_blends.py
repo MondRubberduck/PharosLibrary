@@ -20,7 +20,7 @@ from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import agent_files, library_root, section_root
+from _config import agent_files, library_root, refuse_near_empty, section_root
 AGENT = agent_files()
 BLENDS = os.path.join(T, "native_index_blends.jsonl")
 NATIVE = os.path.join(AGENT, "native_models.jsonl")
@@ -35,6 +35,11 @@ def _covered_section() -> str:
     configured kitbash root, else derived from the library -- never hardcoded.
     """
     root = section_root("kitbash", "PHAROS_KB3D_ROOT")
+    # a configured kit root is only "covered" once its kits are EXPORTED
+    # (init also sets kitbash_root for raw, unexported kits)
+    if root and not glob.glob(os.path.join(root, "*", "Exports",
+                                           "kit_manifest.json")):
+        root = ""
     if not root and os.path.isdir(LIB):
         for top in sorted(os.listdir(LIB)):
             if glob.glob(os.path.join(LIB, top, "*", "Exports", "kit_manifest.json")):
@@ -99,10 +104,7 @@ for line in io.open(BLENDS, encoding="utf-8"):
     by_section[sec] += 1
 
 rows.sort(key=lambda x: (x["pack"] or "", x["name"] or ""))
-if len(rows) < 10:
-    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
-                     "live index with a near-empty scan"
-                     % len(rows))
+refuse_near_empty(len(rows), NATIVE)
 with io.open(NATIVE, "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")

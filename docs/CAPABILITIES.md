@@ -74,7 +74,7 @@ token cost.** Operating manual (setup + build doctrine):
 | Unreal `.uasset` packs | `pipeline/conversion/` (optional; needs UE 5.x + Git Bash) | exports FBX+textures+manifest per pack, metres @ scale 1.0, engine-exact material wiring; source libraries stay read-only (sandbox copy + tree fingerprints) |
 | KitBash-style `.blend` kits | `pipeline/kitbash/` (optional; needs Blender) | one FBX per `_grp` assembly + `kit_manifest.json` |
 | Raw FBX/OBJ/BLEND containers | `pipeline/native/` (optional; needs Blender) | Blender read-only enumeration → measured records |
-| Converted packs anywhere | list their parent dirs in `manifest_roots` config | recipes/wiring join at import; schemas `pharos.pack.export/v2` and `pharos.kb3d.export/v1` (old `kiosk.*` IDs accepted) |
+| Converted packs (any depth inside the library) | found by `pharos.py ingest`, which adds their parent folders to `manifest_roots` and builds the model/kit index | recipes/wiring join at import; schemas `pharos.pack.export/v2` and `pharos.kb3d.export/v1` (old `kiosk.*` IDs accepted) |
 
 ## 4. Onboarding a fresh library (no crawler output at all)
 
@@ -124,9 +124,10 @@ One JSON file (`pharos_config.json`, created by init or copied from
 `thumb_cache_dirs`, `extension_status_file`, `indexer_skip_dirs`,
 `manifest_roots`, `collection_csv`, `network`, `dashboard` curation.
 No owner-specific path exists anywhere in the code; the only absolute
-defaults left are version-pinned STANDARD install locations for optional
-engines (e.g. Blender 5.1 under Program Files, UE 5.7 under the Epic
-directory), every one of them env-overridable. `python pharos.py
+defaults left are STANDARD install locations searched for optional
+engines (Blender: `BLENDER_EXE`, then PATH, then the newest version under
+Program Files or /Applications; Unreal: `UE_EXE`), every one of them
+env-overridable. `python pharos.py
 init` defaults the registry and previews to `~/.pharos/`. Asset files are
 never written: the only writes inside the library root are generated index
 files (`<agent_files>/`, plus `library_index.json` / `library_files.jsonl`
@@ -154,15 +155,12 @@ pipelines own.
   near-empty one: `build_agent_index.py` (`packs.json` and `models.jsonl`),
   `build_availability_catalog.py`, `build_kb3d_index.py`, `gen_index.py`,
   `gen_tex_index.py`, `promote_native.py` and `promote_blends.py` all stop
-  with `FATAL: only N records -- refusing to overwrite a live index` when
-  they would write **fewer than 10 records**. The threshold is uniform:
-  10, not a percentage. The guard is deliberate (a wrong root once
-  overwrote a real library's index with fixture data), and it has a real
-  cost: a library whose section holds fewer than 10 meshes, owned
-  products, kits or native containers cannot build that index with those
-  scripts until it grows. The server-side importers have no such floor and
-  always run, so `init` / `serve` / `scanner.py` and the API are
-  unaffected.
+  with `FATAL: only N ... -- refusing to overwrite the live index` when a
+  result of **fewer than 10 records, and under half of the live index**,
+  would replace a live index that holds 10 or more. The guard is
+  deliberate (a wrong root once overwrote a real library's index with
+  fixture data). A first build, a small library, or one that lost a pack
+  or two is written normally.
 - The audio taxonomy cannot be overridden: `classify()` in
   `pipeline/agent_index/classify.py` consults only its RULES table.
   Hand-checked re-categorisations of known misfiles exist, but they live
@@ -183,6 +181,7 @@ pipelines own.
 
 ## 8. Regenerating everything
 
-The SQLite registry is derived data. Delete it and restart: importers
-rebuild every table from the sources above. The same applies to previews
-(re-render on view) and the agent index files (crawler-side builders).
+The SQLite registry is derived data. Delete `assets.sqlite` and run
+`python pharos.py ingest`: it re-runs the scanner and the animation
+indexer, rebuilds the model/kit indexes and every table from the library.
+Previews re-render on view.

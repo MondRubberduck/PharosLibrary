@@ -218,6 +218,110 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
+# Which library a registry belongs to. The default registry dir
+# (~/.pharos/registry) is shared by every clone and every library on a
+# machine: a registry left behind by ANOTHER library must stop the writers,
+# never be silently mixed into (laptop run: 1,475 foreign rows kept).
+# ---------------------------------------------------------------------------
+
+REGISTRY_META_DDL = ("CREATE TABLE IF NOT EXISTS registry_meta "
+                     "(key TEXT PRIMARY KEY, value TEXT)")
+_OWNER_SAMPLE = 200          # absolute paths read per table (unstamped case)
+
+
+def _norm_path(p) -> str:
+    """Separator-normalised path text, case-folded on Windows."""
+    import os
+    return os.path.normcase(os.path.normpath(str(p)))
+
+
+def path_under(path, root) -> bool:
+    """True when `path` is `root` or lies below it (Path.relative_to on
+    normalised text -- never a string-prefix test)."""
+    try:
+        Path(_norm_path(path)).relative_to(Path(_norm_path(root)))
+        return True
+    except ValueError:
+        return False
+
+
+def registry_foreign(db_path: str | Path, library_root: str | Path) -> str:
+    """'' when the registry may serve `library_root`, else what it belongs to.
+
+    Read-only. A stamped registry is foreign when its stamp names another
+    root. An unstamped one (every registry written before the stamp existed)
+    is foreign when it holds rows and NONE of a sample of their absolute
+    paths lies under `library_root`; a single row under the root makes it
+    this library's (it gets stamped after the next successful ingest/boot).
+    """
+    p = Path(db_path)
+    if not p.is_file():
+        return ""
+    roots = (Path(library_root), Path(library_root).resolve())
+    try:
+        # plain path, SELECT only: a file:// URI can't open a UNC registry
+        conn = sqlite3.connect(str(p))
+    except sqlite3.Error:
+        return ""
+    sample: list[str] = []
+    try:
+        try:
+            row = conn.execute("SELECT value FROM registry_meta "
+                               "WHERE key = 'library_root'").fetchone()
+        except sqlite3.Error:
+            row = None
+        if row and row[0]:
+            # the stamped library, or a subfolder of this root: every row
+            # lies under this root (init re-run one folder higher)
+            if any(path_under(row[0], r) for r in roots):
+                return ""
+            return f"stamped for {row[0]}"
+        for sql in ("SELECT fbx FROM meshes WHERE fbx != '' LIMIT ?",
+                    "SELECT folder FROM textures WHERE folder != '' LIMIT ?",
+                    "SELECT hero_file_path FROM assets LIMIT ?"):
+            try:
+                sample += [v for (v,) in conn.execute(sql, (_OWNER_SAMPLE,))
+                           if v and Path(v).is_absolute()]
+            except sqlite3.Error:
+                continue                     # table absent in this registry
+    finally:
+        conn.close()
+    if not sample or any(path_under(v, r) for v in sample for r in roots):
+        return ""
+    return f"not stamped; its rows point elsewhere, e.g. {sample[0]}"
+
+
+def foreign_registry_message(db_path: str | Path, owner: str,
+                             library_root: str | Path,
+                             lead: str = "STOP") -> str:
+    """The one message every writer prints before it refuses (exit 2)."""
+    reg = Path(db_path)
+    return (f"{lead}: the registry {reg.parent} belongs to another library "
+            f"({owner}), not to library_root {library_root}.\n"
+            f"Fix ONE of:\n"
+            f"  1. delete the registry file {reg} (and {reg.name}-wal / "
+            f"{reg.name}-shm if present) -- it is derived data; the next "
+            f"ingest rebuilds it for this library\n"
+            f"  2. give this library its own registry:\n"
+            f'     python pharos.py init "{library_root}" '
+            f'--registry-dir "<new folder>" --force')
+
+
+def stamp_registry(db_path: str | Path, library_root: str | Path) -> None:
+    """Record the library this registry belongs to (after a successful
+    ingest or server boot; read by registry_foreign)."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(REGISTRY_META_DDL)
+        conn.execute("INSERT OR REPLACE INTO registry_meta (key, value) "
+                     "VALUES ('library_root', ?)",
+                     (str(Path(library_root).resolve()),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Write helpers
 # ---------------------------------------------------------------------------
 
@@ -537,6 +641,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     for key, value in db_stats(conn).items():
         print(f"  {key}: {value}")
     return 0
+
+
+def anim_clip_count(conn: sqlite3.Connection, section: Optional[str],
+                    packs: bool = False) -> int:
+    """FBX/BVH clips under the animation section (packs=True: its packs).
+
+    `section` is the configured folder name (config.SECTIONS["animation"]);
+    pack ids start with 'pack::<section>' -- the same substr-prefix rule
+    as browse._anim_prefix, so doctor, agent docs and MCP agree with the
+    API. A hard-coded 'Animation' read 0 on any other folder name."""
+    prefix = "pack::" + (section or "Animation")
+    if packs:
+        sql = "SELECT COUNT(*) FROM assets a WHERE substr(a.id, 1, ?) = ?"
+    else:
+        sql = ("SELECT COUNT(*) FROM asset_files f JOIN assets a "
+               "ON a.id = f.asset_id WHERE substr(a.id, 1, ?) = ? "
+               "AND (lower(f.relative_path) LIKE '%.fbx' "
+               "OR lower(f.relative_path) LIKE '%.bvh')")
+    return conn.execute(sql, (len(prefix), prefix)).fetchone()[0]
 
 
 if __name__ == "__main__":

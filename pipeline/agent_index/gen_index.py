@@ -6,7 +6,7 @@ import classify as C
 
 # Root of the audio library.  Overridable, but it MUST exist -- a wrong root
 # used to produce a perfectly valid-looking index that pointed at nothing.
-from _config import section_root
+from _config import refuse_near_empty, section_root
 AA = section_root("audio", "AGENT_AUDIO_ROOT")
 TMP = os.path.dirname(os.path.abspath(__file__))
 if not os.path.isdir(AA):
@@ -76,10 +76,7 @@ meta = meta["files"]
 # LOUD target: these outputs are LIVE index files; a wrong root here once
 # silently overwrote a real library's index with fixture data
 print("WRITE TARGET: %s (library_files.jsonl + library_index.json)" % AA)
-if len(meta) < 10:
-    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
-                     "live index with a near-empty scan (wrong root?)"
-                     % len(meta))
+refuse_near_empty(len(meta), os.path.join(AA, "library_files.jsonl"))
 
 DESC = {
     "Alarms": "Alarms, sirens, warnings, buzzers and emergency tones.",

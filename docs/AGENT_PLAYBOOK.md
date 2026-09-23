@@ -23,18 +23,19 @@ user who cannot trust the result.
    - `pipeline/README.md` (which chain needs which engine)
    - the generated `AGENT_START_HERE.md` + `AGENT_API.md` in the library
      (if absent: run Phase-1 step 2 first, then `python pharos.py docs`)
-2. **Onboard + crawl**:
-   - `python pharos.py init "<library root>"` — read its INGESTION
-     SUMMARY carefully; it lists folders that matched NO section.
-   - Fix sections in `pharos_config.json` by hand where detection was
-     wrong (the config is the contract, not the detector).
-   - Scan model folders: `python service/asset_service/scanner.py
-     "<folder>"` per folder from the summary.
+2. **Onboard + crawl** (full contract: `docs/STARTING_PROMPT.md` +
+   `docs/AGENT_SETUP_BRIEF.md`):
+   - `python pharos.py doctor`, then `python pharos.py init "<library
+     root>"` — read its INGESTION SUMMARY; it lists folders that matched
+     NO section. Fix sections in `pharos_config.json` by hand where
+     detection was wrong (the config is the contract, not the detector).
+   - `python pharos.py ingest` — runs the scanner, the animation indexer,
+     the model/kit index builds and every importer, rewrites the agent
+     docs, and prints the ASK YOUR USER block.
    - Start the server and READ the startup banner: it ends with
      `INGESTION COMPLETE -- collection=N textures=N audio=N meshes=N`
      plus a `NOT INDEXED` list. That banner is the definition of
      "ingestion is done" — relay it to your user verbatim.
-   - Regenerate agent docs: `python pharos.py docs`.
 3. **INTERVIEW the user** (mandatory — do not build anything yet):
    - "These folders were NOT indexed: … — should I scan/ignore them?"
    - "Are these ALL your assets, or is there more on other drives?"

@@ -16,7 +16,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from . import config
+from . import config, db
 
 
 def _counts(db_path: str) -> dict:
@@ -45,10 +45,12 @@ def _counts(db_path: str) -> dict:
     one("audio", "SELECT COUNT(*) FROM audio")
     one("collection", "SELECT COUNT(*) FROM collection")
     one("local", "SELECT COUNT(*) FROM collection WHERE availability='local'")
-    one("clips", "SELECT COUNT(*) FROM asset_files f JOIN assets a "
-                 "ON a.id=f.asset_id WHERE a.id LIKE 'pack::Animation/%' "
-                 "AND (lower(f.relative_path) LIKE '%.fbx' "
-                 "OR lower(f.relative_path) LIKE '%.bvh')")
+    # same "no measured dimensions" rule as the API's unmeasured_excluded
+    one("unmeasured", "SELECT COUNT(*) FROM meshes WHERE COALESCE(max_dim, 0) = 0")
+    try:
+        out["clips"] = db.anim_clip_count(conn, config.SECTIONS.get("animation"))
+    except sqlite3.OperationalError:
+        out["clips"] = 0
     conn.close()
     try:
         out["previews"] = len(list(config.PREVIEW_DIR.glob("*.webm"))) \
@@ -74,7 +76,9 @@ If it answers, use the HTTP API for everything — full reference in
 `AGENT_API.md` (same folder). If it does not answer, the server is
 simply not started; ask the human to run:
 
-    "{py}" {repo}/pharos.py serve
+    "{py}" "{repo}/pharos.py" serve
+
+(PowerShell: put `& ` in front of that line.)
 
 ## Step 2 — what is in this library (live counts)
 
@@ -90,7 +94,7 @@ simply not started; ask the human to run:
 
 A zero section means EITHER the library has no such content OR setup
 never indexed it — the count alone cannot tell them apart. Run
-`"{py}" {repo}/pharos.py doctor` (it names every not-indexed section
+`"{py}" "{repo}/pharos.py" doctor` (it names every not-indexed section
 with the command that fills it) before concluding anything is absent.
 
 ## Step 3 — the rules that matter
@@ -112,7 +116,9 @@ generate procedurally and say so.
 1. The library on disk is READ-ONLY for you. Locate and read files,
    never modify/move/delete them.
 2. Prefer the API over disk walks — that is the entire point of this
-   system (measured ~90% token savings vs filesystem crawling).
+   system: sizes, triangle counts and material recipes are in no text
+   file on disk. Keep mesh pages small (`size=8`): every mesh item
+   carries its full material recipe (~1–4k tokens).
 3. Dimension filters are METRES. `max_tri` is a triangle budget.
 4. Availability: `local` = on disk now; `owned-not-downloaded` =
    purchasable — surface it as a requisition list, never substitute
@@ -138,7 +144,7 @@ RELATIVE — resolve against the section roots in `pharos_config.json`.
 - New content onboarding, config layout, and every capability: the
   repo's `docs/CAPABILITIES.md` (source of truth for what the system
   can and cannot do).
-- Regenerate this file after imports: `python {repo}/pharos.py docs`.
+- Regenerate this file after imports: `python "{repo}/pharos.py" docs`.
 """
 
 API_TEMPLATE = """# AGENT_API — Pharos HTTP API reference
@@ -171,6 +177,10 @@ the configured roots — outside paths return 404/403.
 
 ## B. Mesh item fields (the ones that matter)
 
+Token budget: a mesh item is ~1–4k tokens because it carries the full
+`recipe`; browse with `size=8` (the minimum page) and refine the query
+instead of paging through hundreds of meshes.
+
 `fbx`/`fbx_path` absolute path · `bbox_m` [x,y,z] extents in metres ·
 `max_dim_m`/`height_m` · `triangles` · `materials` (slot names) ·
 `texture_count` · `themes` · `view_url` (3D preview) · `recipe` (per-slot
@@ -202,7 +212,8 @@ references is served and flagged, never dropped.
   placeholder, never a `default`-source emissive/opacity.
 
 **Dimension provenance** (they are NOT all measured the same way):
-`leartes` — exporter-reported per-mesh boxes (metres, trustworthy);
+`leartes` — any Unreal pack converted by chain 1 (historical name, not a
+vendor filter): exporter-reported per-mesh boxes (metres, trustworthy);
 `kitbash3d` — Blender world-space AABB over the placed assembly (axis
 order differs from the FBX file's own header); `scan` — file-level
 extents from the raw FBX/OBJ in RAW FILE AXES, not normalised to Z-up

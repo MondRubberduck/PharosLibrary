@@ -310,8 +310,9 @@ def test_fbx_dims_poison_returns_none():
 def test_scanner_survives_poison_fbx():
     """One corrupt FBX must never abort the run (it used to raise
     IndexError out of fbx_dims and lose every row). Contract: exit 0,
-    the good file keeps REAL dims, the poison file gets a zero-dims row
-    (recorded, not guessed) instead of fabricated numbers."""
+    the good file keeps REAL dims, the poison file gets a row whose counts
+    are NULL = unknown (recorded, not guessed; S1: a 0 passed every
+    triangle filter as "costs nothing")."""
     import sqlite3
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -335,15 +336,18 @@ def test_scanner_survives_poison_fbx():
             f"both files must be scanned, got {set(rows)}"
         assert rows["good"]["triangles"] == 1, rows["good"]
         assert abs(rows["good"]["bbox_x"] - 1.0) < 0.05, rows["good"]
-        assert rows["poison"]["triangles"] == 0, \
-            f"poison must yield zeros, not fabricated numbers: {rows['poison']}"
+        assert rows["poison"]["triangles"] is None, \
+            f"poison must yield NULL (unknown), not 0 or fabricated numbers: {rows['poison']}"
 
 
 def test_promote_native_never_reads_blends_file():
     """native_index_blends.jsonl sorts AFTER every timestamped run
     ('b' > '2'); a plain newest-wins glob fed blend records to this
     wholesale overwrite and erased every FBX/OBJ container record."""
-    native_dir = REPO / "pipeline" / "native"
+    # run from a temp COPY of pipeline/: the script reads its inputs from
+    # its own folder, and the real one may hold a user's chain-3 output
+    tmp_native = _native_copy()
+    native_dir = tmp_native / "pipeline" / "native"
     ts = native_dir / "native_index_20260101-000000.jsonl"
     bl = native_dir / "native_index_blends.jsonl"
 
@@ -363,10 +367,12 @@ def test_promote_native_never_reads_blends_file():
             bl.write_text("\n".join(row(f"FROMBLENDS_{i}")
                                     for i in range(12)) + "\n",
                           encoding="utf-8")
-            r = _run("pipeline/native/promote_native.py", {
-                "PHAROS_CONFIG": str(Path(tmp) / "missing.json"),
-                "PHAROS_LIBRARY_ROOT": str(lib),
-            })
+            r = subprocess.run(
+                [sys.executable, "-B", str(native_dir / "promote_native.py")],
+                capture_output=True, text=True, timeout=300,
+                env={**os.environ,
+                     "PHAROS_CONFIG": str(Path(tmp) / "missing.json"),
+                     "PHAROS_LIBRARY_ROOT": str(lib)})
             assert r.returncode == 0, (r.stderr or "")[-300:]
             out = lib / "_Agent_Files" / "native_models.jsonl"
             assert out.is_file(), "index not written"
@@ -374,11 +380,7 @@ def test_promote_native_never_reads_blends_file():
             assert "FROMBLENDS" not in body, "blend records leaked in"
             assert "ts_0" in body, "timestamped records missing"
         finally:
-            for f in (ts, bl):
-                try:
-                    f.unlink()
-                except OSError:
-                    pass
+            shutil.rmtree(tmp_native, ignore_errors=True)
 
 
 def test_version_single_source_of_truth():
@@ -618,6 +620,20 @@ def test_gen_index_cache_is_root_stamped():
         assert "stale" in (res.stdout or ""), (res.stdout or "")[:200]
 
 
+def _native_copy(dest=None) -> Path:
+    """A throwaway copy of pipeline/_config.py + pipeline/native/: the
+    chain-3 scripts read and write next to themselves, and the REAL
+    pipeline/native/ may hold a user's chain-3 output -- tests must never
+    write or delete there."""
+    dest = Path(dest or tempfile.mkdtemp(prefix="pharos_native_"))
+    (dest / "pipeline" / "native").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REPO / "pipeline" / "_config.py", dest / "pipeline")
+    for f in (REPO / "pipeline" / "native").iterdir():
+        if f.is_file() and f.suffix in (".py", ".sh"):
+            shutil.copy2(f, dest / "pipeline" / "native" / f.name)
+    return dest
+
+
 def test_native_worklist_is_lf_only():
     """The worklist was written in Windows text mode; Git Bash read -r
     kept the \\r and Blender silently failed on 'path\\r'."""
@@ -626,32 +642,17 @@ def test_native_worklist_is_lf_only():
         lib = tmp / "lib"
         (lib / "Kits" / "K1").mkdir(parents=True)
         (lib / "Kits" / "K1" / "kit.blend").write_bytes(b"fake")
-        # park any real scratch (gitignored, but never destroy owner data)
-        native = REPO / "pipeline" / "native"
-        parked = {}
-        for name in ("native_manifest.json", "native_blends.txt"):
-            real = native / name
-            if real.exists():
-                parked[name] = real.read_bytes()
-        try:
-            r = _run("pipeline/native/make_native_manifest2.py", {
-                "PHAROS_CONFIG": str(tmp / "missing.json"),
-                "PHAROS_LIBRARY_ROOT": str(lib)})
-            assert r.returncode == 0, (r.stderr or "")[-300:]
-            data = (native / "native_blends.txt").read_bytes()
-            assert data and b"\r" not in data, data[:80]
-            mdata = (native / "native_manifest.json").read_bytes()
-            assert b"\r" not in mdata
-        finally:
-            for name in ("native_manifest.json", "native_blends.txt"):
-                p = native / name
-                if name in parked:
-                    p.write_bytes(parked[name])
-                else:
-                    try:
-                        p.unlink()
-                    except OSError:
-                        pass
+        native = _native_copy(tmp / "copy") / "pipeline" / "native"
+        r = subprocess.run(
+            [sys.executable, "-B", str(native / "make_native_manifest2.py")],
+            capture_output=True, text=True, timeout=300,
+            env={**os.environ, "PHAROS_CONFIG": str(tmp / "missing.json"),
+                 "PHAROS_LIBRARY_ROOT": str(lib)})
+        assert r.returncode == 0, (r.stderr or "")[-300:]
+        data = (native / "native_blends.txt").read_bytes()
+        assert data and b"\r" not in data, data[:80]
+        mdata = (native / "native_manifest.json").read_bytes()
+        assert b"\r" not in mdata
 
 
 def test_native_driver_fails_loudly():
@@ -670,54 +671,27 @@ def test_native_driver_fails_loudly():
                         'echo "record" >> "$AMNATIVE_OUT"\n'
                         'exit "${STUB_RC:-0}"\n', encoding="utf-8")
         stub.chmod(0o755)
-        native = REPO / "pipeline" / "native"
-        parked = {}
-        for name in ("native_manifest.json", "native_blends.txt"):
-            real = native / name
-            if real.exists():
-                parked[name] = real.read_bytes()
-        try:
-            (native / "native_manifest.json").write_text(json.dumps({
-                "importable": [], "blend_files": [
-                    {"path": "X:/nope/kit.blend", "section": "S"}]}),
-                encoding="utf-8")
-            (native / "native_blends.txt").write_text(
-                "X:/nope/kit.blend\nS\n", encoding="utf-8")
-            import os as _os
-            base_env = {**_os.environ,
-                        "BLENDER_EXE": str(stub),
-                        "PHAROS_CONFIG": str(tmp / "missing.json")}
-            r_bad = subprocess.run(
-                [bash, str(native / "index_native_all.sh")],
-                capture_output=True, text=True, cwd=str(REPO),
-                timeout=120, env={**base_env, "STUB_RC": "1"})
-            assert r_bad.returncode == 9, \
-                (r_bad.returncode, (r_bad.stdout or "")[-200:])
-            r_ok = subprocess.run(
-                [bash, str(native / "index_native_all.sh")],
-                capture_output=True, text=True, cwd=str(REPO),
-                timeout=120, env=base_env)
-            assert r_ok.returncode == 0, (r_ok.stdout or "")[-200:]
-        finally:
-            for name in ("native_manifest.json", "native_blends.txt"):
-                p = native / name
-                if name in parked:
-                    p.write_bytes(parked[name])
-                else:
-                    try:
-                        p.unlink()
-                    except OSError:
-                        pass
-            for junk in native.glob("native_index_*.jsonl"):
-                try:
-                    junk.unlink()
-                except OSError:
-                    pass
-            for junk in native.glob("native_blender_*.log"):
-                try:
-                    junk.unlink()
-                except OSError:
-                    pass
+        native = _native_copy(tmp / "copy") / "pipeline" / "native"
+        (native / "native_manifest.json").write_text(json.dumps({
+            "importable": [], "blend_files": [
+                {"path": "X:/nope/kit.blend", "section": "S"}]}),
+            encoding="utf-8")
+        (native / "native_blends.txt").write_text(
+            "X:/nope/kit.blend\nS\n", encoding="utf-8")
+        base_env = {**os.environ,
+                    "BLENDER_EXE": str(stub),
+                    "PHAROS_CONFIG": str(tmp / "missing.json")}
+        r_bad = subprocess.run(
+            [bash, str(native / "index_native_all.sh")],
+            capture_output=True, text=True, cwd=str(REPO),
+            timeout=120, env={**base_env, "STUB_RC": "1"})
+        assert r_bad.returncode == 9, \
+            (r_bad.returncode, (r_bad.stdout or "")[-200:])
+        r_ok = subprocess.run(
+            [bash, str(native / "index_native_all.sh")],
+            capture_output=True, text=True, cwd=str(REPO),
+            timeout=120, env=base_env)
+        assert r_ok.returncode == 0, (r_ok.stdout or "")[-200:]
 
 
 def test_indexer_prune_scoped_to_its_root():
@@ -1166,6 +1140,794 @@ def test_not_indexed_dirs_claims_absolute_sections():
                "scan_folders": ["Models"]}
         got = _not_indexed_dirs(root, cfg)
         assert got == ["Stuff"], f"unclaimed folders {got} (want ['Stuff'])"
+        # the root as the user typed it may be UNRESOLVED (macOS /var ->
+        # /private/var, Windows 8.3 RUNNER~1) while config/DB paths are
+        # resolved: a claimed folder must still count as claimed
+        (root / "Kits").mkdir()
+        cfg = {"kitbash_root": str((root / "Kits").resolve())}
+        unresolved = root / "Stuff" / ".."
+        got = _not_indexed_dirs(unresolved, cfg)
+        assert "Kits" not in got, \
+            f"resolved kitbash_root not matched against an unresolved " \
+            f"root: {got}"
+
+
+# ---- RELEASE: R3 (near-empty guard vs small libraries) ----
+
+_GUARDED_WRITERS = ("pipeline/agent_index/build_agent_index.py",
+                    "pipeline/agent_index/build_availability_catalog.py",
+                    "pipeline/agent_index/gen_index.py",
+                    "pipeline/agent_index/gen_tex_index.py",
+                    "pipeline/kitbash/build_kb3d_index.py",
+                    "pipeline/native/promote_blends.py",
+                    "pipeline/native/promote_native.py")
+
+
+def test_index_guard_allows_small_first_build():
+    """R3: every index writer refused ANY result under 10 rows, so a
+    library with 2 converted packs (or 1 kit, or 5 sounds) could never
+    get an index at all. The guard exists to stop a wrong root from
+    REPLACING a real live index -- it must refuse only that."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        lib = tmp / "lib"
+        for i in range(2):
+            ex = lib / f"FX_Small_{i}" / "Exports"
+            (ex / "FBX").mkdir(parents=True)
+            (ex / "FBX" / "m.fbx").write_bytes(_min_fbx())
+            (ex / "manifest.json").write_text(json.dumps({
+                "schema": "pharos.pack.export/v2", "pack": f"FX_Small_{i}",
+                "meshes": [{"name": "m", "kind": "StaticMesh",
+                            "fbx": "FBX/m.fbx", "triangles": 1,
+                            "vertices": 3, "bbox_m": [1.0, 1.0, 1.0],
+                            "materials": []}]}), encoding="utf-8")
+        env = {"PHAROS_CONFIG": str(tmp / "missing_config.json"),
+               "PHAROS_LIBRARY_ROOT": str(lib)}
+        r = _run("pipeline/agent_index/build_agent_index.py", env)
+        assert r.returncode == 0 and \
+            (lib / "_Agent_Files" / "models.jsonl").is_file(), \
+            f"2-pack first build refused: {(r.stderr or r.stdout)[-160:]}"
+        # ...but a wrong root must still not REPLACE a real live index
+        live = lib / "_Agent_Files" / "models.jsonl"
+        live.write_text("".join(json.dumps({"pack": "P", "name": f"n{k}"})
+                                + "\n" for k in range(40)), encoding="utf-8")
+        r = _run("pipeline/agent_index/build_agent_index.py", env)
+        assert r.returncode != 0 and "FATAL" in (r.stderr + r.stdout), \
+            "a near-empty scan replaced a 40-row live index"
+        assert len(live.read_text(encoding="utf-8").splitlines()) == 40
+    import importlib.util as ilu
+    spec = ilu.spec_from_file_location("pipeline_cfg",
+                                       REPO / "pipeline" / "_config.py")
+    cfg = ilu.module_from_spec(spec)
+    spec.loader.exec_module(cfg)
+    assert hasattr(cfg, "refuse_near_empty"), "no shared guard helper"
+    # a small library that LOSES a pack or two is not "near-empty":
+    # 11 -> 9 must be written, 40 -> 2 (a wrong root) must not
+    with tempfile.TemporaryDirectory() as tmp:
+        live = Path(tmp) / "idx.jsonl"
+        live.write_text("{}\n" * 11, encoding="utf-8")
+        try:
+            cfg.refuse_near_empty(9, str(live))
+        except SystemExit as exc:
+            raise AssertionError(f"11 -> 9 rows refused: {exc}") from exc
+        live.write_text("{}\n" * 40, encoding="utf-8")
+        try:
+            cfg.refuse_near_empty(2, str(live))
+            raise AssertionError("40 -> 2 rows was NOT refused")
+        except SystemExit:
+            pass
+    for w in _GUARDED_WRITERS:
+        src = (REPO / w).read_text(encoding="utf-8")
+        assert "refuse_near_empty(" in src and "< 10:" not in src, \
+            f"{w} still carries its own unconditional <10 guard"
+
+
+def test_agent_index_finds_nested_packs():
+    """R2 follow-up: ingest detects converted packs at ANY depth, but the
+    agent index only looked at <top>/Exports and <top>/<pack>/Exports, so
+    a pack under <top>/<category>/<pack>/Exports got a recipe and no mesh
+    row. It must also honour the configured agent_files folder."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        lib = tmp / "lib"
+        ex = lib / "FX_Unreal" / "FX_Envs" / "FX_Deep" / "Exports"
+        (ex / "FBX").mkdir(parents=True)
+        (ex / "FBX" / "m.fbx").write_bytes(_min_fbx())
+        (ex / "manifest.json").write_text(json.dumps({
+            "schema": "pharos.pack.export/v2", "pack": "FX_Deep",
+            "meshes": [{"name": "deep_m", "kind": "StaticMesh",
+                        "fbx": "FBX/m.fbx", "triangles": 1, "vertices": 3,
+                        "bbox_m": [1.0, 1.0, 1.0], "materials": []}]}),
+            encoding="utf-8")
+        cfg = tmp / "cfg.json"
+        cfg.write_text(json.dumps({"agent_files": "FX_Index"}),
+                       encoding="utf-8")
+        r = _run("pipeline/agent_index/build_agent_index.py", {
+            "PHAROS_CONFIG": str(cfg), "PHAROS_LIBRARY_ROOT": str(lib)})
+        out = lib / "FX_Index" / "models.jsonl"
+        assert r.returncode == 0 and out.is_file(), \
+            f"index not written to the configured agent_files folder: " \
+            f"rc={r.returncode} {(r.stderr or r.stdout)[-160:]}"
+        names = [json.loads(x)["name"] for x in
+                 out.read_text(encoding="utf-8").splitlines() if x.strip()]
+        assert names == ["deep_m"], f"nested pack rows: {names}"
+
+
+def test_registry_stamp_and_message():
+    """R1 (review): (a) re-running init one folder HIGHER -- the natural
+    answer to "are these ALL your folders?" -- was refused as foreign
+    although every row lies under the new root; narrowing to a subfolder
+    must stay foreign. (b) The STOP message told users to delete the whole
+    registry FOLDER, which also holds the rendered animation previews.
+    (c) Registries were opened through file:// URIs, which SQLite cannot
+    open on a network (UNC) path: serve crashed, the R1 check failed open."""
+    from asset_service import db
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        lib = tmp / "lib"
+        (lib / "Sub" / "Deeper").mkdir(parents=True)
+        reg = tmp / "reg" / "assets.sqlite"
+        reg.parent.mkdir()
+        db.stamp_registry(reg, lib / "Sub")
+        assert db.registry_foreign(reg, lib / "Sub") == ""
+        assert db.registry_foreign(reg, lib) == "", \
+            "a registry stamped for a SUBFOLDER was refused for its parent"
+        assert db.registry_foreign(reg, lib / "Sub" / "Deeper"), \
+            "narrowing the library to a subfolder must stay foreign"
+        assert db.registry_foreign(reg, tmp / "other"), "other root accepted"
+        msg = db.foreign_registry_message(reg, "stamped for X", lib)
+        assert "assets.sqlite" in msg and "delete the folder" not in msg, \
+            f"STOP message must name the registry FILE: {msg[:200]}"
+    for f in ("service/asset_service/db.py", "service/asset_service/init.py",
+              "service/pharos_mcp_server.py",
+              "pipeline/agent_index/build_availability_catalog.py"):
+        src = (REPO / f).read_text(encoding="utf-8")
+        assert "as_uri()" not in src and "?mode=r" not in src, \
+            f"{f} opens the registry via a file: URI (fails on UNC paths)"
+
+
+def test_pipeline_native_follows_config():
+    """R4/S2 (review): chain 3 hard-coded the `Animation` folder (clip FBX
+    in any other section became 'native models'), and promote_blends
+    excluded the kitbash_root section as 'covered by kit exports' even
+    when those kits were never exported (S2 now detects raw kits)."""
+    src = (REPO / "pipeline" / "native" / "make_native_manifest2.py").read_text(
+        encoding="utf-8")
+    assert '{"Animation", "_Agent_Files"}' not in src, \
+        "make_native_manifest2 still hard-codes the Animation section"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "pipeline" / "native").mkdir(parents=True)
+        shutil.copy2(REPO / "pipeline" / "_config.py", tmp / "pipeline")
+        shutil.copy2(REPO / "pipeline" / "native" / "promote_blends.py",
+                     tmp / "pipeline" / "native")
+        lib = tmp / "lib"
+        kit = lib / "Kits" / "FX_Kit" / "kb3d_fxkit.blender.native"
+        kit.mkdir(parents=True)
+        (kit / "fxkit.blend").write_bytes(b"BLENDER-stub")
+        (lib / "_Agent_Files").mkdir()
+        (tmp / "pipeline" / "native" / "native_index_blends.jsonl").write_text(
+            "".join(json.dumps({
+                "section": "Kits", "object": f"FX_Bldg_{i}",
+                "source": str(kit / "fxkit.blend"), "triangles": 100,
+                "vertices": 60, "bbox_m": [1, 1, 1], "materials": []}) + "\n"
+                for i in range(3)), encoding="utf-8")
+        cfg = tmp / "cfg.json"
+        cfg.write_text(json.dumps({"library_root": str(lib),
+                                   "kitbash_root": str(lib / "Kits")}),
+                       encoding="utf-8")
+        env = dict(os.environ, PHAROS_CONFIG=str(cfg),
+                   PHAROS_LIBRARY_ROOT=str(lib))
+        r = subprocess.run([sys.executable, "-B", str(
+            tmp / "pipeline" / "native" / "promote_blends.py")],
+            capture_output=True, text=True, env=env, timeout=120)
+        out = lib / "_Agent_Files" / "native_models.jsonl"
+        rows = [json.loads(x) for x in out.read_text(encoding="utf-8")
+                .splitlines() if x.strip()] if out.is_file() else []
+        assert len(rows) == 3, \
+            f"unexported kit blends dropped as 'covered': rc={r.returncode} " \
+            f"rows={len(rows)} {(r.stdout + r.stderr)[-160:]}"
+
+
+def test_init_force_keeps_outside_roots_on_same_library():
+    """R2e (review): `init --force` now rebuilds detection-owned keys, but
+    a manifest root / kit root the user set OUTSIDE the library (converted
+    packs on another drive) can't be re-detected and was silently dropped;
+    switching to ANOTHER library must still drop them all."""
+    from asset_service import config, init
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        lib, outside = tmp / "lib", tmp / "elsewhere" / "Converted"
+        lib.mkdir()
+        outside.mkdir(parents=True)
+        old = {"library_root": str(lib),
+               "manifest_roots": [str(outside), str(lib / "Gone")],
+               "kitbash_root": str(tmp / "elsewhere" / "Kits"),
+               "sections": {}}
+        real_load = config.load
+        try:
+            config.load = lambda: json.loads(json.dumps(old))
+            rep = init.detect(lib)
+            cfg = init.build_config(rep, tmp / "reg")
+            assert cfg.get("manifest_roots") == [str(outside)] and \
+                cfg.get("kitbash_root") == old["kitbash_root"], \
+                f"same library: outside roots lost: {cfg.get('manifest_roots')}" \
+                f" / {cfg.get('kitbash_root')}"
+            other = tmp / "other_lib"
+            other.mkdir()
+            cfg2 = init.build_config(init.detect(other), tmp / "reg")
+            assert not cfg2.get("manifest_roots") and \
+                not cfg2.get("kitbash_root"), \
+                f"another library inherited roots: {cfg2.get('manifest_roots')}"
+        finally:
+            config.load = real_load
+
+
+def test_console_survives_non_latin_names():
+    """Release check: a folder name outside the console's code page (CJK
+    on a cp1252 Windows pipe -- how every agent reads output) killed init,
+    ingest and the scanner mid-run with UnicodeEncodeError."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        models = tmp / "models"
+        pack = models / "日本のパック" / "Exports"
+        pack.mkdir(parents=True)
+        (pack / "manifest.json").write_text(
+            '{"schema": "pharos.pack.export/v2", "meshes": []}',
+            encoding="utf-8")
+        (models / "plate.obj").write_text(
+            "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+        env["PYTHONIOENCODING"] = "cp1252"   # the Windows pipe, on any OS
+        r = subprocess.run(
+            [sys.executable, "-B",
+             str(REPO / "service" / "asset_service" / "scanner.py"),
+             str(models), "--db", str(tmp / "reg.sqlite")],
+            capture_output=True, env=env, timeout=120)
+        err = (r.stderr or b"").decode("cp1252", "replace")
+        assert r.returncode == 0 and "UnicodeEncodeError" not in err, \
+            f"scanner died on a non-Latin folder name: rc={r.returncode} " \
+            f"{err[-200:]}"
+
+
+def test_config_with_bom_is_read():
+    """Release check: Windows PowerShell 5.1 (Set-Content/Out-File -Encoding
+    utf8) writes a UTF-8 BOM; such a pharos_config.json was silently read as
+    'not configured' and doctor then advised init --force."""
+    from asset_service import config
+    import importlib.util as ilu
+    spec = ilu.spec_from_file_location("pipeline_cfg_bom",
+                                       REPO / "pipeline" / "_config.py")
+    pcfg = ilu.module_from_spec(spec)
+    spec.loader.exec_module(pcfg)
+    with tempfile.TemporaryDirectory() as tmp:
+        f = Path(tmp) / "pharos_config.json"
+        f.write_bytes(b"\xef\xbb\xbf" + json.dumps(
+            {"library_root": "X:/fx_lib", "registry_dir": "X:/fx_reg"}).encode())
+        real = config._CONFIG_FILE
+        try:
+            config._CONFIG_FILE = f
+            got = config.load().get("library_root")
+        finally:
+            config._CONFIG_FILE = real
+        assert got == "X:/fx_lib", f"service config.load read {got!r}"
+        old = os.environ.get("PHAROS_CONFIG")
+        os.environ["PHAROS_CONFIG"] = str(f)
+        try:
+            got2 = pcfg.load().get("library_root")
+        finally:
+            if old is None:
+                os.environ.pop("PHAROS_CONFIG", None)
+            else:
+                os.environ["PHAROS_CONFIG"] = old
+        assert got2 == "X:/fx_lib", f"pipeline _config.load read {got2!r}"
+
+
+def test_kit_without_metadata_pass_does_not_kill_import():
+    """Release check: chain 2's export step writes a group's `materials`
+    as a COUNT; only the metadata pass turns it into a list. A kit whose
+    metadata pass never ran (or failed) raised TypeError and stopped the
+    whole mesh import -- no converted mesh of ANY pack was imported."""
+    from asset_service import meshes_import as mi
+    try:
+        rec = mi._finish_recipe(mi._kb3d_recipe(
+            {"materials": 3, "texture_files": ["M_FX_basecolor.png"]},
+            Path("fx_kit")))
+    except TypeError as exc:
+        raise AssertionError(f"kit group with materials=3 crashed: {exc}")
+    assert rec["slots"] == [], rec
+
+
+def test_scan_rows_of_a_later_converted_pack_are_removed():
+    """Release check: ingest #1 scans a model folder holding a RAW pack
+    (a vendor FBX inside it becomes a scan row); after the user converts
+    the pack, the scanner skips it -- but the old scan row survived every
+    rebuild, so the mesh showed up twice (one copy without its recipe)."""
+    import sqlite3
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        models = tmp / "models"
+        raw = models / "FX_Pack" / "Source"
+        raw.mkdir(parents=True)
+        (raw / "fx_crate.fbx").write_bytes(_min_fbx())
+        (models / "loose.obj").write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+                                          encoding="utf-8")
+        db = tmp / "reg.sqlite"
+        scan = lambda: subprocess.run(                          # noqa: E731
+            [sys.executable, "-B",
+             str(REPO / "service" / "asset_service" / "scanner.py"),
+             str(models), "--db", str(db)],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        assert scan().returncode == 0
+        ex = models / "FX_Pack" / "Exports"
+        ex.mkdir()
+        (ex / "manifest.json").write_text(
+            '{"schema": "pharos.pack.export/v2", "meshes": []}',
+            encoding="utf-8")
+        r = scan()
+        conn = sqlite3.connect(str(db))
+        names = sorted(n for (n,) in conn.execute(
+            "SELECT name FROM meshes WHERE source='scan'"))
+        conn.close()
+        assert r.returncode == 0 and names == ["loose"], \
+            f"scan rows after the pack was converted: {names}"
+
+
+def test_tex_index_is_library_neutral():
+    """Release check: the texture index wrote the AUTHOR's folder layout
+    ("4K_Textures_Gumroad holds the bulk ...") into every user's library,
+    sending their agent to a folder that does not exist."""
+    src = (REPO / "pipeline" / "agent_index" / "gen_tex_index.py").read_text(
+        encoding="utf-8")
+    assert "Gumroad" not in src and "earlier downsize" not in src, \
+        "gen_tex_index.py still ships the author's library layout"
+
+
+def test_purchase_csv_headers_people_type():
+    """Release check: the setup question asks for a purchase CSV with
+    'Name/URL/Price columns', but the importer read only the exact
+    spellings 'Name', 'Product URL', 'Price (USD)' -- a CSV made as told
+    imported with no links and no prices (lowercase: no names either)."""
+    import sqlite3
+    from asset_service import collection_import as ci, config
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        csvp = tmp / "purchases.csv"
+        csvp.write_text("name,url,price\nFX Barrel Pack,https://example.com/b,"
+                        "9.99\n", encoding="utf-8")
+        saved = config.AVAILABILITY_JSONL
+        try:
+            config.AVAILABILITY_JSONL = tmp / "no_availability.jsonl"
+            ci.import_collection(tmp / "reg.sqlite", csvp)
+        finally:
+            config.AVAILABILITY_JSONL = saved
+        conn = sqlite3.connect(str(tmp / "reg.sqlite"))
+        rows = conn.execute("SELECT name, url, price FROM collection").fetchall()
+        conn.close()
+        assert rows == [("FX Barrel Pack", "https://example.com/b", "9.99")], \
+            f"imported {rows}"
+
+
+def test_chain3_does_not_reindex_what_ingest_covers():
+    """Release check (stranger E2E): chain 3 re-enumerated folders the
+    scanner already indexes and the kit-export FBX that kb3d_models.jsonl
+    already covers (a kit listed 3x), and its driver's second pass wrote
+    .blend objects into the file promote_native publishes wholesale."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        lib = tmp / "lib"
+        for rel in ("Scanned/a.fbx", "Blends/b.fbx", "Blends/x.blend",
+                    "Kits/K1/Exports/FBX/g.fbx", "Deep/Cat/P1/Exports/FBX/m.fbx"):
+            (lib / rel).parent.mkdir(parents=True, exist_ok=True)
+            (lib / rel).write_bytes(b"stub")
+        (lib / "Kits/K1/Exports/kit_manifest.json").write_text("{}")
+        (lib / "Deep/Cat/P1/Exports/manifest.json").write_text("{}")
+        cfg = tmp / "cfg.json"
+        cfg.write_text(json.dumps({"library_root": str(lib),
+                                   "scan_folders": ["Scanned"]}),
+                       encoding="utf-8")
+        native = _native_copy(tmp / "copy") / "pipeline" / "native"
+        r = subprocess.run(
+            [sys.executable, "-B", str(native / "make_native_manifest2.py")],
+            capture_output=True, text=True, timeout=300,
+            env={**os.environ, "PHAROS_CONFIG": str(cfg),
+                 "PHAROS_LIBRARY_ROOT": str(lib)})
+        assert r.returncode == 0, (r.stderr or "")[-300:]
+        man = json.loads((native / "native_manifest.json").read_text(
+            encoding="utf-8"))
+        got = sorted(Path(i["rel"]).as_posix() for i in man["importable"])
+        assert got == ["Blends/b.fbx"], f"chain-3 worklist: {got}"
+    drv = (REPO / "pipeline" / "native" / "index_native_all.sh").read_text(
+        encoding="utf-8")
+    assert "AMNATIVE_SECTION" not in drv, \
+        "index_native_all.sh still writes .blend objects into the " \
+        "promoted native index (run_blends.py owns that pass)"
+
+
+def test_kit_index_covers_every_kit_root():
+    """Release check: kits in TWO parent folders -- init keeps one
+    kitbash_root, ingest records both as manifest roots, but the kit index
+    only globbed kitbash_root: the second folder's kits had recipes and
+    no mesh rows, silently."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        lib = tmp / "lib"
+        for parent, kit in (("KitsA", "FX_KitA"), ("KitsB", "FX_KitB")):
+            ex = lib / parent / kit / "Exports"
+            (ex / "FBX").mkdir(parents=True)
+            (ex / "FBX" / "g.fbx").write_bytes(b"Kaydara FBX Binary  \x00")
+            (ex / "kit_manifest.json").write_text(json.dumps({
+                "schema": "pharos.kb3d.export/v1", "kit": kit,
+                "groups": [{"group": f"{kit}_g", "fbx": "FBX/g.fbx",
+                            "triangles": 10, "vertices": 5, "submeshes": 1,
+                            "materials": ["M_1"], "texture_count": 0}]}),
+                encoding="utf-8")
+        cfg = tmp / "cfg.json"
+        cfg.write_text(json.dumps({
+            "library_root": str(lib), "kitbash_root": str(lib / "KitsA"),
+            "manifest_roots": [str(lib / "KitsA"), str(lib / "KitsB")]}),
+            encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if k != "PHAROS_KB3D_ROOT"}
+        r = subprocess.run(
+            [sys.executable, "-B",
+             str(REPO / "pipeline" / "kitbash" / "build_kb3d_index.py")],
+            capture_output=True, text=True, timeout=300,
+            env={**env, "PHAROS_CONFIG": str(cfg),
+                 "PHAROS_LIBRARY_ROOT": str(lib)})
+        out = lib / "_Agent_Files" / "kb3d_models.jsonl"
+        rows = [json.loads(x) for x in out.read_text(encoding="utf-8")
+                .splitlines() if x.strip()] if out.is_file() else []
+        packs = sorted({x.get("pack") for x in rows})
+        assert r.returncode == 0 and packs == ["FX_KitA", "FX_KitB"], \
+            f"kit index packs {packs} rc={r.returncode} " \
+            f"{(r.stderr or r.stdout)[-160:]}"
+
+
+# ---- RELEASE: R5 R6 (PIPE lane: UE verifier metrics, Blender finder) ----
+# (PIPE lane inserts its tests directly below this line)
+
+def test_verifier_derives_static_metrics_from_fbx():
+    """R5: UE 5.5 has no StaticMesh.get_num_vertices, so the exporter
+    wrote vertices: null for EVERY static mesh and the verifier failed
+    the whole pack (relink exit 7) although every FBX was fine. A null
+    static-mesh count is derived from the exported FBX (same rule as
+    SkeletalMesh triangles); an FBX that does not parse still FAILS."""
+    with tempfile.TemporaryDirectory() as tmp:
+        exports = Path(tmp) / "SmPack" / "Exports"
+        (exports / "FBX").mkdir(parents=True)
+        (exports / "FBX" / "a.fbx").write_bytes(_min_fbx())
+        (exports / "FBX" / "b.fbx").write_bytes(_min_fbx())
+        man = {
+            "schema": "pharos.pack.export/v2", "pack": "SmPack",
+            "meshes": [
+                {"name": "a", "kind": "StaticMesh", "fbx": "FBX/a.fbx",
+                 "dimension_method": "engine",
+                 "triangles": 1, "vertices": None,
+                 "bbox_m": [1.0, 1.0, 0.5], "materials": []},
+                {"name": "b", "kind": "StaticMesh", "fbx": "FBX/b.fbx",
+                 "dimension_method": "engine",
+                 "triangles": None, "vertices": None,
+                 "bbox_m": [1.0, 1.0, 0.5], "materials": []},
+            ],
+            "textures": [],
+            "counts": {"static_mesh": 2, "skeletal_mesh": 0,
+                       "fbx_written": 2, "texture_files_written": 0,
+                       "failures": 0},
+            "wiring": {"method": "ue-param", "slots_total": 0,
+                       "slots_resolved": 0, "slots_unresolved": 0},
+        }
+        (exports / "manifest.json").write_text(json.dumps(man),
+                                               encoding="utf-8")
+        r = _verify(exports)
+        out = r.stdout or ""
+        assert r.returncode == 0 and "null metrics=0" in out, \
+            f"null static-mesh counts not derived from the FBX: " \
+            f"rc={r.returncode} {out[-300:]}"
+        # an FBX that does not parse leaves nothing to derive: still FAIL
+        (exports / "FBX" / "b.fbx").write_bytes(_poison_fbx())
+        r2 = _verify(exports)
+        assert r2.returncode != 0 and "null metrics=2" in (r2.stdout or ""), \
+            (r2.stdout or "")[-300:]
+
+
+def test_export_pack_warns_on_missing_metric_method():
+    """R5: static_mesh_metrics skipped a missing engine method SILENTLY,
+    so a pack full of null vertex counts carried no hint why. The
+    exporter only runs inside Unreal: test the function in isolation."""
+    import ast
+    src = (REPO / "pipeline" / "conversion" / "export_pack.py").read_text(
+        encoding="utf-8")
+    fn = next((n for n in ast.parse(src).body
+               if isinstance(n, ast.FunctionDef)
+               and n.name == "static_mesh_metrics"), None)
+    assert fn is not None, "static_mesh_metrics not found in export_pack.py"
+    warned = []
+    ns = {"log_warn": warned.append}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]),
+                 "export_pack.py", "exec"), ns)
+
+    class _Mesh:       # UE 5.5 shape: triangle count yes, vertex method gone
+        def get_name(self):
+            return "SM_Fixture"
+
+        def get_num_triangles(self, lod):
+            return 12
+
+        def get_num_lods(self):
+            return 1
+
+    out = ns["static_mesh_metrics"](_Mesh())
+    assert out["triangles"] == 12 and out["vertices"] is None, out
+    assert any("get_num_vertices" in w for w in warned), \
+        f"missing engine method skipped silently (warnings: {warned})"
+
+
+def _pipeline_config(name: str):
+    import importlib.util as ilu
+    spec = ilu.spec_from_file_location(name, REPO / "pipeline" / "_config.py")
+    cfg = ilu.module_from_spec(spec)
+    spec.loader.exec_module(cfg)
+    return cfg
+
+
+def test_blender_exe_finder():
+    """R6: pipeline scripts defaulted to exactly `Blender 5.1` and died
+    on any other install. One finder: BLENDER_EXE (only when it is a
+    file) > PATH > highest-versioned Program Files install (5.10 beats
+    5.9) > macOS app bundle > ""."""
+    cfg = _pipeline_config("pipeline_cfg_r6")
+    assert hasattr(cfg, "blender_exe"), "pipeline/_config.py has no blender_exe()"
+    assert hasattr(cfg, "BLENDER_WIN_ROOT") and hasattr(cfg, "BLENDER_MAC_APP"), \
+        "install locations are not module constants"
+    saved = {k: os.environ.get(k) for k in ("BLENDER_EXE", "PATH")}
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        try:
+            exe = tmp / "my-blender.exe"
+            exe.write_bytes(b"")
+            os.environ["BLENDER_EXE"] = str(exe)
+            assert cfg.blender_exe() == str(exe), "an existing BLENDER_EXE must win"
+            # below: nothing on PATH, a fake Program Files tree, no mac app
+            (tmp / "empty").mkdir()
+            os.environ["PATH"] = str(tmp / "empty")
+            cfg.BLENDER_WIN_ROOT = str(tmp / "BF")
+            cfg.BLENDER_MAC_APP = str(tmp / "no.app" / "Blender")
+            os.environ["BLENDER_EXE"] = str(tmp / "gone.exe")
+            got = cfg.blender_exe()
+            assert got == "", f"a missing BLENDER_EXE must be ignored, got {got!r}"
+            for ver in ("4.2", "5.9", "5.10"):
+                d = tmp / "BF" / f"Blender {ver}"
+                d.mkdir(parents=True)
+                (d / "blender.exe").write_bytes(b"")
+            got = cfg.blender_exe()
+            assert got and Path(got).parent.name == "Blender 5.10", \
+                f"picked {got!r}, want the highest version (5.10)"
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+_BLENDER_SCRIPTS = ("pipeline/kitbash/export_all_kb3d.py",
+                    "pipeline/kitbash/export_kb3d_rest.py",
+                    "pipeline/kitbash/run_kb3d_metadata.py",
+                    "pipeline/native/run_blends.py")
+
+
+def test_pipeline_scripts_use_blender_finder():
+    """R6: no pipeline script pins a versioned Blender install path; with
+    no Blender found each Python driver stops with ONE line naming
+    BLENDER_EXE (not a FileNotFoundError traceback). The drivers run from
+    a temp copy, so no real kit or worklist can ever be touched."""
+    import re
+    pin = re.compile(r"Blender Foundation[\\/]+Blender \d")
+    for f in sorted((REPO / "pipeline").rglob("*")):
+        if f.suffix not in (".py", ".sh") or "__pycache__" in f.parts:
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        for n, line in enumerate(text.splitlines(), 1):
+            code = line.split("#", 1)[0]    # comments/examples may name one
+            assert not pin.search(code), \
+                f"{f.relative_to(REPO).as_posix()}:{n} pins a Blender install path"
+    for rel in _BLENDER_SCRIPTS + ("pipeline/native/index_native_all.sh",
+                                    "pipeline/conversion/convert_packs.sh"):
+        assert "blender_exe" in (REPO / rel).read_text(encoding="utf-8"), \
+            f"{rel} does not use _config.blender_exe()"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "pipeline").mkdir()
+        shutil.copy2(REPO / "pipeline" / "_config.py", tmp / "pipeline")
+        for rel in _BLENDER_SCRIPTS:
+            (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO / rel, tmp / rel)
+        (tmp / "kits").mkdir()
+        (tmp / "empty").mkdir()
+        env = {**os.environ, "PATH": str(tmp / "empty"),
+               "PHAROS_CONFIG": str(tmp / "missing.json"),
+               "PHAROS_KB3D_ROOT": str(tmp / "kits")}
+        env.pop("BLENDER_EXE", None)
+        pre = ("import runpy, sys; sys.path.insert(0, sys.argv[1]); "
+               "import _config; _config.BLENDER_WIN_ROOT = sys.argv[3]; "
+               "_config.BLENDER_MAC_APP = sys.argv[3]; "
+               "runpy.run_path(sys.argv[2], run_name='__main__')")
+        for rel in _BLENDER_SCRIPTS:
+            r = subprocess.run(
+                [sys.executable, "-B", "-c", pre, str(tmp / "pipeline"),
+                 str(tmp / rel), str(tmp / "empty")],
+                capture_output=True, text=True, cwd=str(tmp), timeout=120,
+                env=env)
+            said = (r.stdout or "") + (r.stderr or "")
+            assert r.returncode != 0 and "BLENDER_EXE" in said \
+                and "Traceback" not in said, \
+                f"{rel}: rc={r.returncode} {said[-200:]}"
+
+
+# ---- RELEASE: R4 C12 (ANIM lane: animation section, doctor Blender) ----
+# (ANIM lane inserts its tests directly below this line)
+
+def test_anim_counts_follow_configured_section():
+    """R4: the animation section folder is configurable, but doctor, the
+    agent docs and MCP counted only 'pack::Animation/%': a library whose
+    clips live in e.g. 'Mocap' read 0 clips and doctor never said READY.
+    All counts must use the configured section, and agree with the API."""
+    import sqlite3
+    from asset_service import agent_docs, browse, config, db, doctor
+    assert hasattr(db, "anim_clip_count"), "no shared db.anim_clip_count"
+    with tempfile.TemporaryDirectory() as td:
+        dbp = Path(td) / "a.sqlite"
+        conn = db.init_db(dbp)
+        packs = {"pack::Mocap/Walks": ("Mocap/Walks/w1.fbx",
+                                       "Mocap/Walks/w2.BVH",
+                                       "Mocap/Walks/notes.txt"),
+                 "pack::Mocap": ("Mocap/loose.fbx",),
+                 "pack::Props/Crates": ("Props/Crates/crate.fbx",)}
+        for pid, files in packs.items():
+            conn.execute(
+                "INSERT INTO assets (id, name, canonical_root, "
+                "hero_file_path, domain, sub_category, content_hash) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (pid, pid[6:], td, files[0], "Props", "Misc", pid))
+            conn.executemany(
+                "INSERT INTO asset_files (asset_id, relative_path, file_type)"
+                " VALUES (?,?,?)", [(pid, f, "anim") for f in files])
+        conn.execute("CREATE TABLE meshes (pack TEXT, max_dim REAL)")
+        conn.executemany("INSERT INTO meshes VALUES (?,?)",
+                         [("P", None), ("P", 0), ("P", 1.5)])
+        conn.commit()
+        try:
+            assert db.anim_clip_count(conn, "Mocap") == 3, \
+                db.anim_clip_count(conn, "Mocap")
+            assert db.anim_clip_count(conn, "Mocap", packs=True) == 2
+            assert db.anim_clip_count(conn, "Animation") == 0
+        finally:
+            conn.close()
+        old_sec, old_db = config.SECTIONS.get("animation"), browse._DB_PATH
+        config.SECTIONS["animation"] = "Mocap"
+        browse._DB_PATH = str(dbp)
+        try:
+            counts, _ = doctor._section_counts(str(dbp))
+            assert counts.get("anim_packs") == 2, \
+                f"doctor anim_packs={counts.get('anim_packs')} (want 2)"
+            c = agent_docs._counts(str(dbp))
+            api = browse.api_anim_clips({})["total"]
+            assert c["clips"] == api == 3, f"docs={c['clips']} api={api}"
+            assert c.get("unmeasured") == 2, \
+                f"docs unmeasured={c.get('unmeasured')} (want 2)"
+            try:
+                import importlib.util as ilu
+                spec = ilu.spec_from_file_location(
+                    "pharos_mcp_anim", str(REPO / "service" /
+                                           "pharos_mcp_server.py"))
+                srv = ilu.module_from_spec(spec)
+                spec.loader.exec_module(srv)
+            except Exception as exc:               # noqa: BLE001
+                assert os.environ.get("PHAROS_REQUIRE_MCP") != "1", \
+                    f"PHAROS_REQUIRE_MCP=1 but MCP did not load: {exc}"
+                srv = None
+            if srv is not None:
+                mc = sqlite3.connect(str(dbp))
+                try:
+                    n = srv._animation_clip_count(mc)
+                finally:
+                    mc.close()
+                assert n == 3, f"MCP animation_clips={n} (want 3)"
+        finally:
+            config.SECTIONS["animation"] = old_sec
+            browse._DB_PATH = old_db
+
+
+def test_no_hardcoded_animation_section():
+    """R4 source guard: 'Animation' is only the DEFAULT section name; no
+    count query and no served rig/clip path may spell it out."""
+    import re
+    svc = REPO / "service"
+    for rel in ("asset_service/doctor.py", "asset_service/agent_docs.py",
+                "pharos_mcp_server.py", "asset_service/browse.py"):
+        src = (svc / rel).read_text(encoding="utf-8")
+        assert "pack::Animation/" not in src, \
+            f"{rel} still hard-codes the pack::Animation/ prefix"
+    src = (svc / "asset_service" / "browse.py").read_text(encoding="utf-8")
+    hits = re.findall(r"""['"]Animation/""", src)
+    assert not hits, f"browse.py: {len(hits)} literal 'Animation/...' paths"
+
+
+def test_rig_path_follows_section_and_exists():
+    """R4: the retarget rig is one library's own asset, hard-coded under
+    'Animation/': every other library 404'd on it and /batchrender said
+    'DONE -- 0 rendered, 0 failed'. The rig path now derives from the
+    configured section, is used only when the file exists, reaches the
+    pages from the server, and a batch run with no lane counts failures."""
+    from asset_service import browse
+    assert hasattr(browse, "_rig_rel") and hasattr(browse, "_with_rig"), \
+        "no rig-path resolver / page filler"
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        assert browse._rig_rel("Mocap", root) == "", "absent rig not ''"
+        rig = root / "Mocap" / browse._RIG_SUBPATH
+        rig.parent.mkdir(parents=True)
+        rig.write_bytes(b"x")
+        assert browse._rig_rel("Mocap", root) == \
+            "Mocap/" + browse._RIG_SUBPATH
+        assert browse._rig_rel("Animation", root) == ""
+    orig = browse._rig_rel
+    try:
+        browse._rig_rel = lambda *a, **k: ""
+        for name in ("VIEWER_PAGE", "ANIM_PAGE", "GLTEST_PAGE", "BATCH_PAGE"):
+            page = getattr(browse, name)
+            assert "{{RIG_REL}}" in page, f"{name}: rig not server-filled"
+            assert "{{RIG_REL}}" not in browse._with_rig(page), name
+        assert 'DUMMY=""' in browse._with_rig(browse.BATCH_PAGE)
+        browse._rig_rel = lambda *a, **k: 'M"x</script>'
+        assert '"M\\"x\\u003c/script>"' in browse._with_rig(
+            browse.BATCH_PAGE), "rig path not escaped for a JS string"
+    finally:
+        browse._rig_rel = orig
+    assert "if(!lanes.length)" in browse.BATCH_PAGE, \
+        "/batchrender with no render lane must count every clip as failed"
+
+
+def test_doctor_honours_blender_exe():
+    """C12: doctor's docstring says Blender is found via BLENDER_EXE first,
+    but _find_blender() ignored it. An existing file wins; a set-but-
+    missing path is ignored (falls through to PATH / install dirs). The
+    install-dir pick is version-aware (lexical sort chose 5.9 over 5.10)."""
+    from asset_service import doctor
+    saved = {k: os.environ.get(k) for k in ("BLENDER_EXE", "PATH")}
+    old_root = getattr(doctor, "BLENDER_WIN_ROOT", None)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        exe = tmp / "blender-custom.exe"
+        exe.write_bytes(b"")
+        missing = str(tmp / "missing" / "blender.exe")
+        try:
+            os.environ["BLENDER_EXE"] = str(exe)
+            got = doctor._find_blender()
+            assert got == str(exe), f"BLENDER_EXE ignored: got {got!r}"
+            os.environ["BLENDER_EXE"] = missing
+            assert doctor._find_blender() != missing, \
+                "a set-but-missing BLENDER_EXE must be ignored"
+            assert old_root is not None, "no BLENDER_WIN_ROOT constant"
+            (tmp / "empty").mkdir()
+            os.environ["PATH"] = str(tmp / "empty")   # nothing on PATH
+            doctor.BLENDER_WIN_ROOT = str(tmp / "BF")
+            for ver in ("4.2", "5.9", "5.10"):
+                d = tmp / "BF" / f"Blender {ver}"
+                d.mkdir(parents=True)
+                (d / "blender.exe").write_bytes(b"")
+            got = doctor._find_blender()
+            assert got and Path(got).parent.name == "Blender 5.10", \
+                f"picked {got!r}, want the highest version (5.10)"
+        finally:
+            if old_root is not None:
+                doctor.BLENDER_WIN_ROOT = old_root
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 if __name__ == "__main__":

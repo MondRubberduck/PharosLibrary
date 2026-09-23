@@ -14,7 +14,7 @@ import collections, glob, io, json, os, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import agent_files, library_root
+from _config import agent_files, library_root, refuse_near_empty
 AGENT = agent_files()
 LIB = library_root() or "."
 T = str(Path(__file__).resolve().parent)
@@ -71,10 +71,7 @@ for line in io.open(SRC, encoding="utf-8"):
     })
 
 rows.sort(key=lambda x: (x["pack"] or "", x["name"] or ""))
-if len(rows) < 10:
-    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
-                     "live index with a near-empty scan"
-                     % len(rows))
+refuse_near_empty(len(rows), OUT)
 with io.open(OUT, "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")

@@ -31,6 +31,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -59,9 +60,9 @@ def _section_counts(db_path: str) -> tuple[dict, str]:
             except sqlite3.OperationalError:
                 out[tbl] = None          # table not created yet
         try:
-            out["anim_packs"] = conn.execute(
-                "SELECT COUNT(*) FROM assets WHERE id LIKE 'pack::Animation/%'"
-            ).fetchone()[0]
+            from . import db     # configured section, same rule as the API
+            out["anim_packs"] = db.anim_clip_count(
+                conn, config.SECTIONS.get("animation"), packs=True)
         except sqlite3.OperationalError:
             out["anim_packs"] = None
     finally:
@@ -69,15 +70,29 @@ def _section_counts(db_path: str) -> tuple[dict, str]:
     return out, "ok"
 
 
+# Windows install root searched by _find_blender (a module constant so a
+# test can point it at a fake tree)
+BLENDER_WIN_ROOT = "C:/Program Files/Blender Foundation"
+
+
+def _blender_version(exe: str) -> tuple:
+    """(5, 10) from '.../Blender 5.10/blender.exe': 5.10 beats 5.9."""
+    m = re.search(r"\d+(?:\.\d+)*", Path(exe).parent.name)
+    return tuple(int(x) for x in m.group(0).split(".")) if m else ()
+
+
 def _find_blender() -> str:
+    env = os.environ.get("BLENDER_EXE", "").strip()
+    if env and Path(env).is_file():      # a set-but-missing path is ignored
+        return env
     cand = shutil.which("blender")
     if cand:
         return cand
-    for pat in ("C:/Program Files/Blender Foundation/Blender */blender.exe",
+    for pat in (BLENDER_WIN_ROOT + "/Blender */blender.exe",
                 "/usr/bin/blender", "/Applications/Blender.app/Contents/MacOS/Blender"):
-        hits = sorted(glob.glob(pat))
+        hits = glob.glob(pat)
         if hits:
-            return hits[-1]
+            return max(hits, key=_blender_version)
     return ""
 
 
@@ -167,8 +182,22 @@ def run_doctor(argv=None) -> int:
                     "content here, fill it:", empty_fill[key]))
             else:
                 checks.append(_check(f"section:{key}", "ok", f"{n} rows"))
-        checks.append(_check("registry", "ok",
-                             f"schema v{counts.get('schema')} at {db_path}"))
+        # a registry another library left in this folder: ingest and serve
+        # refuse it, so the setup is not usable until it is replaced
+        from . import db
+        owner = db.registry_foreign(db_path, lib) if lib else ""
+        if owner:
+            checks.append(_check(
+                "registry", "fail",
+                db.foreign_registry_message(db_path, owner, lib,
+                                            lead="FOREIGN").splitlines()[0],
+                f"delete the registry file {db_path} (derived data), "
+                f'or: python pharos.py init "{lib}" --registry-dir '
+                f'"<new folder>" --force'))
+        else:
+            checks.append(_check(
+                "registry", "ok",
+                f"schema v{counts.get('schema')} at {db_path}"))
 
     # ---- library sections on disk ----------------------------------------
     if lib and Path(lib).is_dir():

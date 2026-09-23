@@ -6,9 +6,15 @@ plugin, nothing** — scene builds run headless via
 `blender --background --factory-startup --python scene_builder.py`.
 This config is only for YOUR agent client (Claude Desktop, Cursor, …).
 
+Install the one extra package first (the HTTP API needs nothing):
+
+```bash
+python -m pip install "mcp<2"
+```
+
 The server resolves its own paths, so the working directory does not
-matter — `python` must simply find the repo. If plain `python` is not
-on PATH, use the absolute interpreter path.
+matter: point your client at `service/pharos_mcp_server.py` by absolute
+path. If plain `python` is not on PATH, use the absolute interpreter path.
 
 ## Claude Desktop / claude_desktop_config.json
 
@@ -17,8 +23,7 @@ on PATH, use the absolute interpreter path.
   "mcpServers": {
     "pharos": {
       "command": "python",
-      "args": ["-m", "service.pharos_mcp_server"],
-      "cwd": "C:/path/to/PharosLibrary"
+      "args": ["C:/path/to/PharosLibrary/service/pharos_mcp_server.py"]
     }
   }
 }
@@ -31,15 +36,12 @@ on PATH, use the absolute interpreter path.
   "mcpServers": {
     "pharos": {
       "command": "python",
-      "args": ["-m", "service.pharos_mcp_server"],
-      "env": { "PYTHONPATH": "C:/path/to/PharosLibrary" }
+      "args": ["C:/path/to/PharosLibrary/service/pharos_mcp_server.py"]
     }
   }
 }
 ```
 
-(If your client supports a `cwd` key, you may use it instead of
-`PYTHONPATH`.)
 
 ## Windows notes
 

@@ -7,6 +7,9 @@ What runs AUTOMATICALLY (no engine, no consent needed):
     scanner.py   on every detected model folder AND on the audio section
                  (when no crawl index exists yet)
     indexer.py   on the library root (animation clip packs)
+    agent index  build_agent_index.py / build_kb3d_index.py when a converted
+                 pack's Exports manifest is newer than its _Agent_Files index
+                 (detected manifest roots are ADDED to pharos_config.json)
     importers    collection / textures / audio / meshes (same order the
                  server uses at startup)
     docs         AGENT_START_HERE.md / AGENT_API.md with live counts
@@ -16,7 +19,8 @@ these are printed as QUESTIONS for the running agent to relay:
     chain 1      UE pack crawl (needs UE 5.x + the local sandbox)
     chain 2      KitBash3D kit export (needs Blender; restructures nothing)
     chain 3      .blend / native container enumeration (needs Blender)
-    chain 4      crawl-quality audio/texture indexes (needs a vision crawl)
+    chain 4      richer audio/texture indexes from file and folder names
+                 (pure Python, minutes; writes index files into those sections)
 
 Safety: same rules as the app -- the library is read-only except
 _Agent_Files/ and Exports/; the registry is derived data; scanner rows
@@ -26,6 +30,8 @@ survive every rebuild.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,6 +52,26 @@ def _run(cmd: list[str], dry: bool) -> int:
         print(f"  WARNING: exit {r.returncode} -- continuing with the "
               f"remaining steps", flush=True)
     return r.returncode
+
+
+def _norm(p) -> str:
+    return os.path.normcase(os.path.abspath(str(p)))
+
+
+def _index_packs(index: Path) -> set:
+    """The Exports folders an agent index was built from (from each row's
+    fbx path; rows without an Exports ancestor are ignored)."""
+    out = set()
+    for line in index.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            fbx = (json.loads(line) or {}).get("fbx") or ""
+        except ValueError:
+            continue
+        parts = Path(fbx.replace("\\", "/")).parts
+        if "Exports" in parts:
+            i = len(parts) - 1 - parts[::-1].index("Exports")
+            out.add(_norm(Path(*parts[:i + 1])))
+    return out
 
 
 def run_ingest(argv=None) -> int:
@@ -69,14 +95,30 @@ def run_ingest(argv=None) -> int:
     root = Path(lib)
     py = sys.executable
 
+    # a registry left behind by ANOTHER library (the default registry dir
+    # is shared machine-wide): stop before any chain writes into it
+    from asset_service import db
+    owner = db.registry_foreign(config.DB_PATH, root)
+    if owner:
+        print(db.foreign_registry_message(config.DB_PATH, owner, root))
+        return 2
+
     print(f"pharos ingest -- library: {root}"
           f"{'  (DRY RUN)' if dry else ''}")
     report = detect(root)
     picks = report["sections"]
-    print(f"  sections detected: "
-          f"animation={picks.get('animation', ['-'])[0] if picks.get('animation') else '-'} | "
-          f"textures={picks.get('textures', ['-'])[0] if picks.get('textures') else '-'} | "
-          f"audio={picks.get('audio', ['-'])[0] if picks.get('audio') else '-'}")
+    # the CONFIG names the sections (init weighed the candidates; the user
+    # may have edited them); detection only fills a key that points nowhere
+    sec = cfg.get("sections") or {}
+
+    def _section(kind: str) -> str:
+        name = (sec.get(kind) or "").strip()
+        if name and (root / name).is_dir():
+            return name
+        return (picks.get(kind) or [""])[0]
+    print(f"  sections: animation={_section('animation') or '-'} | "
+          f"textures={_section('textures') or '-'} | "
+          f"audio={_section('audio') or '-'}")
 
     # ---- THE CONFIG IS THE CONTRACT ---------------------------------------
     # scan folders come from pharos_config.json (written by init); a fresh
@@ -100,6 +142,38 @@ def run_ingest(argv=None) -> int:
         print(f"  manifest packs    : "
               f"{len(report.get('manifest_packs_found', []))} "
               f"under {', '.join(report['manifest_roots'])}")
+    # converted packs JOIN the config (additive: nothing is ever removed).
+    # meshes_import reads recipes only under manifest_roots and chain 2
+    # needs kitbash_root: a pack converted after init was ignored until the
+    # user hand-edited pharos_config.json (laptop run)
+    # a non-list value (hand-typed string) is ignored, as config.load() does
+    have_roots = cfg.get("manifest_roots")
+    have_roots = have_roots if isinstance(have_roots, list) else []
+    add_roots = [r for r in report.get("manifest_roots") or []
+                 if not any(db.path_under(r, have) for have in have_roots)]
+    add_kit = ("" if (cfg.get("kitbash_root") or "").strip()
+               else report.get("kitbash_root") or "")
+    if add_roots or add_kit:
+        cfg["manifest_roots"] = have_roots + add_roots
+        if add_kit:
+            cfg["kitbash_root"] = add_kit
+        # applied in-process too: meshes_import shares this list object
+        config.MANIFEST_ROOTS.extend(Path(r).resolve() for r in add_roots)
+        verb = "would add (dry-run, not written):" if dry else "added"
+        if not dry:
+            raw = json.loads(config._CONFIG_FILE.read_text(encoding="utf-8-sig"))
+            raw_roots = raw.get("manifest_roots")
+            raw["manifest_roots"] = ((raw_roots if isinstance(raw_roots, list)
+                                      else []) + add_roots)
+            if add_kit:
+                raw["kitbash_root"] = add_kit
+            config.save(raw)
+        for r in add_roots:
+            print(f"  config: {verb} manifest_roots entry {r}")
+        if add_kit:
+            print(f"  config: {verb} kitbash_root {add_kit}")
+        print("    (detected converted packs/kits; pharos_config.json only "
+              "gains entries here, it never loses any)")
     if report.get("blend_folders"):
         print(f"  blend folders     : {', '.join(report['blend_folders'])}"
               f"  (decision needed -- NOT scanned)")
@@ -118,9 +192,9 @@ def run_ingest(argv=None) -> int:
             Path(REPO) / "service" / "asset_service" / "scanner.py"),
             str(root / folder)], dry) else 0
 
-    audio_jsonl = (root / (picks.get("audio", [""])[0])
-                   / "library_files.jsonl") if picks.get("audio") else None
-    if picks.get("audio"):
+    audio_dir = _section("audio")
+    audio_jsonl = (root / audio_dir / "library_files.jsonl") if audio_dir         else None
+    if audio_dir:
         if audio_jsonl and audio_jsonl.is_file():
             print(f"\n  audio: crawl index found ({audio_jsonl.name}) -- "
                   f"skipping the folder scan (the crawl's own metadata is "
@@ -128,14 +202,45 @@ def run_ingest(argv=None) -> int:
         else:
             failed_steps += 1 if _run([py, str(
                 Path(REPO) / "service" / "asset_service" / "scanner.py"),
-                str(root / picks["audio"][0])], dry) else 0
+                str(root / audio_dir)], dry) else 0
 
-    if picks.get("animation"):
+    if _section("animation"):
         failed_steps += 1 if _run([py, str(
             Path(REPO) / "service" / "asset_service" / "indexer.py"),
             "--root", str(root)], dry) else 0
     else:
         print("\n  animation: no clip folder detected -- skipping indexer")
+
+    # converted packs -> mesh rows: meshes_import creates rows ONLY from the
+    # _Agent_Files index files (manifests add the recipes), so rebuild an
+    # index whenever a manifest is newer than it (big libraries take minutes)
+    for key, out_name, script in (
+            ("ue_manifests", "models.jsonl",
+             "pipeline/agent_index/build_agent_index.py"),
+            ("kit_manifests", "kb3d_models.jsonl",
+             "pipeline/kitbash/build_kb3d_index.py")):
+        mans = report.get(key) or []
+        out = config.AGENT_FILES / out_name
+        # no manifests left: rebuild only if the index still lists packs
+        # (the LAST pack was removed -- its rows must go too)
+        if not mans and not (out.is_file() and _index_packs(out)):
+            continue
+        # fresh = newer than every manifest AND built from exactly these
+        # packs: a pack COPIED in keeps its older mtimes, a removed pack
+        # would keep its rows
+        try:
+            fresh = (bool(mans) and out.is_file()
+                     and out.stat().st_mtime > max(
+                         Path(m).stat().st_mtime for m in mans)
+                     and _index_packs(out)
+                     == {_norm(Path(m).parent) for m in mans})
+        except OSError:
+            fresh = False
+        if fresh:
+            print(f"\n  {out_name}: newer than all {len(mans)} manifest(s) "
+                  f"-- index rebuild skipped", flush=True)
+            continue
+        failed_steps += 1 if _run([py, str(Path(REPO) / script)], dry) else 0
 
     print("", flush=True)
     if not dry:
@@ -224,8 +329,9 @@ def run_ingest(argv=None) -> int:
                   "as-is? (none detected; chains 2+3 need Blender)")
     qs.append("4. Is there a purchase CSV for the collection? (ground "
               "truth for owned vs on-disk)")
-    qs.append("5. Audio/texture crawl-quality indexes (categories, "
-              "keywords) need a vision crawl pass -- run it, or ship with "
+    qs.append("5. Build richer audio/texture indexes (categories, keywords "
+              "from file and folder names; pure Python, minutes; chain 4 "
+              "writes index files into those folders) -- or keep the "
               "scanner-only metadata?")
     # blend folders and raw UE packs already have their own question
     asked = set(report.get("blend_folders") or []) | {
@@ -254,6 +360,10 @@ def run_ingest(argv=None) -> int:
               f"see the warnings above", flush=True)
         return 4
     try:
+        db.stamp_registry(config.DB_PATH, root)    # this library's registry
+    except Exception as exc:                              # noqa: BLE001
+        print(f"  registry stamp skipped: {exc}", flush=True)
+    try:
         import sqlite3
         conn = sqlite3.connect(config.DB_PATH)
         totals = {}
@@ -263,9 +373,12 @@ def run_ingest(argv=None) -> int:
                     f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
             except sqlite3.OperationalError:
                 totals[tbl] = 0
-        anim = conn.execute(
-            "SELECT COUNT(*) FROM assets WHERE id LIKE 'pack::%'"
-        ).fetchone()[0]
+        try:      # `assets` only exists once indexer.py ran (animation)
+            anim = conn.execute(
+                "SELECT COUNT(*) FROM assets WHERE id LIKE 'pack::%'"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            anim = 0
         conn.close()
     except Exception:                                     # noqa: BLE001
         return 0

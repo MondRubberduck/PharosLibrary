@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import library_root, db_path
+from _config import library_root, db_path, refuse_near_empty
 LIB = library_root() or "."
 DB = os.environ.get("PHAROS_DB") or db_path() or "assets.sqlite"
 AGENT = os.path.join(LIB, "_Agent_Files")
@@ -109,7 +109,7 @@ sections = scan_disk()
 if not os.path.isfile(DB):
     print("registry database not found: %s" % DB)
     sys.exit(0)
-c = sqlite3.connect("file:%s?mode=ro" % DB, uri=True)
+c = sqlite3.connect(DB)   # exists (checked above); plain path works on UNC
 cur = c.cursor()
 cur.execute("""select name, store, type_group, type_raw, seller, price, purchased,
                       image_count, folder, url, tags from collection""")
@@ -155,10 +155,7 @@ local_only = [{"name": s, "availability": "local", "folders": len(fs),
               for s, fs in sections.items()
               if sum(f["model_files"] for f in fs) > 0]
 
-if len(records) < 10:
-    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
-                     "live index with a near-empty scan (wrong root?)"
-                     % len(records))
+refuse_near_empty(len(records), os.path.join(AGENT, "availability.jsonl"))
 
 json.dump({"schema": "pharos.agent.availability/v1", "generated": now, "root": LIB,
            "note": ("availability is the key field: 'local' = usable now; "

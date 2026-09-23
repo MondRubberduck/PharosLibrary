@@ -8,6 +8,7 @@ and edit it. Change the JSON, restart, done.
 """
 
 import json
+import sys
 from pathlib import Path
 
 _CONFIG_FILE = Path(__file__).resolve().parent / "pharos_config.json"
@@ -59,9 +60,13 @@ def _resolve(base: str, rel: str) -> str:
 def load() -> dict:
     """Load config, filling any missing key from the defaults."""
     if _CONFIG_FILE.is_file():
+        # utf-8-sig: Windows PowerShell 5.1 writes a BOM; an unreadable file
+        # is reported, never silently treated as "not configured"
         try:
-            cfg = json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
+            cfg = json.loads(_CONFIG_FILE.read_text(encoding="utf-8-sig"))
+        except (ValueError, OSError) as exc:
+            print(f"WARNING: {_CONFIG_FILE} is not valid JSON ({exc}) -- "
+                  f"fix it by hand; running as NOT CONFIGURED", file=sys.stderr)
             cfg = {}
         if not isinstance(cfg, dict):
             cfg = {}

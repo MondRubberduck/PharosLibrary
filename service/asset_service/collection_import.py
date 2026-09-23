@@ -143,6 +143,27 @@ def parse_type(type_raw: str) -> tuple[str, str, str]:
     return group.strip(), cat.strip(), sub.strip()
 
 
+_HEADER_ALIASES = {
+    "name": "Name", "product": "Name", "product name": "Name",
+    "title": "Name",
+    "url": "Product URL", "link": "Product URL", "product url": "Product URL",
+    "product link": "Product URL",
+    "local folder": "Local Folder", "folder": "Local Folder",
+    "path": "Local Folder", "local path": "Local Folder",
+    "service": "Service", "store": "Service", "shop": "Service",
+    "seller / author": "Seller / Author", "seller": "Seller / Author",
+    "author": "Seller / Author", "type": "Type", "purchased": "Purchased",
+    "date": "Purchased", "images": "Images",
+}
+
+
+def _canonical_header(h) -> str:
+    key = (h or "").strip().lower()
+    if key.startswith("price") or key == "cost":
+        return "Price (USD)"         # the price text is stored as written
+    return _HEADER_ALIASES.get(key, (h or "").strip())
+
+
 def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
     """Merge the CSV purchase catalog into the `collection` table.
 
@@ -186,6 +207,10 @@ def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
                 break
             except UnicodeDecodeError:
                 continue
+        # headers as people type them ("name,url,price", "Price (EUR)",
+        # "Link", "Folder") map onto the columns read below -- matching the
+        # exact spellings only imported links and prices as empty
+        rows = [{_canonical_header(k): v for k, v in r.items()} for r in rows]
 
         # human thumbnail overrides survive re-imports
         overrides = {}

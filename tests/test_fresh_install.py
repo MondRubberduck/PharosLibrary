@@ -74,6 +74,33 @@ def _min_fbx() -> bytes:
     return bytes(out)
 
 
+def _write_converted_pack(pack: Path, mesh: str) -> Path:
+    """A chain-1 style converted pack: Exports/manifest.json (v2, one mesh
+    whose one slot wires an albedo map) + Exports/FBX/<mesh>.fbx + the
+    texture. Returns the FBX path."""
+    ex = pack / "Exports"
+    (ex / "FBX").mkdir(parents=True)
+    (ex / "Textures").mkdir()
+    fbx = ex / "FBX" / f"{mesh}.fbx"
+    fbx.write_bytes(_min_fbx())
+    (ex / "Textures" / f"T_{mesh}_BC.png").write_bytes(b"\x89PNG fake")
+    (ex / "manifest.json").write_text(json.dumps({
+        "schema": "pharos.pack.export/v2", "pack": pack.name,
+        "counts": {"fbx_written": 1, "texture_files_written": 1},
+        "meshes": [{"name": mesh, "asset_path": f"/Game/Props/{mesh}",
+                    "kind": "StaticMesh", "fbx": f"FBX/{mesh}.fbx",
+                    "triangles": 1, "vertices": 3,
+                    "bbox_m": [1.0, 1.0, 0.0],
+                    "materials": [{"slot": 0, "name": f"MI_{mesh}",
+                                   "base": "M_FX_Master",
+                                   "textures": [{
+                                       "param": "BaseColor",
+                                       "file": f"Textures/T_{mesh}_BC.png",
+                                       "source": "instance_override"}]}]}]}),
+        encoding="utf-8")
+    return fbx
+
+
 def build_fixture(root: Path) -> None:
     (root / "Animation" / "WalkPacks").mkdir(parents=True)
     # the stub carries AnimationStack/Curve node names: since .fbx also
@@ -114,12 +141,16 @@ def build_fixture(root: Path) -> None:
     obj = "v 0 0 0\nv 2 0 0\nv 0 1 0\nf 1 2 3\n"
     (models / "crate.obj").write_text(obj, encoding="utf-8")
     (models / "lid.obj").write_text(obj, encoding="utf-8")
-    # NESTED pack layout (go-live finding A1: "UE Packs/<pack>/Exports/")
-    deep = root / "UE Packs" / "TestPack" / "Exports"
-    deep.mkdir(parents=True)
-    (deep / "manifest.json").write_text(json.dumps({
-        "schema": "pharos.pack.export/v2", "pack": "TestPack",
-        "meshes": []}), encoding="utf-8")
+    # NESTED pack layout (go-live finding A1: "UE Packs/<pack>/Exports/").
+    # R2: a REAL converted pack (mesh + FBX + texture), so "UE Packs" is a
+    # detected MODEL folder exactly as on the laptop, where the scanner then
+    # indexed the converted FBX a second time, without its recipe
+    _write_converted_pack(root / "UE Packs" / "TestPack", "SM_FX_PackCrate")
+    # S2: an UNEXPORTED KitBash3D kit, in the kit exporter's own layout
+    # (<kits root>/<Kit>/*.blender.native/*.blend)
+    kit = root / "Kits" / "FixtureKit" / "kb3d_FixtureKit.blender.native"
+    kit.mkdir(parents=True)
+    (kit / "kb3d_FixtureKit.blend").write_bytes(b"BLENDER-stub")
     (root / "Collected Files").mkdir(parents=True)
     # Local Folder points at a real dir: ingest's availability pass must
     # mark this purchase 'local' (the CSV folder is the on-disk evidence)
@@ -217,6 +248,11 @@ def main() -> int:
               any(_same_path(str(lib / "UE Packs"), m)
                   for m in cfg.get("manifest_roots", [])),
               str(cfg.get("manifest_roots")))
+        # S2: an unexported kit sets kitbash_root (chain 2 could not start
+        # without hand-editing the config on the laptop)
+        check("S2: raw KitBash3D kit detected -> kitbash_root",
+              _same_path(cfg.get("kitbash_root") or "", str(lib / "Kits")),
+              str(cfg.get("kitbash_root")))
 
         # A-gen: the classification rules that once broke strangers
         check("GEN: Animation section survives the .fbx tie-break "
@@ -468,6 +504,18 @@ def main() -> int:
         _c.close()
         check("1.7: scanner indexes .hdr beside its preview",
               any("pano.hdr" in f for f in _hsf), str(_hsf))
+        # S1: an FBX the parser cannot read is UNKNOWN geometry -> NULL
+        # triangles/vertices (a stored 0 passed every max_tri filter)
+        _bs = tmp / "bad_scan"
+        _bs.mkdir()
+        (_bs / "broken.fbx").write_bytes(b"not an fbx at all")
+        _bdb = str(reg / "bad_scan.sqlite")
+        _scn.scan_folder(_bs, db_path=_bdb)
+        _c = _sq1.connect(_bdb)
+        _btv = _c.execute("SELECT triangles, vertices FROM meshes").fetchall()
+        _c.close()
+        check("S1: unparseable FBX in a scan folder -> triangles/vertices "
+              "NULL (not 0)", _btv == [(None, None)], str(_btv))
         # 1.3: a scanned manifest's engine count (render LOD0) must not
         # beat the FBX's own triangles (separate registry)
         _sm = tmp / "scan_manifest" / "Exports"
@@ -762,11 +810,17 @@ def main() -> int:
         # 403 any non-loopback Host on GET/POST/HEAD
         import time as _time
         import urllib.request as _ur
+        # S3 fixture: one top-level folder nothing claims -- the boot banner
+        # must list it, and never the indexed scan folders (it told agents
+        # to re-scan those -> duplicates). The banner is captured to a log.
+        (lib / "Unsorted").mkdir(exist_ok=True)
+        (lib / "Unsorted" / "readme.txt").write_text("x", encoding="utf-8")
+        _boot_log = tmp / "boot.log"
+        _boot_fh = open(_boot_log, "w", encoding="utf-8")
         srv = subprocess.Popen(
             [sys.executable, str(REPO / "pharos.py"), "serve",
              "--no-open", "--port", "8844"],
-            cwd=str(REPO), stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL)
+            cwd=str(REPO), stdout=_boot_fh, stderr=subprocess.STDOUT)
         try:
             base = "http://127.0.0.1:8844/api/stats"
             ok_code = None
@@ -821,6 +875,22 @@ def main() -> int:
                   head_code == 405, str(head_code))
         finally:
             srv.terminate()
+            try:
+                srv.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                srv.kill()
+            _boot_fh.close()
+        _boot = _boot_log.read_text(encoding="utf-8", errors="replace")
+        _ni = next((ln for ln in _boot.splitlines()
+                    if ln.startswith("NOT INDEXED")), "")
+        _listed = ([s.strip() for s in _ni.split(":", 1)[1].split(",")]
+                   if _ni else [])
+        _want = pharos_init._not_indexed_dirs(
+            lib, json.loads(cfg_path.read_text(encoding="utf-8")), dbp)
+        check("S3: boot banner NOT INDEXED list == init._not_indexed_dirs",
+              "INGESTION COMPLETE" in _boot and _listed == _want
+              and "Unsorted" in _listed and "MyModels" not in _listed,
+              f"banner={_listed} want={_want}")
 
         # 6. docs generation (fixture _Agent_Files, then clean it up)
         from asset_service import agent_docs
@@ -899,11 +969,17 @@ def main() -> int:
                    / "Content" / "Props"):
             _p.mkdir(parents=True)
             (_p / "SM_FX_Stub.uasset").write_bytes(b"stub")
-        (lib / "Unsorted").mkdir()
+        (lib / "Unsorted").mkdir(exist_ok=True)       # (planted at 5f)
         (lib / "Unsorted" / "readme.txt").write_text("x", encoding="utf-8")
+        # R2: the hand-written crawler stand-in (5a) knows nothing of
+        # TestPack; on a real library models.jsonl only ever comes from
+        # build_agent_index -- remove it, so this ingest runs like the
+        # laptop's first one (converted pack, no index yet)
+        (config.AGENT_FILES / "models.jsonl").unlink(missing_ok=True)
         r = subprocess.run(
             [sys.executable, str(REPO / "pharos.py"), "ingest"],
             capture_output=True, text=True, cwd=str(REPO), timeout=600)
+        _ing_out = r.stdout or ""
         check("ingest exits 0 with decision block",
               r.returncode == 0 and "ASK YOUR USER" in r.stdout,
               (r.stderr or "")[-140:])
@@ -942,6 +1018,214 @@ def main() -> int:
               _avail and _avail[0] == "local",
               str(_avail))
 
+        # ---- R2: converted packs import by themselves, exactly once ------
+        def _rows_for(fbx: Path) -> list:
+            _c = _sq.connect(dbp)
+            rows = [(s, json.loads(rc or "{}").get("resolved"))
+                    for (f, s, rc) in _c.execute(
+                        "SELECT fbx, source, recipe FROM meshes")
+                    if f and _same_path(f, str(fbx))]
+            _c.close()
+            return rows
+        # the laptop: missing (no index build), or TWICE after a hand-run
+        # index build -- the scan copy without its recipe
+        _tp = _rows_for(lib / "UE Packs" / "TestPack" / "Exports" / "FBX"
+                        / "SM_FX_PackCrate.fbx")
+        check("R2: converted pack mesh imported exactly once, with its "
+              "recipe, source=leartes (scanner skipped the pack)",
+              _tp == [("leartes", True)]
+              and "converted pack folder(s)" in _ing_out, f"rows={_tp}")
+        # a pack converted AFTER init, in a folder init never saw: the next
+        # ingest adds its root to the config (additive) and imports it
+        _np_fbx = _write_converted_pack(lib / "Converted" / "NewPack",
+                                        "SM_FX_NewCrate")
+        r = subprocess.run(
+            [sys.executable, str(REPO / "pharos.py"), "ingest"],
+            capture_output=True, text=True, cwd=str(REPO), timeout=600)
+        _roots = json.loads(cfg_path.read_text(
+            encoding="utf-8")).get("manifest_roots") or []
+        _np = _rows_for(_np_fbx)
+        check("R2: pack converted after init -> root ADDED to the config, "
+              "mesh imported by the next ingest",
+              r.returncode == 0 and _np == [("leartes", True)]
+              and any(_same_path(m, str(lib / "Converted")) for m in _roots)
+              and any(_same_path(m, str(lib / "UE Packs")) for m in _roots),
+              f"rc={r.returncode} roots={_roots} rows={_np}")
+        # review: a pack COPIED in keeps its original, OLDER timestamps
+        # (Explorer / zip / robocopy): the "index newer than every
+        # manifest" shortcut skipped it for good; and a hand-typed
+        # manifest_roots STRING was saved back as single characters
+        _oc_fbx = _write_converted_pack(lib / "UE Packs" / "OldCopy",
+                                        "SM_FX_OldCopy")
+        _old_t = os.path.getmtime(cfg_path) - 86400
+        for _p in (lib / "UE Packs" / "OldCopy").rglob("*"):
+            os.utime(_p, (_old_t, _old_t))
+        _cfg_raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        _cfg_raw["manifest_roots"] = str(lib / "UE Packs")
+        cfg_path.write_text(json.dumps(_cfg_raw), encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(REPO / "pharos.py"), "ingest"],
+            capture_output=True, text=True, cwd=str(REPO), timeout=600)
+        _oc = _rows_for(_oc_fbx)
+        check("R2: pack copied in with OLD timestamps is still indexed",
+              r.returncode == 0 and _oc == [("leartes", True)],
+              f"rc={r.returncode} rows={_oc}")
+        _mr = json.loads(cfg_path.read_text(
+            encoding="utf-8")).get("manifest_roots")
+        check("R2: a hand-typed manifest_roots string is not saved back "
+              "as single characters",
+              isinstance(_mr, list) and _mr
+              and all(len(str(m)) > 3 for m in _mr), str(_mr)[:120])
+        shutil.rmtree(lib / "UE Packs" / "OldCopy")
+        shutil.rmtree(lib / "Converted" / "NewPack")    # indexed above
+        r = subprocess.run(
+            [sys.executable, str(REPO / "pharos.py"), "ingest"],
+            capture_output=True, text=True, cwd=str(REPO), timeout=600)
+        _gone = _rows_for(_oc_fbx) + _rows_for(_np_fbx)
+        check("R2: removed converted packs lose their mesh rows",
+              r.returncode == 0 and _gone == [],
+              f"rc={r.returncode} rows={_gone} "
+              f"tail={(r.stdout or '')[-400:] if r.returncode else ''!r}")
+
+        # ---- R1: old or foreign registries (~/.pharos/registry is shared
+        # machine-wide; the laptop reused one from an earlier library) ----
+        def _cfg_set(**kv):
+            c = json.loads(cfg_path.read_text(encoding="utf-8"))
+            c.update(kv)
+            cfg_path.write_text(json.dumps(c), encoding="utf-8")
+
+        def _pharos(*args, timeout=600):
+            return subprocess.run(
+                [sys.executable, str(REPO / "pharos.py"), *args],
+                capture_output=True, text=True, cwd=str(REPO),
+                timeout=timeout)
+
+        def _old_registry(d: Path, under: Path) -> str:
+            """A registry from an older Pharos: no `source` column in any
+            table, one mesh + one texture row whose paths lie in `under`."""
+            d.mkdir()
+            p = str(d / "assets.sqlite")
+            c = _sq.connect(p)
+            c.executescript(
+                "CREATE TABLE meshes (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " name TEXT NOT NULL, pack TEXT, kind TEXT, fbx TEXT,"
+                " on_disk INTEGER, bytes INTEGER, triangles INTEGER,"
+                " vertices INTEGER, submeshes INTEGER, bbox_x REAL,"
+                " bbox_y REAL, bbox_z REAL, max_dim REAL, materials TEXT,"
+                " texture_count INTEGER, texture_files TEXT, tags TEXT,"
+                " meta TEXT);"
+                "CREATE TABLE textures (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " name TEXT NOT NULL, grp TEXT, sub TEXT, folder TEXT,"
+                " files TEXT, images TEXT, file_count INTEGER, bytes INTEGER,"
+                " first_image TEXT, thumb TEXT, tags TEXT, meta TEXT);"
+                "CREATE TABLE audio (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " name TEXT NOT NULL, cat TEXT, sub TEXT, rel TEXT UNIQUE,"
+                " ext TEXT, bytes INTEGER, dur REAL, sr INTEGER, ch INTEGER,"
+                " playable INTEGER, desc TEXT, tags TEXT, meta TEXT);")
+            c.execute("INSERT INTO meshes (name, pack, kind, fbx) VALUES "
+                      "('old', 'Old', 'mesh', ?)",
+                      ((under / "Old" / "old.fbx").as_posix(),))
+            c.execute("INSERT INTO textures (name, grp, sub, folder) VALUES "
+                      "('Old Set', 'Old', 'Scanned', ?)",
+                      ((under / "Old" / "OldSet").as_posix(),))
+            c.commit()
+            c.close()
+            return p
+
+        def _q(p: str, sql: str):
+            c = _sq.connect(p)
+            try:
+                return c.execute(sql).fetchone()
+            except _sq.OperationalError as exc:        # table/column absent
+                return f"{exc}"
+            finally:
+                c.close()
+
+        # old schema, rows under THIS library: must migrate, not crash
+        # (laptop: every scanner run died with 'no such column: source'),
+        # and an unstamped registry that belongs gets stamped
+        # (resolved like every real writer's paths: macOS /var -> /private)
+        _old = _old_registry(tmp / "reg_old", lib.resolve())
+        _cfg_set(registry_dir=str(tmp / "reg_old"))
+        r = _pharos("ingest")
+        _o = (r.stdout or "") + (r.stderr or "")
+        _scan_n = _q(_old, "SELECT COUNT(*) FROM meshes WHERE source='scan'")
+        check("R1: old-schema registry (no `source` columns): scanner + "
+              "ingest complete, no crash",
+              r.returncode == 0 and "no such column" not in _o
+              and isinstance(_scan_n, tuple) and _scan_n[0] >= 1,
+              f"rc={r.returncode} scan_rows={_scan_n} "
+              f"crash={'no such column' in _o}")
+        _stamp = _q(_old, "SELECT value FROM registry_meta "
+                          "WHERE key='library_root'")
+        check("R1: unstamped registry whose rows lie under the root -> "
+              "accepted and stamped",
+              isinstance(_stamp, tuple) and _same_path(_stamp[0], str(lib)),
+              str(_stamp))
+
+        # stamped for ANOTHER root: every writer stops with one message
+        # and writes nothing (today: exit 0 and the two libraries mixed)
+        _fdb = str(tmp / "reg_foreign" / "assets.sqlite")
+        db.init_db(_fdb).close()
+        _c = _sq.connect(_fdb)
+        _c.executescript(meshes_import.MESHES_DDL)
+        _c.execute("CREATE TABLE registry_meta (key TEXT PRIMARY KEY, "
+                   "value TEXT)")
+        _c.execute("INSERT INTO registry_meta VALUES ('library_root', ?)",
+                   (str(tmp / "other_root"),))
+        _c.execute("INSERT INTO meshes (name, pack, source, kind, fbx) "
+                   "VALUES ('other', 'Other', 'scan', 'mesh', ?)",
+                   ((tmp / "other_root" / "other.fbx").as_posix(),))
+        _c.commit()
+        _c.close()
+        _cfg_set(registry_dir=str(tmp / "reg_foreign"))
+        r = _pharos("ingest")
+        r_scan = subprocess.run(
+            [sys.executable, str(REPO / "service/asset_service/scanner.py"),
+             str(lib / "MyModels")], capture_output=True, text=True,
+            cwd=str(REPO), timeout=120)
+        try:
+            srv_rc = _pharos("serve", "--no-open", "--port", "8845",
+                             timeout=60).returncode
+        except subprocess.TimeoutExpired:
+            srv_rc = None          # the server booted on the foreign registry
+        # doctor's own fix line for the anim gap: one indexer run used to
+        # write into the foreign registry and flip doctor to READY
+        r_idx = subprocess.run(
+            [sys.executable, str(REPO / "service" / "asset_service"
+                                 / "indexer.py"), "--root", str(lib)],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        try:
+            _doc = {c["name"] + ":" + c["status"] for c in json.loads(
+                _pharos("doctor", "--json").stdout)["checks"]}
+        except ValueError:
+            _doc = set()
+        _fn = _q(_fdb, "SELECT COUNT(*) FROM meshes")
+        check("R1: registry stamped for another root -> ingest exit 2 with "
+              "ONE clear message, nothing written",
+              r.returncode == 2 and "belongs to another library" in r.stdout
+              and str(tmp / "other_root") in r.stdout
+              and "derived data" in r.stdout and "--registry-dir" in r.stdout
+              and _fn == (1,),
+              f"rc={r.returncode} meshes={_fn} out={r.stdout.strip()[:240]!r}")
+        check("R1: scanner CLI, indexer and server boot refuse the foreign "
+              "registry (exit 2); doctor fails its registry check",
+              r_scan.returncode == 2 and srv_rc == 2
+              and r_idx.returncode == 2 and "registry:fail" in _doc,
+              f"scanner={r_scan.returncode} serve={srv_rc} "
+              f"indexer={r_idx.returncode} "
+              f"doctor={sorted(d for d in _doc if d.startswith('registry'))}")
+        # the laptop's exact case: an OLD, UNSTAMPED registry whose rows all
+        # lie under another root
+        _old_registry(tmp / "reg_laptop", tmp / "other_root")
+        _cfg_set(registry_dir=str(tmp / "reg_laptop"))
+        r = _pharos("ingest")
+        check("R1: unstamped old registry with every row under another root "
+              "(laptop case) -> ingest exit 2",
+              r.returncode == 2 and "belongs to another library" in r.stdout,
+              f"rc={r.returncode} out={r.stdout.strip()[:160]!r}")
+        _cfg_set(registry_dir=str(reg))
+
         # 6c2. anim section token-bomb guard (every other section had
         # it; q=??? used to return the WHOLE library). q=walk>=1 proves
         # the section is non-empty, so the 0 is the guard, not emptiness
@@ -960,6 +1244,9 @@ def main() -> int:
         (lib2 / "Animation" / "w.fbx").write_bytes(b"stubfbx")
         cfg_now = json.loads(cfg_path.read_text(encoding="utf-8"))
         cfg_now["library_root"] = str(lib2)
+        # a second library gets its OWN registry (the correct usage): the
+        # lib registry is stamped for lib, so sharing it now stops (R1)
+        cfg_now["registry_dir"] = str(tmp / "reg_nocsv")
         cfg_path.write_text(json.dumps(cfg_now), encoding="utf-8")
         r = subprocess.run(
             [sys.executable, str(REPO / "pharos.py"), "ingest"],
@@ -969,6 +1256,7 @@ def main() -> int:
               r.returncode == 0 and "collection import skipped" in out6,
               f"rc={r.returncode} tail={out6.strip()[-90:]!r}")
         cfg_now["library_root"] = str(lib)
+        cfg_now["registry_dir"] = str(reg)
         cfg_path.write_text(json.dumps(cfg_now), encoding="utf-8")
 
         # ...and a fresh install with no registry yet must get a plain,
@@ -984,6 +1272,49 @@ def main() -> int:
               r.returncode == 1 and "Traceback" not in out
               and "cannot read the registry" in out,
               f"rc={r.returncode} out={out.strip()[-90:]!r}")
+
+        # init --force onto a library WITHOUT converted packs, pointed at
+        # lib's (stamped) registry. R2: the previous library's
+        # manifest_roots / kitbash_root must not survive the switch
+        # (laptop: init printed "manifest packs: (none)" and kept them).
+        # R1: init only writes the config, but warns about that registry.
+        r = _pharos("init", str(lib2), "--registry-dir", str(reg), "--force",
+                    timeout=300)
+        _cf = json.loads(cfg_path.read_text(encoding="utf-8"))
+        check("R2: init --force onto a library without manifests leaves no "
+              "stale manifest_roots/kitbash_root",
+              r.returncode == 0 and _same_path(_cf["library_root"], str(lib2))
+              and _cf.get("manifest_roots") == []
+              and not _cf.get("kitbash_root"),
+              f"rc={r.returncode} manifest_roots={_cf.get('manifest_roots')} "
+              f"kitbash_root={_cf.get('kitbash_root')!r}")
+        check("R1: init warns that the registry belongs to another library",
+              "belongs to another library" in (r.stdout or "")
+              and "--registry-dir" in (r.stdout or ""),
+              next((ln for ln in (r.stdout or "").splitlines()
+                    if "WARNING" in ln), "(no warning)")[:160])
+
+        # release check: two sound folders; init weighs them and writes
+        # sections.audio = the bigger one, but ingest scanned detect()'s
+        # alphabetically FIRST folder (and printed picks the config never
+        # got) -- the configured audio section stayed empty
+        lib3 = tmp / "lib_twoaudio"
+        for _d, _n in (("Ambience", 1), ("Sounds", 3)):
+            (lib3 / _d).mkdir(parents=True)
+            for _i in range(_n):
+                (lib3 / _d / f"s{_i}.wav").write_bytes(b"RIFF0000WAVE")
+        r = _pharos("init", str(lib3), "--registry-dir",
+                    str(tmp / "reg_twoaudio"), "--force", timeout=300)
+        _aud = json.loads(cfg_path.read_text(
+            encoding="utf-8"))["sections"].get("audio")
+        r = _pharos("ingest", "--dry-run", timeout=300)
+        _scans = [ln for ln in (r.stdout or "").splitlines()
+                  if ln.startswith("> ") and "scanner.py" in ln]
+        check("release: ingest scans the CONFIGURED audio folder",
+              _aud == "Sounds" and any(ln.rstrip().endswith("Sounds")
+                                       for ln in _scans)
+              and not any(ln.rstrip().endswith("Ambience") for ln in _scans),
+              f"config audio={_aud!r} scans={[s[-40:] for s in _scans]}")
         shutil.rmtree(config.AGENT_FILES, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

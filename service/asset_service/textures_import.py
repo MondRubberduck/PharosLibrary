@@ -58,7 +58,12 @@ def ensure_scan_unique_index(conn: sqlite3.Connection) -> None:
     + importer): without it OR REPLACE degenerates to a plain INSERT and
     every re-scan of the same folder duplicates its rows. Registries
     built before the index may already carry duplicates -- keep the
-    oldest row per (name, folder), then create the index."""
+    oldest row per (name, folder), then create the index. Older tables
+    have no `source` column at all: add it FIRST (the index filters on it;
+    the scanner used to crash here with 'no such column: source')."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(textures)")}
+    if cols and "source" not in cols:
+        conn.execute("ALTER TABLE textures ADD COLUMN source TEXT")
     idx = ("CREATE UNIQUE INDEX IF NOT EXISTS idx_textures_name_folder_scan "
            "ON textures(name, folder) WHERE source='scan'")
     try:
@@ -264,11 +269,7 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(TEXTURES_DDL)
-        # self-migrate: older tables have no source column
-        cols = {r[1] for r in conn.execute(
-            "PRAGMA table_info(textures)")}
-        if "source" not in cols:
-            conn.execute("ALTER TABLE textures ADD COLUMN source TEXT")
+        # self-migrates the source column, then creates the scan index
         ensure_scan_unique_index(conn)
         # no textures root -> this importer owns NOTHING; scanner rows
         # must survive a restart (retention invariant, meshes/audio-style)

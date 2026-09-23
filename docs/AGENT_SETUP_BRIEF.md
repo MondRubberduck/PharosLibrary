@@ -37,10 +37,10 @@ prints what it would run. Map every finding through this table:
 | Audio with `library_files.jsonl` | importer | YES — crawl metadata wins | nothing | no |
 | Purchase CSV | `collection_import` | YES — owned vs on-disk | nothing | no (but confirm the CSV is current) |
 | Packs WITH `Exports/manifest.json` | importers join recipes | YES — wiring + recipes | nothing | no |
-| UE `.uasset` packs WITHOUT Exports | chain 1 (`pipeline/conversion`) | **NO** | UE 5.x + local sandbox (`make_sandbox.py`); hours of engine time | **YES** — crawl or skip? |
+| UE `.uasset` packs WITHOUT Exports | chain 1 (`pipeline/conversion`) | **NO** | UE 5.x + local sandbox (`make_sandbox.py`), Windows; roughly 1–30 min of engine time per pack | **YES** — crawl or skip? |
 | KitBash3D kits (`*.blender.native`) | chain 2 (`pipeline/kitbash`) | **NO** | Blender | **YES** — export to per-assembly FBX? |
 | `.blend` containers (non-kit) | chain 3 (`pipeline/native`) | **NO** | Blender | **YES** — enumerate objects, or leave the files alone? |
-| Textures/Audio crawl-quality indexes (categories, keywords) | chain 4 (`pipeline/agent_index`) | texture index self-builds its cache, but the WRITE goes into the section roots | nothing (but writes into the library) | **YES** — scanner-only metadata, or full index? |
+| Richer texture/audio indexes (categories, keywords from file and folder names) | chain 4 (`pipeline/agent_index`, pure Python) | texture index self-builds its cache, but the WRITE goes into the section roots | nothing (but writes into the library) | **YES** — scanner-only metadata, or full index? |
 | owned-not-downloaded items | `build_availability_catalog.py` | after the registry exists | nothing | tell the user it produces the requisition list |
 | `.max`, other unreadable formats | — | never | — | **tell the user** these are cataloged as gaps, not parsed |
 | MCP for the agent client | `pip install "mcp<2"` | **NO** — installs a package | pip | **YES** if not already installed |
@@ -56,18 +56,22 @@ Ask, at minimum — more if the census triggers rows in the matrix:
 
 1. **Are these all the asset folders?** Other drives, external disks,
    NAS? `init` only sees what it was pointed at.
-2. **Crawl the Unreal packs for material recipes?** State the cost:
-   needs UE 5.x, generates FBX+textures per pack, takes real time.
-   No answer = do not run it.
+2. **Convert the Unreal packs (FBX + textures + material recipes)?**
+   State the cost: needs UE 5.x on Windows, roughly 1–30 minutes of
+   engine time per pack. No answer = do not run it.
 3. **Blender files: enumerate, kit-export, or leave as-is?** Nothing
    touches `.blend` files without an answer.
-4. **Is there a purchase CSV?** (Name/URL/Price columns.) It is the
-   ground truth for the requisition list of owned-not-downloaded items.
-5. **Crawl-quality indexes for audio/textures?** The scanner gives
-   filenames and dimensions; the crawl gives categories and keywords.
+4. **Is there a purchase list (CSV)?** A header row with Name, URL,
+   Price (Local Folder optional). It is the ground truth for the
+   requisition list of owned-not-downloaded items.
+5. **Richer indexes for audio/textures?** The scanner gives filenames
+   and dimensions; chain 4 adds categories and keywords from file and
+   folder names (pure Python, minutes).
 6. **Animation previews** render once in a browser tab — acceptable?
 
-Relay answers into actions. Never silently substitute: an asset the
+Ask like a colleague, not a manual: plain words (say "your Unreal
+packs", not "chain 1"), the cost in minutes, and a safe default ("if
+unsure, say no — it can be done later"). Relay answers into actions. Never silently substitute: an asset the
 user owns but that is not on disk becomes a requisition line, never a
 replacement; content absent from the library gets modelled from scratch
 and SAID SO — that is the build-phase ladder, but the same honesty
