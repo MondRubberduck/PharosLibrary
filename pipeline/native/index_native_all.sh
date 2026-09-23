@@ -7,6 +7,7 @@
 # Writes a timestamped jsonl so nothing has to be deleted first.
 #
 # Exit codes: 0 ok · 2 no worklist (run make_native_manifest2.py first) ·
+#             3 no Blender found (set BLENDER_EXE) ·
 #             9 one or more Blender runs failed · 8 no output file at all.
 #             A crashed Blender must never again read as success: the old
 #             pipeline-to-grep swallowing lost every exit code and the
@@ -14,8 +15,14 @@
 set -u
 
 T="$(cd "$(dirname "$0")" && pwd)"
-# BLENDER_EXE is the repo-wide convention; BLENDER kept for compatibility
-BLENDER="${BLENDER_EXE:-${BLENDER:-C:/Program Files/Blender Foundation/Blender 5.1/blender.exe}}"
+# BLENDER_EXE is the repo-wide convention; BLENDER kept for compatibility;
+# neither set -> the Python drivers' finder (pipeline/_config.py blender_exe)
+BLENDER="${BLENDER_EXE:-${BLENDER:-}}"
+if [[ -z "$BLENDER" ]]; then
+  FIND='import _config; print(_config.blender_exe())'
+  BLENDER="$(cd "$T/.." && { python -c "$FIND" 2>/dev/null || python3 -c "$FIND" 2>/dev/null; })"
+  BLENDER="${BLENDER//$'\r'/}"
+fi
 LIST="$T/native_manifest.json"
 BLENDS="$T/native_blends.txt"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -25,6 +32,10 @@ echo "OUT=$OUT"
 if [[ ! -f "$LIST" ]]; then
   echo "ERROR: $LIST missing -- run make_native_manifest2.py first" >&2
   exit 2
+fi
+if [[ -z "$BLENDER" ]]; then
+  echo "ERROR: Blender not found -- set BLENDER_EXE to your Blender executable" >&2
+  exit 3
 fi
 
 FAILS=0
@@ -39,31 +50,18 @@ run_one() {
   return $rc
 }
 
-echo "--- [1/2] importable model files (single Blender session) ---"
+echo "--- importable model files (single Blender session) ---"
 run_one env AMNATIVE_LIST="$LIST" AMNATIVE_OUT="$OUT" "$BLENDER" \
   --background --factory-startup --python "$T/index_native.py"
 if [[ $? -ne 0 ]]; then
   FAILS=$((FAILS+1))
-  echo "PASS 1/2 FAILED (Blender exit nonzero)"
+  echo "PASS FAILED (Blender exit nonzero)"
 fi
 
-echo "--- [2/2] .blend kits (one session each) ---"
-if [[ -f "$BLENDS" ]]; then
-  while IFS= read -r path; do
-    IFS= read -r section
-    [ -z "$path" ] && continue
-    printf '  %-58s ' "$(basename "$path")"
-    run_one env AMNATIVE_OUT="$OUT" AMNATIVE_SECTION="$section" "$BLENDER" \
-      --background --factory-startup "$path" --python "$T/index_native.py"
-    rc=$?
-    if [[ $rc -ne 0 ]]; then
-      FAILS=$((FAILS+1))
-      echo "FAILED (Blender exit $rc)"
-    fi
-  done < "$BLENDS"
-else
-  echo "(no $BLENDS -- skipping the per-blend pass)"
-fi
+# .blend OBJECTS are enumerated by run_blends.py into native_index_blends.jsonl
+# (-> promote_blends.py, which skips already-exported kits). They must never
+# land in $OUT: promote_native.py publishes this file wholesale, and a
+# second pass here listed every kit assembly twice.
 
 echo
 if [[ ! -f "$OUT" ]]; then

@@ -42,6 +42,9 @@ MODELS = AGENT_FILES / "models.jsonl"
 KB3D = AGENT_FILES / "kb3d_models.jsonl"
 NATIVE = AGENT_FILES / "native_models.jsonl"
 SOURCES = (MODELS, KB3D, NATIVE)
+# `source` of a row that carries none, by the index file it was read from
+# (build_agent_index writes no source; native rows always carry their own)
+JSONL_SOURCE = {"models.jsonl": "leartes", "kb3d_models.jsonl": "kitbash3d"}
 
 MANIFEST_ROOTS = config.MANIFEST_ROOTS
 LEARTES_SCHEMA = "pharos.pack.export/v2"
@@ -98,7 +101,10 @@ CREATE TABLE IF NOT EXISTS mesh_pack_wiring (
 # Created by CREATE TABLE IF NOT EXISTS for a fresh registry; added by ALTER
 # TABLE for a registry that already carries an older `meshes` table (the
 # importer owns this table, so it migrates it in place rather than dropping).
+# `source` is listed because MESHES_DDL's scan index filters on it: an
+# older table must gain it BEFORE that DDL runs.
 MESH_EXTRA_COLUMNS = (
+    ("source", "TEXT"),
     ("recipe", "TEXT"),
     ("bbox_min_x", "REAL"), ("bbox_min_y", "REAL"), ("bbox_min_z", "REAL"),
     ("bbox_max_x", "REAL"), ("bbox_max_y", "REAL"), ("bbox_max_z", "REAL"),
@@ -281,7 +287,10 @@ def _leartes_recipe(mesh: dict, exports_dir: Path) -> dict:
 
 def _kb3d_recipe(group: dict, exports_dir: Path) -> dict:
     """KitBash3D groups: attribute textures by `<material>_<suffix>` basename."""
-    mats = group.get("materials") or []
+    # a kit whose metadata pass never ran still carries the export step's
+    # material COUNT here -- no names to join, not a reason to crash
+    mats = group.get("materials")
+    mats = mats if isinstance(mats, list) else []
     by_mat: dict = {m: [] for m in mats}
     for t in (group.get("texture_files") or []):
         base, _ext = os.path.splitext(os.path.basename(t))
@@ -522,7 +531,8 @@ def _pretty(stem: str) -> str:
     return out[:1].upper() + out[1:] if out else stem
 
 
-def _record(e: dict, recipe: dict, bbox_min, bbox_max) -> dict:
+def _record(e: dict, recipe: dict, bbox_min, bbox_max,
+            default_source: str = "") -> dict:
     name = e.get("name") or ""
     fbx = e.get("fbx") or ""
     bbox = e.get("bbox_m") or [0, 0, 0]
@@ -541,9 +551,9 @@ def _record(e: dict, recipe: dict, bbox_min, bbox_max) -> dict:
         mat_count = int(mats or 0)
     texs = e.get("texture_files") or []
     pack = e.get("pack") or ""
-    src = e.get("source") or ("leartes" if fbx and "Leartes" in fbx
-                              else "kitbash3d" if fbx and "Kitbash" in fbx
-                              else "")
+    # a row without its own source takes the one of the index file it came
+    # from (JSONL_SOURCE) -- never a guess from folder names in the path
+    src = e.get("source") or default_source
     pretty = _pretty(name)
     words = _words(pretty)
     themes = _match_themes(pretty + " " + pack)
@@ -594,7 +604,11 @@ def _record(e: dict, recipe: dict, bbox_min, bbox_max) -> dict:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    """Run BEFORE MESHES_DDL (its indexes need the columns); a table that
+    does not exist yet is created complete by that DDL."""
     have = {r[1] for r in conn.execute("PRAGMA table_info(meshes)")}
+    if not have:
+        return
     for col, typ in MESH_EXTRA_COLUMNS:
         if col not in have:
             conn.execute(f"ALTER TABLE meshes ADD COLUMN {col} {typ}")
@@ -615,8 +629,8 @@ def import_meshes(db_path: str | Path) -> int:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        conn.executescript(MESHES_DDL)
         _migrate(conn)
+        conn.executescript(MESHES_DDL)
 
         by_ap, by_pn, raw_index, wiring, mstats = _manifest_index()
 
@@ -677,7 +691,8 @@ def import_meshes(db_path: str | Path) -> int:
                     if not recipe["resolved"]:
                         recipe = dict(EMPTY_RECIPE)   # never ship a half recipe
                     lo, hi = _bbox_pair(e, raw_index)
-                    r = _record(e, recipe, lo, hi)
+                    r = _record(e, recipe, lo, hi,
+                                JSONL_SOURCE.get(src.name, ""))
                     raw = r.pop("raw_name")
                     conn.execute(INSERT_SQL, (
                         r["name"], r["pack"], r["source"], r["kind"], r["fbx"],

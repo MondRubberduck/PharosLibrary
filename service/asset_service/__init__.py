@@ -22,4 +22,15 @@ Modules:
 Everything in this package treats the canonical asset roots as read-only.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.9.0"
+
+import sys as _sys
+
+# Console output must never crash on a name outside the console's code
+# page: agents read Pharos through a pipe, which on Windows is cp1252, and
+# a CJK/emoji folder name killed init, ingest and the scanner mid-run.
+for _stream in (_sys.stdout, _sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass

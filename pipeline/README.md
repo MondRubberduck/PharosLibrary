@@ -42,10 +42,15 @@ python make_sandbox.py                         # ONE-TIME: generate the local
 bash ./convert_packs.sh --pack "MyPack"        # adds --skip-meshes NAME for
                                                # exporter-crashing assets
 bash ./relink_pack.sh --pack "MyPack" --preview # engine-exact wiring, dry run
+bash ./relink_pack.sh --pack "MyPack"           # APPLY: manifest v2 = recipes
 python verify_pack_export.py "<pack>/Exports"  # must print PASS
+cd ../.. && python pharos.py ingest            # imports the pack + recipes
 ```
-Manifest schema: `pharos.pack.export/v2` (v1 = inventory only). Legacy
-`kiosk.*` schema IDs are accepted everywhere on read.
+Manifest schema: `pharos.pack.export/v2` (v1 = inventory only: meshes
+import, but WITHOUT material recipes until the relink is applied). Legacy
+`kiosk.*` schema IDs are accepted everywhere on read. Chain 1 runs on
+Windows (Unreal Editor + Git Bash); measured engine time is roughly
+1–30 minutes per pack.
 
 **The sandbox** (`sandbox/Sandbox.uproject`) is NOT shipped in the repo —
 it is an empty throwaway UE project whose EngineAssociation must match
@@ -64,9 +69,11 @@ resolved by basename fallback, `kit_manifest.json` per kit.
 cd pipeline/kitbash
 python export_all_kb3d.py            # newer packaging (.blender.native)
 python export_kb3d_rest.py           # older packaging (.blend in kit root)
-python run_kb3d_metadata.py          # enrich materials/textures (read-only .blend)
-python build_kb3d_index.py           # fold into _Agent_Files/kb3d_models.jsonl
+python run_kb3d_metadata.py          # material names + textures (needed for recipes)
+cd ../.. && python pharos.py ingest  # builds _Agent_Files/kb3d_models.jsonl + imports
 ```
+Blender is found automatically (`BLENDER_EXE`, then PATH, then the newest
+installed version).
 Kits root: `kitbash_root` in pharos_config.json or `PHAROS_KB3D_ROOT`.
 In-Blender scripts (`export_kb3d.py`, `kb3d_metadata.py`) are launched
 by the drivers — one Blender process per file (threaded FBX importer
@@ -79,10 +86,20 @@ crashes when batched).
 cd pipeline/native
 python recon_new.py                  # read-only scout of a downloads folder
 python make_native_manifest2.py      # build the indexing worklist
-bash index_native_all.sh             # enumerate containers (1 Blender proc each)
-python run_blends.py                 # .blend objects pass
+bash index_native_all.sh             # measure the model files (1 Blender session)
+python run_blends.py                 # .blend objects pass (1 Blender proc each)
 python promote_native.py && python promote_blends.py   # -> _Agent_Files
+cd ../.. && python pharos.py ingest  # import the new records
 ```
+
+What chain 3 covers: every top-level folder EXCEPT the ones `pharos.py
+ingest` already handles -- the animation section, the configured
+`scan_folders`, converted packs and exported kits (their `Exports/`).
+In practice that means the `.blend` folders ingest asked about. To leave
+a folder out, add its name to `indexer_skip_dirs` in pharos_config.json
+BEFORE running chain 3; to narrow a run that was too broad, delete
+`<library>/_Agent_Files/native_models.jsonl` first (the near-empty guard
+refuses to shrink a large live index on its own).
 
 `recon_new.py` and `promote_blends.py` find their sections in the library
 itself (the pack folders carrying `Exports/manifest.json`, the kit folders
@@ -102,15 +119,18 @@ python gen_tex_index.py && python gen_tex_md.py     # textures
 Audio/texture roots come from the config sections
 (`AGENT_AUDIO_ROOT` / `AGENT_TEX_ROOT` override). After any of these:
 restart the app — importers rebuild the registry from the new files.
-Every writer here refuses to overwrite a live index with fewer than 10
-records (`FATAL: only N records ...`); that guard is deliberate — see
-`docs/CAPABILITIES.md` §7 for what it means for a small library.
+Every writer here refuses to let a near-empty result (fewer than 10
+records, under half of the live index) replace a live index of 10 or more
+(`FATAL: only N ...`); first builds and small libraries are written — see
+`docs/CAPABILITIES.md` §7. `pharos.py ingest` runs `build_agent_index.py`
+and `build_kb3d_index.py` itself whenever converted packs or kits exist.
 
 ## Order of operations for brand-new downloads
 
 scout (`recon_new.py`) → convert packs (chain 1) and/or export kits
-(chain 2) → enumerate natives (chain 3) → rebuild indexes (chain 4) →
-`python pharos.py docs` → restart the server.
+(chain 2) → enumerate natives (chain 3) → optional richer audio/texture
+indexes (chain 4) → `python pharos.py ingest` (builds the model/kit
+indexes, imports everything, rewrites the agent docs) → restart the server.
 
 ## Standing rules carried over from production
 

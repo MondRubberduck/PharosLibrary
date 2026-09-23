@@ -9,16 +9,24 @@ import glob, io, json, os, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import agent_files
+from _config import agent_files, refuse_near_empty
 AGENT = agent_files()
-from _config import section_root
+from _config import load, section_root
 ROOT = section_root("kitbash", "PHAROS_KB3D_ROOT")
+# kits may sit under more than one parent folder: init keeps ONE
+# kitbash_root, but ingest records every kit parent in manifest_roots
+_ROOTS = ([ROOT] if os.environ.get("PHAROS_KB3D_ROOT") else
+          [ROOT] + [r for r in (load().get("manifest_roots") or [])
+                    if isinstance(r, str)])
+_MANS = sorted({os.path.normcase(os.path.abspath(m)): m for r in _ROOTS if r
+                for m in glob.glob(os.path.join(r, "*", "Exports",
+                                                "kit_manifest.json"))}.values())
 os.makedirs(AGENT, exist_ok=True)
 OUT = os.path.join(AGENT, "kb3d_models.jsonl")
 
 rows = []
 kits = 0
-for man_path in sorted(glob.glob(os.path.join(ROOT, "*", "Exports", "kit_manifest.json"))):
+for man_path in _MANS:
     kit_dir = os.path.dirname(os.path.dirname(man_path))
     kit = os.path.basename(kit_dir)
     exports = os.path.dirname(man_path)
@@ -74,10 +82,7 @@ for man_path in sorted(glob.glob(os.path.join(ROOT, "*", "Exports", "kit_manifes
         })
 
 rows.sort(key=lambda r: (r["pack"], r["name"] or ""))
-if len(rows) < 10:
-    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
-                     "live index with a near-empty scan (wrong root?)"
-                     % len(rows))
+refuse_near_empty(len(rows), OUT)
 with io.open(OUT, "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")

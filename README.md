@@ -15,51 +15,62 @@ availability — without walking the filesystem.
 
 ## Why it pays off
 
-Measured on a 446 GiB, 92k-file library across three end-to-end runs
-and two independent QA agents:
+Your coding agent gets **facts** in one short answer: real-world size, triangle count, material and texture maps, duration and ownership. Without Pharos it would have to walk the folders and open files, and most of these facts are in no readable file at all.
 
-| | With Pharos | Filesystem crawling | Saved |
-|---|---|---|---|
-| Tool calls per scene | ~320 | ~1,610 | 5× |
-| Content tokens per scene | ~1.3 M | ~9.5 M | ~86% |
-| Wall clock per scene | 1.5–3 h | 14–24 h | ~8× |
-| Novel-scene discovery* | 16–24k tokens | 180–250k tokens | ~90% |
+Measured on a real library of 81,063 files (12,280 models, 2,449 texture sets, 4,737 sounds, 1,313 animation clips). Tokens are roughly bytes ÷ 4.
 
-\* A scene type that exists nowhere in the library (a Brazilian
-favela), routed across four asset sections.
+| Your agent asks for… | Pharos answers with | Without Pharos, the agent has to… |
+|---|---|---|
+| a brick-wall texture set with all its maps | 10 matching sets, every map path: **~870 tokens** | find them in the folder tree. Even just the 727 file names containing "brick" are ~25,000 tokens. |
+| a thunder or rain sound, 5–30 seconds | 10 sounds with durations: **~590 tokens** | read 194 candidate names (~3,900 tokens), then open each file to learn its length |
+| wooden crates under 1.2 m | 10 crates with height, triangle count and material recipe: **~11,500 tokens** | open or parse every candidate model. Heights and triangle counts are written in no text file. |
+| a street pole at least 4 m tall | 10 poles with the same facts: **~35,000 tokens** (big multi-material meshes) | the same, for 129 candidates |
 
-These numbers come from recorded runs on one private library. They are
-directional evidence, not a controlled benchmark; a reproducible
-`bench/` harness is on the roadmap.
+For comparison, one plain listing of every file path in that library is about **2.4 million tokens**. Unreal packs can't be read at all without the Unreal Editor. Pharos converts them once, with your permission.
 
-## What you do
+Setup on a fresh machine took about **40 minutes** on a 9 GB test library, with the agent asking its questions and converting one Unreal pack. Every change is tested on Windows, Linux and macOS, including a headless Blender build.
 
-Three steps. Everything else is agent work.
+## Get started (no coding needed)
 
-**1. Get the app.**
+Your coding agent does all the technical work. You pick the folder, answer a few questions, and describe the scenes you want.
 
-```bash
-git clone https://github.com/MondRubberduck/PharosLibrary.git
-```
+**You need**
 
-**2. Paste the setup prompt into your coding agent.** Edit the two
-paths first.
+- **A coding agent** that can run commands on your computer, for example Claude Code, Codex or Cursor.
+- **Python 3.10 or newer** ([python.org](https://www.python.org/downloads/); on Windows tick "Add python.exe to PATH") and **Git** ([git-scm.com](https://git-scm.com/downloads)).
+- **Optional:** Blender 5.x to build scenes and export Blender kits. Unreal Editor 5.x (Windows) only to pull models and material recipes out of Unreal packs.
+
+**1. Set it up (one time).** Open your agent in any folder and paste this. Change the last line to your asset folder:
 
 ```
-Set up Pharos for my asset library. Setup only.
-Read <repo>/README.md, then <repo>/docs/STARTING_PROMPT.md and follow it
-exactly. My assets live at <D:/path/to/your/assets>.
+Clone https://github.com/MondRubberduck/PharosLibrary and set up Pharos
+for my asset library. Setup only, no scenes yet.
+Read README.md, then docs/STARTING_PROMPT.md, and follow it exactly.
+My assets live at: D:\path\to\my\assets
 ```
 
-**3. Whenever you want a scene, paste the build prompt with your idea.**
+**2. Answer its questions.** The agent scans your folder, then asks what only you can decide:
+
+- Are there other asset folders, on other drives?
+- Should it convert your Unreal packs? This is slow: roughly 1–30 minutes per pack.
+- Should it export your Blender kits or list what is inside your .blend files?
+- Do you have a purchase list (a CSV with Name, URL, Price)?
+
+Not sure? Say **no**. Every step can be done later. Nothing slow starts without your yes.
+
+**3. Wait for "setup complete".** The agent reports how many models, textures, sounds and animations it indexed, then stops.
+
+**4. Build scenes whenever you like.** Replace both placeholders:
 
 ```
-Build me a scene with my Pharos library: <your one-line idea>.
-Read <library>/_Agent_Files/AGENT_START_HERE.md first and follow
-docs/AGENT_PLAYBOOK.md phase 2.
+Build me a scene with my Pharos library: <your idea>.
+Read <your asset folder>/_Agent_Files/AGENT_START_HERE.md first and
+follow <the Pharos folder>/docs/AGENT_PLAYBOOK.md, phase 2.
 ```
 
-The dashboard opens at http://127.0.0.1:8765 whenever the server runs.
+**Next day, or after adding new assets?** Tell your agent to "run `python pharos.py ingest`, then start the Pharos server". The dashboard opens at http://127.0.0.1:8765.
+
+**Your files stay untouched.** Pharos only reads your assets. Inside your library it writes just two kinds of things: its index folder `_Agent_Files`, and an `Exports` folder for Unreal or Blender conversions you approved.
 
 ## What your agent does
 
@@ -104,8 +115,9 @@ never errors.
 
 - Python 3.10+. The core server is stdlib-only; the optional MCP
   integration adds one package (`pip install "mcp<2"`).
-- Optional: Blender 5.x, Unreal Editor 5.x, Git Bash — only for the
-  pipeline chains.
+- Optional: Blender 5.x (scene building, Blender kit export, .blend
+  enumeration), Unreal Editor 5.x on Windows with Git Bash (Unreal pack
+  conversion).
 - Windows, Linux and macOS are covered by CI.
 
 ## How it fits together

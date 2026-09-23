@@ -5,8 +5,11 @@ from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import section_root
-BLENDER = os.environ.get("BLENDER_EXE", r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe")
+from _config import blender_exe, section_root
+BLENDER = blender_exe()
+if not BLENDER:
+    raise SystemExit("FATAL: Blender not found -- set BLENDER_EXE to your "
+                     "Blender executable (see pipeline/README.md)")
 SCRIPT = os.path.join(T, "kb3d_metadata.py")
 ROOT = section_root("kitbash", "PHAROS_KB3D_ROOT")
 if not ROOT or not os.path.isdir(ROOT):

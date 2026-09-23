@@ -2,7 +2,7 @@ from pathlib import Path
 import os, re, json, collections, datetime, struct, sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import section_root
+from _config import refuse_near_empty, section_root
 ROOT = section_root("textures", "AGENT_TEX_ROOT")
 TMP = os.path.dirname(os.path.abspath(__file__))
 if not os.path.isdir(ROOT):
@@ -373,7 +373,7 @@ index = {
     "resolutions": {"by_bucket": dict(resb.most_common()), "by_exact_top20": dict(exact.most_common(20))},
     "naming_conventions": {
         "PBR_suffixes": "Map type in the 'map' field: albedo/diffuse, normal, roughness/glossiness, ao, height/disp, metalness, reflection/specular, emissive, opacity/alpha/mask.",
-        "Gumroad_lib": "4K_Textures_Gumroad/<Class>/<material>/<material>_<map>.jpg - each <material> folder is one PBR set (~8-9 maps incl. render preview).",
+        "per_set_folders": "<Class>/<material>/<material>_<map>.jpg - a folder whose files share one <material> stem is one PBR set.",
         "Textures_com": "TexturesCom_<Name>_<tiling>x<tiling>_<res>_<type>.tif ; trailing _S/_M/_L on preview JPGs are SIZE variants, not maps.",
         "Poliigon_like": "<Name>_<id>_<type> (e.g. _COLOR/_NRM/_DISP/_OCC/_SPEC/_GLOSS).",
     },
@@ -386,16 +386,16 @@ index = {
     },
     "notes": {
         "layout": "Files are physically unchanged (NOT reorganised). This index provides virtual tags; texture/PBR sets must stay together for project references.",
-        "biggest_folder": "4K_Textures_Gumroad holds the bulk (PBR sets, ~2K after an earlier downsize).",
+        "biggest_folder": ("%s holds %d of %d texture files" % (
+            collections.Counter(r["top"] for r in rows).most_common(1)[0]
+            + (len(rows),)) if rows else "no texture files found"),
         "heuristic": "Categories come from folder/filename keywords; 'set' grouping and 'maps' are heuristic.",
     },
 }
 # LOUD target + refusal: a wrong root once overwrote live index files
 print("WRITE TARGET: %s (library_index/files/material_sets)" % ROOT)
-if len(rows) < 10:
-    raise SystemExit("FATAL: only %d texture files -- refusing to "
-                     "overwrite a live index with a near-empty scan "
-                     "(wrong root?)" % len(rows))
+refuse_near_empty(len(rows), os.path.join(ROOT, "library_files.jsonl"),
+                  "texture files")
 json.dump(index, open(os.path.join(ROOT, "library_index.json"), "w", encoding="utf-8"), ensure_ascii=True, indent=1)
 
 with open(os.path.join(ROOT, "library_files.jsonl"), "w", encoding="utf-8") as fh:

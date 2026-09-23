@@ -19,10 +19,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "service"))
-from _config import library_root
+from _config import agent_files, library_root, refuse_near_empty
 from asset_service.fbx_dims import fbx_file_info
 LIB = library_root() or "."
-AGENT = os.path.join(LIB, "_Agent_Files")
+AGENT = agent_files() or os.path.join(LIB, "_Agent_Files")
 os.makedirs(AGENT, exist_ok=True)
 
 MODEL_EXT = {".fbx", ".obj", ".blend", ".usd", ".usda", ".usdc", ".abc",
@@ -164,9 +164,7 @@ for name in sorted(os.listdir(LIB)):
 
 # packs.json is a LIVE index too: refuse BEFORE writing it, so a wrong root
 # cannot leave an empty pack list behind for the app to read
-if len(packs) < 10:
-    raise SystemExit("FATAL: only %d packs -- refusing to overwrite a live "
-                     "index with a near-empty scan (wrong root?)" % len(packs))
+refuse_near_empty(len(packs), os.path.join(AGENT, "packs.json"), "packs")
 
 io.open(os.path.join(AGENT, "packs.json"), "w", encoding="utf-8").write(
     json.dumps({"schema": "pharos.agent.packs/v1", "generated": now,
@@ -181,6 +179,17 @@ for rec in packs:
     ex = (rec.get("export") or {}).get("dir")
     if ex:
         manifest_dirs.append((rec.get("pack") or rec["section"], ex))
+# packs.json looks two levels deep; converted packs can sit deeper
+# (<top>/<category>/<pack>/Exports) and ingest imports their recipes, so
+# every Exports/manifest.json in the library must also get its mesh rows
+_seen = {os.path.normcase(os.path.abspath(ex)) for _, ex in manifest_dirs}
+for dp, dn, fn in os.walk(LIB):
+    dn[:] = [x for x in dn if not x.startswith((".", "_")) and x != "Exports"]
+    ex = os.path.join(dp, "Exports")
+    if (os.path.isfile(os.path.join(ex, "manifest.json"))
+            and os.path.normcase(os.path.abspath(ex)) not in _seen):
+        _seen.add(os.path.normcase(os.path.abspath(ex)))
+        manifest_dirs.append((os.path.basename(dp), ex))
 
 for pack, ex in manifest_dirs:
     man = read_manifest(ex)
@@ -214,10 +223,7 @@ for pack, ex in manifest_dirs:
         })
 
 rows.sort(key=lambda r: (r["pack"], r["name"] or ""))
-if len(rows) < 10:
-    raise SystemExit("FATAL: only %d records -- refusing to overwrite a "
-                     "live index with a near-empty scan (wrong root?)"
-                     % len(rows))
+refuse_near_empty(len(rows), os.path.join(AGENT, "models.jsonl"))
 with io.open(os.path.join(AGENT, "models.jsonl"), "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")

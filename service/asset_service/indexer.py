@@ -399,6 +399,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not root.is_dir():
         print(f"error: root {root} does not exist", file=sys.stderr)
         return 2
+    # a registry left behind by ANOTHER library: refuse before writing (one
+    # indexer run used to stamp-by-rows it as ours; doctor then said READY
+    # with the other library's counts)
+    if not args.dry_run and config.is_configured():
+        owner = db.registry_foreign(args.db, config.LIBRARY_ROOT)
+        if owner:
+            print(db.foreign_registry_message(args.db, owner,
+                                              config.LIBRARY_ROOT))
+            return 2
     index_root(root, Path(args.db), args.limit, args.dry_run, args.verbose, cfg,
                subtree=args.subtree)
     return 0

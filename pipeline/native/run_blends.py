@@ -4,7 +4,12 @@ import io, json, os, subprocess, sys
 from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
-BLENDER = os.environ.get("BLENDER_EXE", r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _config import blender_exe
+BLENDER = blender_exe()
+if not BLENDER:
+    raise SystemExit("FATAL: Blender not found -- set BLENDER_EXE to your "
+                     "Blender executable (see pipeline/README.md)")
 SCRIPT = os.path.join(T, "index_native.py")
 MAN = os.path.join(T, "native_manifest.json")
 OUT = os.path.join(T, "native_index_blends.jsonl")

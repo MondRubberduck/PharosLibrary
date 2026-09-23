@@ -218,6 +218,27 @@ def _anim_prefix() -> str:
     return "pack::" + (config.SECTIONS.get("animation") or "Animation")
 
 
+# Retarget body for skeleton-only clips: one library's own asset, looked up
+# at this layout UNDER THE CONFIGURED animation section. Libraries without
+# it preview bones-only (the pages get '' from the server, never a literal).
+_RIG_SUBPATH = "Actor/motion-dummy_male/Render_Dummy.fbx"
+
+
+def _rig_rel(section: Optional[str] = None,
+             root: Optional[Path] = None) -> str:
+    """Library-relative rig path, or '' when that file does not exist."""
+    sec = section or config.SECTIONS.get("animation") or "Animation"
+    rel = f"{sec}/{_RIG_SUBPATH}"
+    return rel if ((root or CANONICAL_ROOTS[0]) / rel).is_file() else ""
+
+
+def _with_rig(page: str) -> str:
+    """Serve a page with its {{RIG_REL}} placeholder (the body of a JS
+    double-quoted string) filled from _rig_rel()."""
+    return page.replace("{{RIG_REL}}",
+                        json.dumps(_rig_rel())[1:-1].replace("<", "\\u003c"))
+
+
 _thumb_lock = threading.Lock()
 _thumbs: list[dict] = []          # {"index": i, "abs": path, "key": mirrored rel}
 _pack_thumb: dict[str, int] = {}  # pack id -> thumb index
@@ -1344,9 +1365,10 @@ def api_anim_tree() -> dict:
         "GROUP BY a.id ORDER BY a.id",
         (len(prefix), prefix)).fetchall()
     conn.close()
-    return {"rig_body": "Animation/Actor/motion-dummy_male/Render_Dummy.fbx",
+    return {"rig_body": _rig_rel() or None,
             "rig_note": "skeleton-only clips retarget onto this body "
-                        "(bone-name match, CC rig family)",
+                        "(bone-name match, CC rig family); null = no rig "
+                        "in this library, clips show as bones",
             "folders": [
         {"pack": r["id"],
          "folder": r["id"][len("pack::"):],
@@ -1507,9 +1529,10 @@ let grid=null,mixer=null,playing=true,holder=null,clips=[],currentRel='',mode='f
 
 // skeleton-only clips all target the Actor motion-dummy rig
 // ("skeletons should be the same") — show its body instead of naked bones
-const RETARGET_REL='Animation/Actor/motion-dummy_male/Render_Dummy.fbx';  // clean re-export rig
+const RETARGET_REL="{{RIG_REL}}";  // from the server; '' = no rig in this library
 let dummyObj=null,dummyPromise=null;
 function getDummy(){
+  if(!RETARGET_REL)return Promise.reject(new Error('no retarget rig'));
   if(!dummyPromise){
     const L=new FBXLoader();
     L.setResourcePath('/res/'+encodeURIComponent(RETARGET_REL.split('/').slice(0,-1).join('/'))+'/');
@@ -1917,6 +1940,7 @@ const observer=new IntersectionObserver(es=>{
 const keyByRel=new Map();   // server is the source of truth for cache keys
 
 let pdummy=null;
+const RIG="{{RIG_REL}}";   // from the server; '' = no rig -> bones-only previews
 function pgetRenderer(){if(!prenderer){
   prenderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
   prenderer.setSize(PW,PH);prenderer.setPixelRatio(1);
@@ -1925,9 +1949,10 @@ function pgetRenderer(){if(!prenderer){
   if(THREE.ACESFilmicToneMapping!==undefined){prenderer.toneMapping=THREE.ACESFilmicToneMapping;
    prenderer.toneMappingExposure=1.35;}}return prenderer;}
 function pgetDummy(){
+ if(!RIG)return Promise.reject(new Error('no retarget rig'));
  if(!pdummy){const L=new FBXLoader();
-  L.setResourcePath('/res/'+encodeURIComponent('Animation/Actor/motion-dummy_male')+'/');
-  pdummy=new Promise((res,rej)=>L.load('/file?path='+encodeURIComponent('Animation/Actor/motion-dummy_male/Render_Dummy.fbx'),
+  L.setResourcePath('/res/'+encodeURIComponent(RIG.split('/').slice(0,-1).join('/'))+'/');
+  pdummy=new Promise((res,rej)=>L.load('/file?path='+encodeURIComponent(RIG),
     res,undefined,e=>{pdummy=null;rej(e);}));}
  return pdummy;}
 function pfit(cam,holder){
@@ -2160,11 +2185,13 @@ try{
   v.src=URL.createObjectURL(blob);});
  line('round-trip decode: '+dec,dec.startsWith('decode OK'));
  // fetch + upload path
- const fr=await fetch('/file?path='+encodeURIComponent('Animation/Actor/motion-dummy_male/Render_Dummy.fbx'));
+ const RIG="{{RIG_REL}}";   // from the server; '' = no rig in this library
+ if(RIG){const fr=await fetch('/file?path='+encodeURIComponent(RIG));
  const fb=await fr.arrayBuffer();
- line('FBX fetch: '+fr.status+', '+fb.byteLength+' bytes',fr.ok&&fb.byteLength>1000000);
+ line('FBX fetch: '+fr.status+', '+fb.byteLength+' bytes',fr.ok&&fb.byteLength>1000000);}
+ else line('FBX fetch: skipped (no retarget rig in this library)',true);
  // store route reachable + validating (400 expected: fake clip does not exist)
- const up=await fetch('/api/preview/store?clip='+encodeURIComponent('Animation/__selftest.fbx'),
+ const up=await fetch('/api/preview/store?clip='+encodeURIComponent('__selftest.fbx'),
    {method:'POST',body:new Uint8Array(4096)});
  const upj=await up.json();
  line('store route: HTTP '+up.status+' '+JSON.stringify(upj)+' (400 expected)',up.status===400);
@@ -2191,13 +2218,14 @@ import {FBXLoader} from 'three/addons/loaders/FBXLoader.js';
 const $=id=>document.getElementById(id);
 const big=$('big'),bar=$('bar').firstElementChild,logEl=$('log');
 const el=(t,cls)=>{const d=document.createElement('div');if(cls)d.className=cls;d.textContent=t;logEl.appendChild(d);if(logEl.children.length>12)logEl.firstChild.remove();return d;};
-const PW=480,PH=270,FPS=30,MAXDUR=6,SPEED=2,DUMMY='Animation/Actor/motion-dummy_male/Render_Dummy.fbx';
+const PW=480,PH=270,FPS=30,MAXDUR=6,SPEED=2,DUMMY="{{RIG_REL}}";  // from the server; '' = no rig
 const RATE=(1/SPEED).toFixed(3);
 function loadF(rel,dir){
  const L=new FBXLoader();
  L.setResourcePath('/res/'+encodeURIComponent(dir)+"/");
  return new Promise((res,rej)=>L.load("/file?path="+encodeURIComponent(rel),res,undefined,rej));}
 async function makeLane(i){
+ if(!DUMMY)throw new Error("no retarget rig in this library");
  const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
  renderer.setSize(PW,PH);renderer.setPixelRatio(1);
  const scene=new THREE.Scene();
@@ -2205,7 +2233,7 @@ async function makeLane(i){
  scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.9));
  const key=new THREE.DirectionalLight(0xffffff,2.8);key.position.set(3,6,4);scene.add(key);
  const fill=new THREE.DirectionalLight(0xcfe0ff,1.1);fill.position.set(-4,2,5);scene.add(fill);
- const dummy=await loadF(DUMMY,"Animation/Actor/motion-dummy_male");
+ const dummy=await loadF(DUMMY,DUMMY.split("/").slice(0,-1).join("/"));
  const bind=new Map();
  dummy.traverse(o=>{if(o.isBone||o===dummy)bind.set(o,[o.position.clone(),o.quaternion.clone(),o.scale.clone()]);});
  return {renderer,scene,dummy,bind};}
@@ -2302,6 +2330,9 @@ async function main(){
  big.textContent="0 / "+total;
  const lanes=(await Promise.all([0,1,2,3].map(i=>makeLane(i).catch(e=>{
    el("lane "+i+" unavailable: "+(e&&e.message||e),"err");return null;})))).filter(Boolean);
+ if(!lanes.length){   // no lane = every clip failed, never "DONE, 0 failed"
+  big.textContent="FAILED — 0 rendered, "+total+" failed (of "+total+"): no render lane started. "
+   +"The /animation page renders bones-only previews without a rig.";return;}
  el(lanes.length+" parallel lanes running (2x recording speed)");
  let done=0,failed=0,cursor=0;
  async function worker(lane){
@@ -2572,7 +2603,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/":
                 _prefix = _anim_prefix()
-                anim = _pack_thumb.get("pack::Animation/Actor")
+                # the rig's pack thumbnail (under the configured section)
+                anim = _pack_thumb.get(
+                    _prefix + "/" + _RIG_SUBPATH.split("/")[0])
                 conn = db.connect(_DB_PATH)
                 aclips = conn.execute(
                     "SELECT COUNT(*) FROM asset_files f JOIN assets a ON a.id=f.asset_id "
@@ -2657,11 +2690,11 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/pack":
                 self._html(PACK_PAGE.encode("utf-8"))
             elif url.path == "/animation":
-                self._html(ANIM_PAGE.encode("utf-8"))
+                self._html(_with_rig(ANIM_PAGE).encode("utf-8"))
             elif url.path == "/gltest":
-                self._html(GLTEST_PAGE.encode("utf-8"))
+                self._html(_with_rig(GLTEST_PAGE).encode("utf-8"))
             elif url.path == "/batchrender":
-                self._html(BATCH_PAGE.encode("utf-8"))
+                self._html(_with_rig(BATCH_PAGE).encode("utf-8"))
             elif url.path == "/api/stats":
                 self._json(api_stats())
             elif url.path == "/api/collection/tree":
@@ -2877,7 +2910,7 @@ class Handler(BaseHTTPRequestHandler):
                             break
                         self._write(chunk)
             elif url.path == "/viewer":
-                self._html(VIEWER_PAGE.encode("utf-8"))
+                self._html(_with_rig(VIEWER_PAGE).encode("utf-8"))
             elif url.path.startswith("/static/"):
                 rel = url.path[len("/static/"):]
                 static_file = (STATIC_DIR / rel).resolve()
@@ -3094,6 +3127,13 @@ def main(argv=None) -> int:
               flush=True)
         return 2
     _DB_PATH = args.db
+    # a registry left behind by ANOTHER library: refuse before the
+    # importers write into it (they kept its rows, mixed with this one's)
+    _owner = db.registry_foreign(_DB_PATH, config.LIBRARY_ROOT)
+    if _owner:
+        print(db.foreign_registry_message(_DB_PATH, _owner,
+                                          config.LIBRARY_ROOT), flush=True)
+        return 2
 
     build_thumb_index()
     db.init_db(_DB_PATH)   # applies schema migrations (source_url etc.)
@@ -3118,6 +3158,10 @@ def main(argv=None) -> int:
         print(f"meshes imported: {m_n} records", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"meshes import skipped: {exc}", flush=True)
+    try:
+        db.stamp_registry(_DB_PATH, config.LIBRARY_ROOT)   # this library's
+    except Exception as exc:  # noqa: BLE001
+        print(f"registry stamp skipped: {exc}", flush=True)
     # self-heal the preview cache: drop stub/empty recordings and orphaned
     # sidecars so a broken render can never linger as a black thumbnail
     if PREVIEW_DIR.is_dir():
@@ -3153,19 +3197,15 @@ def main(argv=None) -> int:
           f" textures={t_n} audio={a_n} meshes={m_n}"
           f" anim_packs={_afold}", flush=True)
     if config.is_configured():
-        covered = {config.ANIM_ROOT.name, config.TEX_ROOT.name,
-                   config.AUDIO_ROOT.name, config.COLLECTION_ROOT.name,
-                   config.AGENT_FILES.name}
-        covered.update(p.name for p in config.MANIFEST_ROOTS)
-        try:
-            strays = [d.name for d in config.LIBRARY_ROOT.iterdir()
-                      if d.is_dir() and not d.name.startswith((".", "_"))
-                      and d.name not in covered]
-        except OSError:
-            strays = []
+        # the same rule as ingest's ASK block (sections, scan folders, skip
+        # dirs, manifest/kit roots AND the registry's rows): listing indexed
+        # scan folders here told agents to re-scan them -> duplicates
+        from asset_service.init import _not_indexed_dirs
+        strays = _not_indexed_dirs(config.LIBRARY_ROOT, config.load(),
+                                   _DB_PATH)
         if strays:
             print(f"NOT INDEXED (no section claims these): "
-                  f"{', '.join(sorted(strays))}", flush=True)
+                  f"{', '.join(strays)}", flush=True)
             print("  -> scan with scanner.py <folder> or edit "
                   "pharos_config.json sections, then restart", flush=True)
     print(f"registry browser: http://{host}:{args.port}  "

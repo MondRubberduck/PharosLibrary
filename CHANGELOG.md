@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.9.0 (2026-09-23)
+Release candidate for the public launch. Two scene-building stress tests and a real "stranger machine" run (fresh clone, other Windows laptop, other Python and Blender, messy test library) drove every change. The main setup flow now runs end to end without a single manual workaround.
+
+**Setup works on other people's machines**
+- **Old or foreign registry.** A registry left behind by another library, or by an older Pharos, now makes `ingest`, `serve`, `scanner.py` and `indexer.py` stop with one clear message that names the file to delete. Before, it crashed or silently mixed two libraries. Older registries are migrated before use. Re-running `init` one folder higher is accepted.
+- **Converted packs.** Unreal packs and KitBash kits are imported by `ingest` itself, exactly once and with their material recipes.
+  - `ingest` builds the model and kit indexes and adds newly converted pack folders to the config (additive only).
+  - It notices packs that were copied in, removed, or sit at any depth.
+  - The scanner no longer indexes converted packs a second time, and it removes scan rows left over from before a pack was converted.
+- **Small libraries.** They no longer hit "fewer than 10 records = FATAL". The index guard now only refuses a near-empty result replacing a real index.
+- **Any animation folder name.** doctor, the agent docs, MCP, previews and chain 3 all use the configured section instead of assuming `Animation`. `/batchrender` reports failures honestly.
+- **Any Blender, any Unreal.** Blender is found by `BLENDER_EXE`, then PATH, then the newest installed version, instead of a hard-coded Blender 5.1 path. Unreal 5.5+ conversions no longer fail on missing vertex counts; the verifier reads them from the exported FBX.
+- **Non-Latin folder names.** Japanese, Cyrillic and emoji folder names no longer crash init, ingest or the scanner when an agent reads the output through a pipe.
+- **Input files as people write them.** A `pharos_config.json` saved with a BOM (Windows PowerShell) is read. A purchase CSV with headers like `name,url,price` imports correctly.
+- **Configured sections.** `ingest` scans the configured audio folder, and `init` prints the sections it actually writes.
+
+**The library tells the truth**
+- **Material recipes flag, never drop.** Placeholder and master-default textures are flagged, masks are no longer used as ORM maps, and the served `primary` pick is the one the Blender builder wires. Exact role aliases (e.g. `Base Map`, `Emmisive`, `NRM`) are recognised.
+- **Real counts and heights.** Triangle and vertex counts come from the exported FBX, and unknown counts are stored as NULL instead of 0. `height_m` is the Z (up) extent.
+- **Complete crawls.** Texture sets without a preview image and HDR/EXR panoramas are indexed, and macOS metadata files are skipped.
+- **Search.** Plural words match (`crates` finds `crate`), audio search no longer floods, and every search endpoint reports `mode`/`exact`. Audio ids stay stable across restarts.
+- **Chain 3 stays in scope.** It no longer re-indexes folders `ingest` already scans or kit exports that the kit index covers.
+
+**Tests and CI**
+- One CI step per test suite, the MCP check really runs in CI, and a new Linux job builds and reopens scenes in headless Blender.
+- Tests never touch a user's config or pipeline outputs.
+
+**Docs**
+- The README has an artist-friendly "Get started" and measured token numbers.
+- Setup, playbook, capability, pipeline and MCP docs were corrected against the code.
+
 ## 0.3.0 (2026-09-21)
 Generalization: the second external-review batch. Pharos now works on
 libraries that do not look like the author's own — verified with a

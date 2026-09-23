@@ -1,7 +1,10 @@
 # Pharos — starting prompt for your coding agent
 
-This is the one thing you paste at the very start. Edit the two paths in
-angle brackets, copy the fenced block, send it. Everything else — the
+This is the one thing you paste at the very start. Replace the asset
+folder path in angle brackets (`<repo>` is wherever you or your agent
+cloned Pharos -- the agent fills it in), copy the fenced block, send it.
+If you did not give an asset folder, the agent must ask you for it
+before running anything. Everything else — the
 census, the decisions, the interview — is the agent's job; the agent's
 step-by-step contract lives in [`AGENT_SETUP_BRIEF.md`](AGENT_SETUP_BRIEF.md).
 
@@ -31,7 +34,7 @@ Set up Pharos for my asset library. Setup only — do not build scenes yet.
 3. Relay those questions to me, PLUS every question the BRIEF's decision
    matrix triggers for what the census actually found — at minimum:
    UE pack crawl yes/no, .blend handling (enumerate / kit-export /
-   leave as-is), purchase CSV, crawl-quality audio+texture indexes,
+   leave as-is), purchase CSV, richer audio+texture indexes,
    other drives. WAIT for my answers before running anything that needs
    Unreal or Blender.
 

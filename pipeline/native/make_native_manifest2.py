@@ -32,8 +32,11 @@ def already_converted(section: str) -> bool:
 
 # never enumerate: the app's own output, the sections the app indexes itself,
 # whatever the owner's config excludes, and anything already converted
-SKIP_TOP = ({"Animation", "_Agent_Files"}
+SKIP_TOP = ({(_cfg.get("sections") or {}).get("animation") or "Animation",
+             _cfg.get("agent_files") or "_Agent_Files"}
             | set(_cfg.get("indexer_skip_dirs") or [])
+            # folders `pharos.py ingest` already scans (scanner rows)
+            | set(_cfg.get("scan_folders") or [])
             | {top for top in os.listdir(LIB) if already_converted(top)})
 
 items = []
@@ -44,6 +47,11 @@ for top in sorted(os.listdir(LIB)):
     if not os.path.isdir(root):
         continue
     for dp, dn, fn in os.walk(root):
+        # converted packs / exported kits at ANY depth come in through
+        # their manifests (models.jsonl / kb3d_models.jsonl): never again
+        dn[:] = [d for d in dn if not (d == "Exports" and any(
+            os.path.isfile(os.path.join(dp, d, m))
+            for m in ("manifest.json", "kit_manifest.json")))]
         for f in fn:
             e = os.path.splitext(f)[1].lower()
             if e not in MODEL_EXT:

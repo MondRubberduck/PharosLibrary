@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # .../service
-from asset_service import config  # noqa: E402
+from asset_service import config, db  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP
 
@@ -41,7 +41,7 @@ def _db() -> sqlite3.Connection:
     An unconfigured start used to sqlite3-connect the default path in
     whatever CWD the MCP client launched from -- creating a stray empty
     assets.sqlite there -- and then fail with raw sqlite errors on every
-    tool call. Preflight + mode=rw (no create) instead: clear errors,
+    tool call. Preflight (config + file exists) instead: clear errors,
     zero side effects."""
     if not config.is_configured():
         raise FileNotFoundError(
@@ -53,7 +53,9 @@ def _db() -> sqlite3.Connection:
         raise FileNotFoundError(
             f"registry not found at {p} -- start the server once "
             f"(`python pharos.py serve`) or run an import, then retry")
-    conn = sqlite3.connect(f"file:{p.as_posix()}?mode=rw", uri=True)
+    # plain path: the file exists (checked above), so nothing is created;
+    # a file: URI fails on UNC paths and truncates at a '#' in the path
+    conn = sqlite3.connect(str(p))
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -66,12 +68,9 @@ def _tokens(query: str) -> list:
 
 def _animation_clip_count(conn: sqlite3.Connection) -> int:
     """Clips = FBX/BVH under the ANIMATION packs only (mesh packs contain
-    FBX too; counting everything inflated this number on mixed libs)."""
-    return conn.execute(
-        "SELECT COUNT(*) FROM asset_files f JOIN assets a "
-        "ON a.id = f.asset_id WHERE a.id LIKE 'pack::Animation/%' "
-        "AND (lower(f.relative_path) LIKE '%.fbx' "
-        "OR lower(f.relative_path) LIKE '%.bvh')").fetchone()[0]
+    FBX too; counting everything inflated this number on mixed libs).
+    The section folder name comes from the config, never a literal."""
+    return db.anim_clip_count(conn, config.SECTIONS.get("animation"))
 
 
 @mcp.tool()

@@ -6,8 +6,10 @@ Discovers:
   - Mesh files (.fbx, .obj, .glb, .gltf, .stl, .usd, .blend) → mesh records
   - Texture folders (albedo/normal/roughness/… files grouped by stem) → texture sets
   - Audio files (.wav, .ogg, .mp3, .flac) → audio records with duration
-  - Any Exports/manifest.json in the tree → authoritative GEOMETRY STATS
-    (triangles/bbox) for matching meshes
+  - Converted packs (a folder holding Exports/manifest.json or
+    Exports/kit_manifest.json) are SKIPPED: they are imported through their
+    manifests (pharos.py ingest). Scanning an Exports folder directly still
+    reads its manifest.json for GEOMETRY STATS (triangles/bbox)
 
 The scanner is honest about its limits:
   - FBX bounding boxes are extracted when possible (binary FBX parse for
@@ -200,10 +202,14 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
         # a fresh install may run the scanner BEFORE the server ever
         # started -- create every table this scanner writes (all DDLs are
         # IF NOT EXISTS, so this is a no-op against an existing registry)
-        from asset_service.meshes_import import MESHES_DDL
+        from asset_service.meshes_import import MESHES_DDL, _migrate
         from asset_service.textures_import import (TEXTURES_DDL,
                                                    ensure_scan_unique_index)
         from asset_service.audio_import import AUDIO_DDL, ensure_source_column
+        # an OLDER registry's tables lack columns the new indexes filter on
+        # (`source`): migrate first, then create (every scan crashed with
+        # 'no such column: source' on a registry from an older Pharos)
+        _migrate(conn)
         conn.executescript(MESHES_DDL + TEXTURES_DDL + AUDIO_DDL)
         # the audio source column and the textures scan-unique index
         # post-date some registries: make sure THIS writer can write
@@ -212,12 +218,36 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
         ensure_scan_unique_index(conn)
         conn.commit()
 
+    # converted packs (a folder holding Exports/manifest.json or
+    # Exports/kit_manifest.json) are imported through their manifests by
+    # meshes_import; scanning them too indexed every FBX a second time,
+    # without its recipe. Scanning an Exports folder directly still works.
+    converted = {m.parent.parent for pat in ("Exports/manifest.json",
+                                             "Exports/kit_manifest.json")
+                 for m in folder.rglob(pat)}
+    # a pack scanned while still RAW keeps its old scan rows after it is
+    # converted (scan rows survive every rebuild): drop them, or the mesh
+    # shows up twice -- once from the manifest (with recipe), once here
+    if converted and conn is not None:
+        from asset_service.db import path_under
+        stale = [(tbl, rid) for tbl, col in (("meshes", "fbx"),
+                                             ("textures", "folder"))
+                 for rid, val in conn.execute(
+                     f"SELECT id, {col} FROM {tbl} WHERE source='scan'")
+                 if val and any(path_under(val, c) for c in converted)]
+        for tbl, rid in stale:
+            conn.execute(f"DELETE FROM {tbl} WHERE id=?", (rid,))
+        if stale:
+            conn.commit()
+            print(f"  removed {len(stale)} earlier scan row(s) inside "
+                  f"converted pack(s)", flush=True)
+
     manifests = {}
     for mf in folder.rglob("manifest.json"):
         # skip .bak files — only exact filename (handover instruction)
         if mf.name != "manifest.json":
             continue
-        if "Exports" not in str(mf.parent):
+        if "Exports" not in str(mf.parent) or mf.parent.parent in converted:
             continue
         try:
             m = json.loads(mf.read_text(encoding="utf-8"))
@@ -240,6 +270,9 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
         # meshes/audio and polluted every size filter
         if p.name.startswith("._") or p.name == ".DS_Store":
             continue
+        if converted and any(a in converted for a in p.parents):
+            summary["skipped"] += 1
+            continue
         ext = p.suffix.lower()
         if ext in MESH_EXTS or ext in BLEND_EXTS:
             mesh_files.append(p)
@@ -247,6 +280,13 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
             audio_files.append(p)
         elif ext in IMAGE_EXTS:
             image_files.append(p)
+    if summary["skipped"]:
+        print(f"  skipped {summary['skipped']} file(s) in {len(converted)} "
+              f"converted pack folder(s) "
+              f"({', '.join(sorted(c.name for c in converted))}): they hold "
+              f"Exports/manifest.json or Exports/kit_manifest.json and are "
+              f"imported through their manifests by 'pharos.py ingest', "
+              f"not scanned", flush=True)
 
     # --- mesh records ---
     # if a manifest covers this folder, use its data (exact wiring)
@@ -283,9 +323,9 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
                         "fbx": mf.as_posix(), "on_disk": 1,
                         "bytes": mf.stat().st_size,
                         "triangles": (g["triangles"] if g
-                                      else me.get("triangles", 0)),
+                                      else me.get("triangles")),
                         "vertices": (g["vertices"] if g
-                                     else me.get("vertices", 0)),
+                                     else me.get("vertices")),
                         "bbox": bbox,
                     }
                 else:
@@ -317,8 +357,10 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
                         "name": name, "pack": folder.name, "source": "scan",
                         "kind": "mesh", "fbx": mf.as_posix(), "on_disk": 1,
                         "bytes": mf.stat().st_size,
-                        "triangles": geo["triangles"] if geo else 0,
-                        "vertices": geo["vertices"] if geo else 0,
+                        # unknown stays NULL: a 0 passed every max_tri
+                        # filter for free (same rule as meshes_import)
+                        "triangles": geo["triangles"] if geo else None,
+                        "vertices": geo["vertices"] if geo else None,
                         "bbox": geo["bbox"] if geo else [0, 0, 0],
                     }
 
@@ -472,9 +514,23 @@ def main(argv=None) -> int:
         print(f"error: {folder} is not a directory", file=sys.stderr)
         return 1
 
+    # a registry left behind by ANOTHER library: refuse before writing
+    dbp = args.db or config.DB_PATH
+    check = not args.dry_run and config.is_configured()
+    if check:
+        from asset_service import db as _db
+        owner = _db.registry_foreign(dbp, config.LIBRARY_ROOT)
+        if owner:
+            print(_db.foreign_registry_message(dbp, owner,
+                                               config.LIBRARY_ROOT))
+            return 2
     print(f"scanning {folder} ...")
     summary = scan_folder(folder, dry_run=args.dry_run,
                           verbose=args.verbose, db_path=args.db)
+    if check:
+        # rows from a folder OUTSIDE the library root must not make this
+        # registry read as foreign later: stamp it for this library now
+        _db.stamp_registry(dbp, config.LIBRARY_ROOT)
     mode = "DRY RUN — nothing written" if args.dry_run else "written to registry"
     print(f"\n{mode}")
     print(f"  meshes:        {summary['meshes']}")

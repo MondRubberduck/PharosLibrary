@@ -411,6 +411,10 @@ def static_mesh_metrics(mesh):
                            ("get_num_vertices", "vertices", 0)):
         fn = getattr(mesh, meth, None)
         if fn is None:
+            # e.g. UE 5.5 has no get_num_vertices: the verifier derives the
+            # count from the exported FBX -- say so instead of a silent null
+            log_warn("StaticMesh.%s missing in this engine: %s(%s) = null"
+                     % (meth, key, mesh.get_name()))
             continue
         try:
             out[key] = int(fn(0))
