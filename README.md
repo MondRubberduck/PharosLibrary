@@ -1,3 +1,6 @@
+[![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?hosted_button_id=5XKG8WLLRWZ44)
+[![Support on Patreon](https://img.shields.io/badge/Support-Patreon-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/NGallist)
+
 # Pharos Library
 
 A local asset-intelligence server for coding agents. Point it at a
@@ -12,27 +15,6 @@ availability — without walking the filesystem.
 | ![dashboard](docs/screenshots/dashboard.png) | ![textures](docs/screenshots/textures.png) |
 | **Animations** | **3D viewer** |
 | ![animations](docs/screenshots/animations.png) | ![viewer](docs/screenshots/viewer.png) |
-
-## Why it pays off
-
-Your coding agent gets **facts** in one short answer: real-world size, triangle count, material and texture maps, duration and ownership. Without Pharos it would have to walk the folders and open files, and most of these facts are in no readable file at all.
-
-Measured on a real library of 81,063 files (12,280 models, 2,449 texture sets, 4,737 sounds, 1,313 animation clips). Tokens are roughly bytes ÷ 4.
-
-| Your agent asks for… | Pharos answers with | Without Pharos, the agent has to… |
-|---|---|---|
-| a brick-wall texture set with all its maps | 10 matching sets, every map path: **~870 tokens** | find them in the folder tree. Even just the 727 file names containing "brick" are ~25,000 tokens. |
-| a thunder or rain sound, 5–30 seconds | 10 sounds with durations: **~590 tokens** | read 194 candidate names (~3,900 tokens), then open each file to learn its length |
-| wooden crates under 1.2 m | 10 crates with height, triangle count and material recipe: **~11,500 tokens** | open or parse every candidate model. Heights and triangle counts are written in no text file. |
-| a street pole at least 4 m tall | 10 poles with the same facts: **~35,000 tokens** (big multi-material meshes) | the same, for 129 candidates |
-
-For comparison, one plain listing of every file path in that library is about **2.4 million tokens**. Unreal packs can't be read at all without the Unreal Editor. Pharos converts them once, with your permission.
-
-Setup on a fresh machine took about **40 minutes** on a 9 GB test library, with the agent asking its questions and converting one Unreal pack. Every change is tested on Windows, Linux and macOS, including a headless Blender build.
-
-## Get started (no coding needed)
-
-Your coding agent does all the technical work. You pick the folder, answer a few questions, and describe the scenes you want.
 
 **You need**
 
@@ -71,6 +53,30 @@ follow <the Pharos folder>/docs/AGENT_PLAYBOOK.md, phase 2.
 **Next day, or after adding new assets?** Tell your agent to "run `python pharos.py ingest`, then start the Pharos server". The dashboard opens at http://127.0.0.1:8765.
 
 **Your files stay untouched.** Pharos only reads your assets. Inside your library it writes just two kinds of things: its index folder `_Agent_Files`, and an `Exports` folder for Unreal or Blender conversions you approved.
+
+
+## Why it pays off
+
+Your coding agent gets **facts** in one short answer: real-world size, triangle count, material and texture maps, duration and ownership. Without Pharos it would have to walk the folders and open files, and most of these facts are in no readable file at all.
+
+Measured on a real library of 81,063 files (12,280 models, 2,449 texture sets, 4,737 sounds, 1,313 animation clips). Tokens are roughly bytes ÷ 4.
+
+| Your agent asks for… | Pharos answers with | Without Pharos, the agent has to… |
+|---|---|---|
+| a brick-wall texture set with all its maps | 10 matching sets, every map path: **~870 tokens** | find them in the folder tree. Even just the 727 file names containing "brick" are ~25,000 tokens. |
+| a thunder or rain sound, 5–30 seconds | 10 sounds with durations: **~590 tokens** | read 194 candidate names (~3,900 tokens), then open each file to learn its length |
+| wooden crates under 1.2 m | 10 crates with height, triangle count and material recipe: **~11,500 tokens** | open or parse every candidate model. Heights and triangle counts are written in no text file. |
+| a street pole at least 4 m tall | 10 poles with the same facts: **~35,000 tokens** (big multi-material meshes) | the same, for 129 candidates |
+
+For comparison, one plain listing of every file path in that library is about **2.4 million tokens**. Unreal packs can't be read at all without the Unreal Editor. Pharos converts them once, with your permission.
+
+Setup on a fresh machine took about **40 minutes** on a 9 GB test library, with the agent asking its questions and converting one Unreal pack. Every change is tested on Windows, Linux and macOS, including a headless Blender build.
+
+## Get started (no coding needed)
+
+Your coding agent does all the technical work. You pick the folder, answer a few questions, and describe the scenes you want.
+
+
 
 ## What your agent does
 
@@ -148,5 +154,19 @@ generated index files.
 | MCP client configuration | [docs/MCP_SETUP.md](docs/MCP_SETUP.md) |
 
 ## License
+
+### Support & Donations
+
+If you find **Pharos Library** useful for your 3D workflow or pipeline, you can support ongoing maintenance and development:
+
+* [![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?hosted_button_id=5XKG8WLLRWZ44) &nbsp; [Donate via PayPal](https://www.paypal.com/donate/?hosted_button_id=5XKG8WLLRWZ44)
+* [![Support on Patreon](https://img.shields.io/badge/Support-Patreon-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/NGallist) &nbsp; [Support on Patreon](https://www.patreon.com/NGallist)
+
+---
+
+### License & Legal Notice
+
+This project is open-source software licensed under the **BSD 3-Clause License**.  
+All modifications and modernizations: Copyright (c) 2026 MondRubberduck and Contributors.  
 
 MIT
