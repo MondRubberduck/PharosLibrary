@@ -204,8 +204,68 @@ def detect(root: Path) -> dict:
                            for o in kit_roots)}
         report["kitbash_root"] = sorted(str(r) for r in kits)[0]
 
+    # raw UE packs, PER PACK: a pack is the folder holding a `Content` root
+    # (pipeline/conversion/pack_discovery.py finds it up to 3 levels below
+    # the pack, e.g. <pack>/<project>/Content). It is CONVERTED once any
+    # folder above that Content holds Exports/manifest.json -- converted
+    # packs keep their .uasset files, so a raw-file count can't tell them
+    # apart. Plugin Content (<project>/Plugins/<x>/Content) is its project's.
+    raw_packs = set()
+    for c in root.rglob("Content"):
+        rel = c.relative_to(root)
+        if (not c.is_dir() or rel.parts[0].startswith(("_", "."))
+                or "content" in (p.lower() for p in rel.parts[:-1])):
+            continue
+        if not any(f.suffix.lower() in (".uasset", ".umap")
+                   for f in c.rglob("*")):
+            continue
+        if any((a / "Exports" / "manifest.json").is_file()
+               for a in c.parents if a != root and a.is_relative_to(root)):
+            continue
+        raw_packs.add(c.parent)
+    raw_packs = {p for p in raw_packs
+                 if not any(o != p and p.is_relative_to(o) for o in raw_packs)}
+    if raw_packs:
+        report["raw_ue_packs"] = sorted(p.relative_to(root).as_posix()
+                                        for p in raw_packs)
+
     report["catalog_csvs"] = [str(p) for p in _find_catalog_csvs(root)]
     return report
+
+
+def _not_indexed_dirs(root: Path, cfg: dict, db_path=None) -> list[str]:
+    """Top-level library folders nothing claims: no section, scan folder,
+    skip dir or manifest/kit root, and no indexed row lives under them.
+    Used by ingest's ASK block; meant to back the server banner too."""
+    def top(p) -> str:
+        try:
+            return Path(p).relative_to(root).parts[0].lower()
+        except (ValueError, IndexError):
+            return ""
+    # section / scan paths may be relative to the root OR absolute
+    claimed = {top(root / str(v))
+               for v in (cfg.get("sections") or {}).values() if v}
+    claimed.update(top(root / str(f)) for f in cfg.get("scan_folders") or [])
+    claimed.update(str(d).lower() for d in cfg.get("indexer_skip_dirs") or [])
+    claimed.update(top(r) for r in (cfg.get("manifest_roots") or [])
+                   + [cfg.get("kitbash_root") or ""])
+    if db_path and Path(db_path).is_file():
+        import sqlite3
+        conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro",
+                               uri=True)
+        for sql in ("SELECT DISTINCT fbx FROM meshes",
+                    "SELECT DISTINCT folder FROM textures"):
+            try:
+                claimed.update(top(p) for (p,) in conn.execute(sql) if p)
+            except sqlite3.OperationalError:
+                pass
+        conn.close()
+    try:
+        return [d.name for d in sorted(root.iterdir())
+                if d.is_dir() and not d.name.startswith((".", "_"))
+                and d.name.lower() not in claimed]
+    except OSError:
+        return []
 
 
 def _pick(sections: dict, kind: str, counts_by_folder: dict,

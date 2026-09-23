@@ -106,8 +106,7 @@ never errors.
   integration adds one package (`pip install "mcp<2"`).
 - Optional: Blender 5.x, Unreal Editor 5.x, Git Bash — only for the
   pipeline chains.
-- Windows and Linux are CI-verified. macOS should work but is not
-  covered by CI.
+- Windows, Linux and macOS are covered by CI.
 
 ## How it fits together
 

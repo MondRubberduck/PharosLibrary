@@ -134,6 +134,19 @@ def build_fixture(root: Path) -> None:
     # a loose asset file at the ROOT: invisible to every section, must be
     # reported loudly, never silently dropped (flat-library finding)
     (root / "loose_at_root.fbx").write_bytes(b"stubfbx")
+    # 1.7: an HDR panorama BESIDE a subfolder (the leaf walk never indexed
+    # a directory's own files), an EXR-only set with no preview image, and
+    # macOS metadata that must never be listed as set files
+    hdri = root / "Textures_Materials" / "HDRi"
+    (hdri / "Pack" / "Thumbnails").mkdir(parents=True)
+    (hdri / "sky_2k.hdr").write_bytes(b"#?RADIANCE\n")
+    (hdri / "Pack" / "Thumbnails" / "sky.jpg").write_bytes(b"\xff\xd8 fake")
+    (root / "Textures_Materials" / "Basalt").mkdir(parents=True)
+    (root / "Textures_Materials" / "Basalt" / "basalt_4k.exr").write_bytes(
+        b"v/1\x01 fake")
+    (root / "Textures_Materials" / "Brick" / ".DS_Store").write_bytes(b"\x00")
+    (root / "Textures_Materials" / "Brick" / "._brick_albedo.png").write_bytes(
+        b"\x00")
 
 
 def main() -> int:
@@ -360,6 +373,177 @@ def main() -> int:
                       and "height_m" in i for i in fb_items),
                   str([i.get("view_url") for i in fb_items][:2]))
 
+        # ---- Lane B: 1.3 (NULL triangles), 1.4, 1.6b-d, 1.7, 1.2 mask ----
+        # Planted crawl rows: the rebuild below wipes them anyway; they are
+        # also deleted at the end of this block. The NULL-triangle row goes
+        # in LAST (the old code raised TypeError on every mesh query).
+        _cb = _sq1.connect(dbp)
+        _plant = ("INSERT INTO meshes (name,pack,source,kind,fbx,on_disk,"
+                  "bytes,triangles,vertices,submeshes,bbox_x,bbox_y,bbox_z,"
+                  "max_dim,materials,texture_count,texture_files,tags,meta,"
+                  "recipe) VALUES (?,'FixturePack','leartes','mesh',?,1,1,"
+                  "?,3,0,?,?,?,?,'[]',0,'[]','[]',"
+                  "'{\"stems\":[],\"themes\":[],\"facets\":{}}',?)")
+        _recipe = json.dumps({"slots": [], "resolved": True,
+                              "primary_slot": None,
+                              "primary": {"albedo": "x/pole_alb.png",
+                                          "mask": "x/pole_mask.png"}})
+        _cb.execute(_plant, ("FixturePole", "x://pole.fbx", 12,
+                             0.5, 0.5, 20.0, 20.0, _recipe))
+        _cb.execute(_plant, ("FixtureFlat", "x://flat.fbx", 2,
+                             2.0, 2.0, 0.0, 2.0, None))
+        _cb.commit()
+        # 1.4: the registry is Z-up -- height is bbox Z
+        h1 = browse.api_meshes({"q": ["fixturepole"], "min_h": ["5"]})
+        check("1.4: min_h filters on Z (standing 20 m pole found)",
+              h1["total"] == 1 and h1["items"][0]["height_m"] == 20.0,
+              f"total={h1['total']} "
+              f"h={[i['height_m'] for i in h1['items']]}")
+        h2 = browse.api_meshes({"q": ["fixtureflat"], "min_h": ["0.1"]})
+        h2_all = browse.api_meshes({"q": ["fixtureflat"]})["total"]
+        check("1.4: zero-height row excluded by min_h=0.1",
+              h2["total"] == 0 and h2_all == 1,
+              f"filtered={h2['total']} unfiltered={h2_all}")
+        # 1.2 mask role: not a named material map (excluded like `other`)
+        _hp = browse.api_meshes({"q": ["fixturepole"]})["items"]
+        _hero = _hp[0]["hero_textures"] if _hp else {}
+        check("1.2 mask: HTTP hero_textures excludes mask",
+              "albedo" in _hero and "mask" not in _hero, str(_hero))
+        # 1.6b: one variant group per query word ('crates' hits 'crate')
+        _pl = browse.api_meshes({"q": ["crates"]})
+        check("1.6b: plural query stays AND (crates -> crate)",
+              _pl.get("mode") == "and" and _pl.get("exact", 0) >= 1,
+              f"mode={_pl.get('mode')} exact={_pl.get('exact')}")
+        # 1.6c: textures carry mode/exact; the related cluster answers
+        # only when NO query word matches anything
+        _cb.execute(
+            "INSERT INTO textures (name,grp,sub,source,folder,files,images,"
+            "file_count,bytes,first_image,thumb,tags,meta) VALUES "
+            "('Plaster Fixture','Misc','Walls','crawl','x://plaster','[]',"
+            "'[]',0,0,'','','[\"plaster\"]','{\"stems\":[\"plaster\"],"
+            "\"themes\":[],\"facets\":{}}')")
+        _cb.commit()
+        _tb = browse.api_textures_items({"q": ["brick zzzz"]})
+        check("1.6c: textures 'brick zzzz' -> or-fallback, exact 0",
+              _tb.get("mode") == "or-fallback" and _tb.get("exact") == 0
+              and _tb["total"] >= 1,
+              f"mode={_tb.get('mode')} exact={_tb.get('exact')} "
+              f"total={_tb['total']}")
+        _ts = browse.api_textures_items({"q": ["stucco"]})
+        check("1.6c: related cluster only when no query word matches",
+              not any(i["name"] == "Plaster Fixture" for i in _tb["items"])
+              and any(i["name"] == "Plaster Fixture" for i in _ts["items"]),
+              f"brick_zzzz={[i['name'] for i in _tb['items']]} "
+              f"stucco={[i['name'] for i in _ts['items']]}")
+        _cb.execute("DELETE FROM textures WHERE name='Plaster Fixture'")
+        _cb.commit()
+
+        # 1.7: every texture file is indexed, previewable or not
+        def _tex_files(q):
+            its = browse.api_textures_items({"q": [q], "size": ["100"]})
+            return [f for i in its["items"] for f in (browse.api_textures_item(
+                {"id": [str(i["id"])]}).get("files") or [])]
+        _hf = _tex_files("hdri")
+        check("1.7: q=hdri lists the HDR beside a subfolder",
+              any(f.endswith("sky_2k.hdr") for f in _hf), str(_hf))
+        _bf = _tex_files("basalt")
+        check("1.7: preview-less (EXR-only) set indexed",
+              any(f.endswith("basalt_4k.exr") for f in _bf), str(_bf))
+        _brf = _tex_files("brick")
+        check("1.7: macOS metadata never listed as set files",
+              any(f.endswith("brick_albedo.png") for f in _brf)
+              and not any(Path(f).name == ".DS_Store"
+                          or Path(f).name.startswith("._") for f in _brf),
+              str(_brf))
+        # scanner: .hdr is a texture file (separate registry)
+        from asset_service import scanner as _scn
+        _hs = tmp / "hdr_scan"
+        _hs.mkdir()
+        (_hs / "pano.hdr").write_bytes(b"#?RADIANCE\n")
+        (_hs / "pano.jpg").write_bytes(b"\xff\xd8 fake")
+        _hdb = str(reg / "hdr_scan.sqlite")
+        _scn.scan_folder(_hs, db_path=_hdb)
+        _c = _sq1.connect(_hdb)
+        _hsf = [r[0] for r in _c.execute("SELECT files FROM textures")]
+        _c.close()
+        check("1.7: scanner indexes .hdr beside its preview",
+              any("pano.hdr" in f for f in _hsf), str(_hsf))
+        # 1.3: a scanned manifest's engine count (render LOD0) must not
+        # beat the FBX's own triangles (separate registry)
+        _sm = tmp / "scan_manifest" / "Exports"
+        (_sm / "FBX").mkdir(parents=True)
+        (_sm / "FBX" / "m.fbx").write_bytes(_min_fbx())
+        (_sm / "manifest.json").write_text(json.dumps({
+            "schema": "pharos.pack.export/v2", "pack": "FixtureScan",
+            "meshes": [{"name": "m", "kind": "StaticMesh", "fbx": "FBX/m.fbx",
+                        "triangles": 999, "vertices": 999,
+                        "bbox_m": [1.0, 1.0, 1.0]}]}), encoding="utf-8")
+        _mdb = str(reg / "scan_manifest.sqlite")
+        _scn.scan_folder(_sm, db_path=_mdb)
+        _c = _sq1.connect(_mdb)
+        _mtri = [r[0] for r in _c.execute("SELECT triangles FROM meshes")]
+        _c.close()
+        check("1.3: scanner takes triangles from the FBX, not the manifest",
+              _mtri == [FBX_TRIANGLES], str(_mtri))
+
+        # MCP server in-process (the test_pack_verify loader pattern)
+        _srv, _mcp_err = None, None
+        try:
+            import importlib.util as _ilu
+            _spec = _ilu.spec_from_file_location(
+                "pharos_mcp_server_fresh",
+                str(REPO / "service" / "pharos_mcp_server.py"))
+            _srv = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_srv)
+            _srv.config.DB_PATH = dbp
+        except Exception as exc:                       # noqa: BLE001
+            _srv, _mcp_err = None, exc
+        if _srv is None:
+            if os.environ.get("PHAROS_REQUIRE_MCP") == "1":
+                check("MCP server loads (PHAROS_REQUIRE_MCP=1)", False,
+                      str(_mcp_err))
+            else:
+                print(f"  [SKIP] MCP checks (1.4/1.6d/1.3/mask) NOT run -- "
+                      f"no mcp package: {_mcp_err}")
+        else:
+            _mh = json.loads(_srv.pharos_search_meshes(min_height=5))
+            check("1.4: MCP min_height filters on Z (standing pole)",
+                  [i["name"] for i in _mh["items"]] == ["FixturePole"],
+                  str([i["name"] for i in _mh["items"]]))
+            _mp = json.loads(_srv.pharos_search_meshes(query="fixturepole"))
+            _mhero = ((_mp["items"] or [{}])[0].get("hero_textures") or {})
+            check("1.2 mask: MCP hero_textures excludes mask",
+                  "albedo" in _mhero and "mask" not in _mhero, str(_mhero))
+
+        # 1.3: unknown triangles are NULL (never 0): a max_tri filter must
+        # exclude them and disclose the count; sort=triangles puts them last
+        _cb.execute(_plant, ("FixtureNullTri", "x://nulltri.fbx", None,
+                             1.0, 1.0, 1.0, 1.0, None))
+        _cb.commit()
+        try:
+            _nt = browse.api_meshes({"max_tri": ["1000"]})
+            _ns = browse.api_meshes({"sort": ["triangles"]})
+            _nt_ok = (not any(i["name"] == "FixtureNullTri"
+                              for i in _nt["items"])
+                      and _nt.get("unmeasured_excluded", 0) >= 1
+                      and _ns["items"][-1]["name"] == "FixtureNullTri")
+            _nt_d = (f"excluded={_nt.get('unmeasured_excluded')} "
+                     f"last={_ns['items'][-1]['name']}")
+        except TypeError as exc:
+            _nt_ok, _nt_d = False, f"TypeError: {exc}"
+        check("1.3: NULL triangles: max_tri excludes + discloses, sorts last",
+              _nt_ok, _nt_d)
+        if _srv is not None:
+            _mt = json.loads(_srv.pharos_search_meshes(max_triangles=1000))
+            check("1.3 (guard): MCP max_triangles excludes NULL triangles",
+                  _mt["total"] >= 1 and not any(
+                      i["name"] == "FixtureNullTri" for i in _mt["items"]),
+                  str([i["name"] for i in _mt["items"]]))
+        _cb.execute("DELETE FROM meshes WHERE name IN "
+                    "('FixturePole','FixtureFlat','FixtureNullTri')")
+        _cb.commit()
+        _cb.close()
+
         # 5. scanner rows survive a server-style rebuild
         meshes_import.import_meshes(dbp)
         m3 = browse.api_meshes({})
@@ -468,6 +652,11 @@ def main() -> int:
             json.dumps({"p": "Alarms/beep.wav", "cat": "Alarms", "sub": "",
                         "ext": ".wav", "bytes": 16044, "dur": 1.0,
                         "sr": 8000, "ch": 1}) + "\n", encoding="utf-8")
+        # 1.6a: a category keyword that is in no cluster/theme list
+        (lib / "Audio_Assets" / "library_index.json").write_text(
+            json.dumps({"categories": {"Alarms": {
+                "description": "fixture alarms",
+                "keywords": ["zqfixtureword"]}}}), encoding="utf-8")
         audio_import.import_audio(dbp)
         _c = _sq.connect(dbp)
         _c.row_factory = _sq.Row
@@ -481,6 +670,45 @@ def main() -> int:
         check("audio rows carry source markers (no NULL)",
               len(_arows) == 2 and None not in _arows.values(),
               str(_arows))
+        # 1.5: a rebuild keeps every file's id (agents persist ids; the
+        # DELETE + AUTOINCREMENT re-insert renumbered the table per boot)
+        _c = _sq.connect(dbp)
+        _ids1 = dict(_c.execute("SELECT rel, id FROM audio").fetchall())
+        _c.close()
+        audio_import.import_audio(dbp)
+        _c = _sq.connect(dbp)
+        _ids2 = dict(_c.execute("SELECT rel, id FROM audio").fetchall())
+        _beep = _c.execute("SELECT meta, desc FROM audio "
+                           "WHERE rel='Alarms/beep.wav'").fetchone()
+        _c.close()
+        check("1.5: audio ids stable across imports",
+              len(_ids1) == 2 and _ids1 == _ids2, f"{_ids1} -> {_ids2}")
+        # 1.6a: stems come from the file's own name/category/sub only
+        _zq = browse.api_audio_items({"q": ["zqfixtureword"]})
+        check("1.6a: category keywords do not flood audio stems",
+              _zq["total"] == 0 and _beep is not None
+              and _beep[1] == "fixture alarms"          # index WAS read
+              and "zqfixtureword" not in json.loads(_beep[0])["stems"],
+              f"total={_zq['total']} row={_beep}")
+        # 1.6c: audio + collection responses carry mode/exact
+        _ab = browse.api_audio_items({"q": ["beep"]})
+        _cm = browse.api_collection_items({"q": ["mill"]})
+        check("1.6c: audio + collection carry mode/exact",
+              _ab.get("mode") == "and" and _ab.get("exact", 0) >= 1
+              and _cm.get("mode") == "and" and _cm.get("exact", 0) >= 1,
+              f"audio={_ab.get('mode')}/{_ab.get('exact')} "
+              f"collection={_cm.get('mode')}/{_cm.get('exact')}")
+        # 1.6d: MCP search drops 1-char tokens (q=a matched every row)
+        if _srv is not None:
+            _bomb = {fn.__name__: json.loads(fn(query="a"))["total"]
+                     for fn in (_srv.pharos_search_meshes,
+                                _srv.pharos_search_textures,
+                                _srv.pharos_search_audio,
+                                _srv.pharos_search_collection)}
+            _real = json.loads(_srv.pharos_search_meshes(query="plate"))
+            check("1.6d: MCP q=a -> 0 on all four search tools",
+                  not any(_bomb.values()) and _real["total"] >= 1,
+                  f"{_bomb} plate={_real['total']}")
 
         # 5d. F3: model files beat image counts in the census
         det2 = pharos_init.detect(lib)
@@ -658,12 +886,41 @@ def main() -> int:
               r.returncode == 0 and "scanner.py" in r.stdout
               and "(dry-run: skipped)" in r.stdout,
               (r.stderr or "")[-120:])
+        # 1.8 fixture: a RAW UE pack (Content/ with .uasset, no Exports)
+        # next to the converted TestPack, which keeps its own raw content
+        # like real converted packs do; plus a top-level folder nothing
+        # claims. Planted after init, so the config's scan_folders win.
+        # TestPack's Content sits 3 levels below its Exports/ (discovery
+        # reaches that deep); RawPack's plugin Content is part of RawPack.
+        for _p in (lib / "UE Packs" / "RawPack" / "Content" / "Props",
+                   lib / "UE Packs" / "RawPack" / "Plugins" / "FX_Plugin"
+                   / "Content",
+                   lib / "UE Packs" / "TestPack" / "Src" / "TestProj"
+                   / "Content" / "Props"):
+            _p.mkdir(parents=True)
+            (_p / "SM_FX_Stub.uasset").write_bytes(b"stub")
+        (lib / "Unsorted").mkdir()
+        (lib / "Unsorted" / "readme.txt").write_text("x", encoding="utf-8")
         r = subprocess.run(
             [sys.executable, str(REPO / "pharos.py"), "ingest"],
             capture_output=True, text=True, cwd=str(REPO), timeout=600)
         check("ingest exits 0 with decision block",
               r.returncode == 0 and "ASK YOUR USER" in r.stdout,
               (r.stderr or "")[-140:])
+        _ask = (r.stdout or "").split("ASK YOUR USER", 1)[-1]
+        _q2 = next((ln for ln in _ask.splitlines()
+                    if ln.strip().startswith("2.")), "")
+        check("1.8: ASK offers conversion for the raw pack only",
+              "UE Packs/RawPack" in _q2 and "convert" in _q2
+              and "TestPack" not in _q2 and "Plugins" not in _q2
+              and "already converted" in _ask,
+              f"q2={_q2.strip()[:160]!r}")
+        _q6 = next((ln for ln in _ask.splitlines()
+                    if "match no section" in ln), "")
+        check("1.8: ASK lists the unclaimed top-level folder only",
+              "Unsorted" in _q6 and "MyModels" not in _q6
+              and "UE Packs" not in _q6 and "Animation" not in _q6,
+              f"line={_q6.strip()[:160]!r}")
         _c = _sq.connect(dbp)
         _anim = _c.execute("SELECT COUNT(*) FROM assets WHERE "
                            "id LIKE 'pack::Animation/%'").fetchone()[0]

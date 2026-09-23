@@ -34,6 +34,8 @@ from pathlib import Path
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
+from asset_service.material_roles import classify_param, packed_for
+from asset_service.scene_manifest import collapse_slot_maps
 
 AGENT_FILES = config.AGENT_FILES
 MODELS = AGENT_FILES / "models.jsonl"
@@ -108,6 +110,18 @@ MESH_EXTRA_COLUMNS = (
 # must never win the `primary` pick.
 SOURCE_RANK = ("instance_override", "material_used_textures",
                "material_default")
+# ... served on every map as `source`, normalised per rank (an unknown
+# source ranks last and is served as "unnamed").
+SOURCE_NAMES = ("override", "unnamed", "default")
+
+# Stand-in textures a master material ships as its fallback (TX_Fill_*,
+# T_Default*, ...). Flagged, never dropped: `placeholder: true`.
+PLACEHOLDER_RE = re.compile(
+    r"^(T|TX)_(C_)?(Fill|Default(v\d+)?|StandIn|PlaceHolder|Blank)\d*[_.]",
+    re.IGNORECASE)
+# A channel-less "packed" param with one of these words is a colour/grunge/
+# blend mask, not an ORM: served as role `mask`.
+MASK_WORDS = ("mask", "grunge", "blend", "vcol")
 
 # KitBash3D kits ship no per-material texture table, only a flat
 # `texture_files` list whose basenames are `<material>_<suffix>`. The suffix
@@ -214,8 +228,26 @@ def _src_rank(source: str) -> int:
     return len(SOURCE_RANK)
 
 
+def _served_map(role: str, param, file: str, channels, rank: int) -> dict:
+    """One served map: `source` normalised; `placeholder` only when true."""
+    m = {"role": role, "param": param, "file": file, "channels": channels,
+         "source": (SOURCE_NAMES[rank] if rank < len(SOURCE_NAMES)
+                    else "unnamed"),
+         "_rank": rank}
+    if PLACEHOLDER_RE.match(os.path.basename(file)):
+        m["placeholder"] = True
+    return m
+
+
 def _leartes_recipe(mesh: dict, exports_dir: Path) -> dict:
-    """Per-slot wiring exactly as the UE exporter resolved it."""
+    """Per-slot wiring exactly as the UE exporter resolved it.
+
+    `role` is re-derived from the raw UE `param` with the shared rules
+    (material_roles), so manifests written before a rule existed are fixed
+    by re-import. A channel-less `packed` map becomes `mask` when its param
+    names a mask; otherwise an ORM/RMA/ARM token in the FILE name (the same
+    anchored match) supplies its channels; otherwise they stay null.
+    """
     slots = []
     for sl in (mesh.get("materials") or []):
         maps = []
@@ -223,15 +255,27 @@ def _leartes_recipe(mesh: dict, exports_dir: Path) -> dict:
             rel = t.get("file")
             if not rel:
                 continue          # param exists but has no texture assigned
-            maps.append({
-                "role": (t.get("role") or "other"),
-                "param": (t.get("param") or "").strip() or None,
-                "file": _abs_file(exports_dir, rel),
-                "channels": t.get("channels") or None,
-                "_rank": _src_rank(t.get("source")),
-            })
-        slots.append({"slot": sl.get("slot"), "material": sl.get("name"),
-                      "base": sl.get("base"), "maps": maps})
+            param = (t.get("param") or "").strip() or None
+            role, chans, _info = classify_param(param)
+            channels = t.get("channels") or chans or None
+            if role == "packed" and not channels:
+                flat = re.sub(r"[^a-z0-9]", "", param.lower())
+                if any(w in flat for w in MASK_WORDS):
+                    role = "mask"
+                else:
+                    channels = (packed_for(Path(rel).stem) or {}).get(
+                        "channels")
+            maps.append(_served_map(role, param, _abs_file(exports_dir, rel),
+                                    channels, _src_rank(t.get("source"))))
+        slot = {"slot": sl.get("slot"), "material": sl.get("name"),
+                "base": sl.get("base"), "maps": maps}
+        if sl.get("note") == "unresolved":
+            # the relink step could not resolve this slot: consumers keep
+            # the FBX's own material instead of building one from `maps`
+            slot["resolved"] = False
+            slot["unresolved_reason"] = (sl.get("unresolved_reason")
+                                         or "unresolved")
+        slots.append(slot)
     return {"slots": slots}
 
 
@@ -245,10 +289,11 @@ def _kb3d_recipe(group: dict, exports_dir: Path) -> dict:
             if base.startswith(m + "_"):
                 suffix = base[len(m) + 1:].lower()
                 if suffix in KB3D_ROLE_SUFFIX:
-                    by_mat[m].append({"role": KB3D_ROLE_SUFFIX[suffix],
-                                      "param": suffix,
-                                      "file": _abs_file(exports_dir, t),
-                                      "channels": None, "_rank": 0})
+                    # the material's own texture: ranked (and served) as an
+                    # override
+                    by_mat[m].append(_served_map(
+                        KB3D_ROLE_SUFFIX[suffix], suffix,
+                        _abs_file(exports_dir, t), None, 0))
                 break
     slots = [{"slot": i, "material": m, "base": m, "maps": by_mat[m]}
              for i, m in enumerate(mats)]
@@ -260,42 +305,47 @@ def _finish_recipe(recipe: dict) -> dict:
 
     Returns a fresh structure (the cached one stays untouched so repeated
     finishes -- same mesh reached by both join keys -- stay identical).
-    `primary` comes from the FIRST slot that resolved *any* map, and within it
-    the best-ranked binding per role wins, so a real instance override beats
-    the master material's TX_Fill fallback.
+    Each slot's maps are stable-sorted by source rank (best first), so the
+    first map of a role is its best binding. `primary` is
+    scene_manifest.collapse_slot_maps() -- the builder's own pick -- of the
+    FIRST slot whose pick holds a real role (not only `other`/`mask`), else
+    of the first slot that yields any map: no placeholder, no master-default
+    emissive/opacity, a real instance override before the TX_Fill fallback.
     """
     slots = []
     primary: dict = {}
     primary_slot = None
     found = False
+    fallback = None
     for sl in recipe.get("slots") or []:
-        best: dict = {}
-        clean = []
-        for m in sl.get("maps") or []:
-            out = {k: v for k, v in m.items() if k != "_rank"}
-            clean.append(out)
-            role = out["role"]
-            key = "packed" if role.startswith("packed") else role
-            rank = m.get("_rank", len(SOURCE_RANK))
-            if key not in best or rank < best[key][0]:
-                best[key] = (rank, out)
-        slots.append({"slot": sl.get("slot"), "material": sl.get("material"),
-                      "base": sl.get("base"), "maps": clean})
-        if best and not found:
-            found = True
-            primary_slot = sl.get("slot")
-            for key, (_rank, out) in best.items():
-                primary[key] = out["file"]
-                if key == "packed":
-                    primary["packed_channels"] = out.get("channels")
+        ranked = sorted(sl.get("maps") or [],
+                        key=lambda m: m.get("_rank", len(SOURCE_RANK)))
+        out = {"slot": sl.get("slot"), "material": sl.get("material"),
+               "base": sl.get("base"),
+               "maps": [{k: v for k, v in m.items() if k != "_rank"}
+                        for m in ranked]}
+        if sl.get("resolved") is False:
+            out["resolved"] = False
+            out["unresolved_reason"] = sl.get("unresolved_reason")
+        slots.append(out)
+        if not found:
+            pick = collapse_slot_maps(out)
+            if any(k not in ("other", "mask", "packed_channels") for k in pick):
+                found = True
+                primary_slot = sl.get("slot")
+                primary = pick
+            elif pick and fallback is None:
+                fallback = (sl.get("slot"), pick)
+    if not found and fallback:
+        primary_slot, primary = fallback
     maps = {k: v for k, v in primary.items() if k != "packed_channels"}
     # A slot the exporter marked `unresolved` still lists the textures the
     # material uses, but with no role ("other") and no param (e.g. a trim
     # material wired only through hardcoded masters). That is not a usable
     # recipe, so it must not count as resolved: `resolved:true` always
     # means at least one map has a real role, and never produces an empty
-    # primary.
-    named = [k for k in maps if k != "other"]
+    # primary. A `mask` is not a material map either.
+    named = [k for k in maps if k not in ("other", "mask")]
     return {"slots": slots, "primary": primary,
             "resolved": bool(named), "primary_slot": primary_slot}
 
@@ -518,8 +568,9 @@ def _record(e: dict, recipe: dict, bbox_min, bbox_max) -> dict:
         "kind": e.get("kind") or "", "fbx": fbx,
         "on_disk": 1 if e.get("exists") else 0,
         "bytes": e.get("bytes") or 0,
-        "triangles": e.get("triangles") or 0,
-        "vertices": e.get("vertices") or 0,
+        # unknown stays NULL: a 0 passed every max_tri filter for free
+        "triangles": e.get("triangles"),
+        "vertices": e.get("vertices"),
         "submeshes": e.get("submeshes") or 0,
         "bbox_x": bbox[0] if len(bbox) > 0 else 0,
         "bbox_y": bbox[1] if len(bbox) > 1 else 0,

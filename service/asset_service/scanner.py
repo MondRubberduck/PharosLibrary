@@ -43,7 +43,7 @@ MESH_EXTS = {".fbx", ".obj", ".glb", ".gltf", ".stl"}
 BLEND_EXTS = {".blend"}
 AUDIO_EXTS = {".wav", ".ogg", ".mp3", ".flac", ".m4a"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tga", ".tif", ".tiff",
-              ".exr", ".bmp"}
+              ".exr", ".hdr", ".bmp"}
 
 # texture channel detection from filename
 CHANNEL_PATTERNS = [
@@ -267,13 +267,25 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
                 me = manifest_meshes.get(mf.as_posix()) or manifest_meshes.get(rel)
                 if me:
                     bbox = me.get("bbox_m") or [0, 0, 0]
+                    # counts from the FBX itself when it parses: the
+                    # manifest's engine count is render LOD0 (the reduced
+                    # Nanite fallback), not the exported source mesh
+                    g = None
+                    if mf.suffix.lower() == ".fbx":
+                        try:
+                            from asset_service.fbx_dims import fbx_bbox_m
+                            g = fbx_bbox_m(mf)
+                        except Exception:                     # noqa: BLE001
+                            g = None
                     record = {
                         "name": name, "pack": folder.name, "source": "scan",
                         "kind": me.get("kind", "mesh"),
                         "fbx": mf.as_posix(), "on_disk": 1,
                         "bytes": mf.stat().st_size,
-                        "triangles": me.get("triangles", 0),
-                        "vertices": me.get("vertices", 0),
+                        "triangles": (g["triangles"] if g
+                                      else me.get("triangles", 0)),
+                        "vertices": (g["vertices"] if g
+                                     else me.get("vertices", 0)),
                         "bbox": bbox,
                     }
                 else:

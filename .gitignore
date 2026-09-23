@@ -27,6 +27,7 @@ previews/
 # the real file on disk, so the ignore entries must keep matching them.
 extensions/
 reports/
+Claude outputs/
 tools/deploy_kiosk.py
 tools/inspect_environment.py
 tests/test_extension.py

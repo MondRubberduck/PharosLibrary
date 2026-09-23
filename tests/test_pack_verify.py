@@ -423,6 +423,10 @@ def test_mcp_db_preflight_and_clip_scope():
         srv = ilu.module_from_spec(spec)
         spec.loader.exec_module(srv)
     except Exception as exc:                       # noqa: BLE001
+        # W0.2: CI installs mcp and sets PHAROS_REQUIRE_MCP=1 -- there a
+        # load failure must FAIL, never print SKIP and count as a pass
+        assert os.environ.get("PHAROS_REQUIRE_MCP") != "1", \
+            f"PHAROS_REQUIRE_MCP=1 but the MCP server did not load: {exc}"
         print(f"SKIP (no mcp package on this machine): {exc}")
         return
     import sqlite3
@@ -466,13 +470,42 @@ def _wav(path_bytes=16044):
     return make
 
 
-def _find_blender():
-    for pat in (r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe",
-                r"C:\Program Files\Blender Foundation\Blender *\blender.exe"):
-        hits = sorted(__import__("glob").glob(pat))
-        if hits:
-            return hits[-1]
-    return ""
+# ---- INFRA lane: W0.3 Blender-in-CI wrapper (W0.2's PHAROS_REQUIRE_MCP
+# gate lives inside test_mcp_db_preflight_and_clip_scope) ----
+
+def _blender_for_checks() -> str:
+    """BLENDER_EXE first -- set but missing counts as NOT FOUND, never a
+    silent fallback -- else doctor's finder (PATH + install dirs)."""
+    env = os.environ.get("BLENDER_EXE", "")
+    if env:
+        return env if Path(env).is_file() else ""
+    from asset_service.doctor import _find_blender
+    return _find_blender()
+
+
+def test_scene_builder_in_blender():
+    """scene_builder checks that need Blender run in tests/
+    blender_scene_checks.py (build, save, reopen headless, assert). SKIP
+    without Blender, unless PHAROS_REQUIRE_BLENDER=1 makes that a FAIL."""
+    exe = _blender_for_checks()
+    if not exe:
+        assert os.environ.get("PHAROS_REQUIRE_BLENDER") != "1", \
+            "PHAROS_REQUIRE_BLENDER=1 but no Blender found " \
+            "(BLENDER_EXE / PATH / install dirs)"
+        print("SKIP: no Blender on this machine -- scene_builder checks "
+              "not run")
+        return
+    try:
+        r = subprocess.run(
+            [exe, "--background", "--factory-startup",
+             "--python-exit-code", "1",
+             "--python", str(REPO / "tests" / "blender_scene_checks.py")],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding="utf-8", errors="replace", cwd=str(REPO), timeout=900)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AssertionError(f"Blender run failed: {exc}") from exc
+    assert r.returncode == 0, \
+        f"blender_scene_checks rc={r.returncode}:\n{(r.stdout or '')[-1500:]}"
 
 
 def test_verifier_derives_skeletal_triangles():
@@ -807,6 +840,332 @@ def test_scan_keying_same_name_different_folders():
         conn.close()
         assert n_aud == 2, \
             f"B6: cross-scan audio overwrite: {n_aud} rows (want 2): {rels}"
+
+
+# ---- INGEST lane: 1.1 1.2 1.3 2.1 2.2 (material roles, recipe flags,
+# one-map-per-role collapse, packed channel letters, FBX triangle counts) ----
+
+def test_material_role_aliases():
+    """1.1: role inference was a substring match only, so exact UE aliases
+    (Emmisive, Base Map, NRM, AO, ...) landed in `other`. The rules now
+    live in one stdlib module shared by the relink step and the importer;
+    aliases match EXACTLY, so *_Base layer params stay `other`."""
+    import importlib.util as ilu
+    assert ilu.find_spec("asset_service.material_roles"), \
+        "asset_service.material_roles does not exist (1.1)"
+    from asset_service import material_roles as mr
+    cases = {"Emmisive": "emissive", "Emission Texture": "emissive",
+             "Base Map": "albedo", "NRM": "normal", "AO": "ao",
+             "Metalic": "metallic", "Base N": "normal",
+             "Rust_Base": "other", "SecondBase": "other",
+             "Paint_Base": "other", "BlendBase": "other",
+             # substring rules and packed channels are unchanged
+             "BaseColor": "albedo", "ORM": "packed"}
+    for param, want in cases.items():
+        got = mr.classify_param(param)[0]
+        assert got == want, f"{param!r} -> {got!r}, want {want!r}"
+    src = (REPO / "service" / "asset_service"
+           / "material_roles.py").read_text(encoding="utf-8")
+    assert "import unreal" not in src, "material_roles must not import unreal"
+    relink = (REPO / "pipeline" / "conversion"
+              / "relink_materials.py").read_text(encoding="utf-8")
+    assert "ROLE_RULES = (" not in relink and "material_roles" in relink, \
+        "relink_materials.py must import the shared rules, not keep a copy"
+
+
+def _fx_leartes_mesh() -> dict:
+    """Anonymised v2 manifest mesh: one real slot + one unresolved slot."""
+    ovr = "instance_override:MI_Rope_Fixture"
+    return {"name": "SM_FX_Rope", "asset_path": "/Game/FX/SM_FX_Rope",
+            "materials": [
+                {"slot": 0, "name": "MI_Rope_Fixture", "base": "M_FX_Master",
+                 "textures": [
+                     # manifest order puts a master default FIRST
+                     {"param": "EmissiveTex", "role": "emissive",
+                      "file": "Textures/TX_FX_Sheet_Diffuse.png",
+                      "source": "material_default"},
+                     {"param": "DiffuseTex", "role": "albedo",
+                      "file": "Textures/T_FX_Rope_ALB.png", "source": ovr},
+                     {"param": "Base Map", "role": "other",
+                      "file": "Textures/T_FX_Rope_B.png", "source": ovr},
+                     {"param": "AlphaTex", "role": "opacity",
+                      "file": "Textures/T_Fill_FX_B.png",
+                      "source": "material_default"},
+                     {"param": "Emmisive", "role": "other",
+                      "file": "Textures/T_Fill02_FX.png",
+                      "source": "material_default"},
+                     {"param": "Colour Mask", "role": "packed",
+                      "channels": None,
+                      "file": "Textures/T_FX_Rope_Mask.png",
+                      "source": "material_default"},
+                     # mask-like param wins over an ORM token in the file
+                     {"param": "Grunge Mask", "role": "packed",
+                      "channels": None,
+                      "file": "Textures/T_FX_Grunge_ORM.png",
+                      "source": "material_default"},
+                     # channel-less pack whose FILE names the order
+                     {"param": "RGBTex", "role": "packed", "channels": None,
+                      "file": "Textures/T_FX_Rope_ORM.png", "source": ovr},
+                 ]},
+                {"slot": 1, "name": "MI_FX_Trim", "base": "M_FX_Trim",
+                 "note": "unresolved",
+                 "unresolved_reason": "material chain exposes no texture "
+                                      "parameters (master M_FX_Trim)",
+                 "textures": [
+                     {"param": None, "asset_path": "/Game/FX/T_FX_Trim",
+                      "file": "Textures/T_FX_Trim_D.png",
+                      "source": "material_used_textures",
+                      "note": "unresolved"}]},
+            ]}
+
+
+def test_recipe_flags():
+    """1.2: the served recipe listed master defaults and TX_Fill
+    placeholders as live maps (source was stripped), channel-less colour
+    masks became ORM `packed`, and unresolved slots lost their marker.
+    Flags only: every map stays served."""
+    from asset_service import meshes_import as mi
+    rec = mi._finish_recipe(mi._leartes_recipe(
+        _fx_leartes_mesh(), Path("fx_lib") / "FX_Pack" / "Exports"))
+    s0, s1 = rec["slots"]
+    by = {Path(m["file"]).name: m for m in s0["maps"] + s1["maps"]}
+    # guard (passes on the old code too): nothing is dropped
+    assert len(s0["maps"]) == 8 and len(s1["maps"]) == 1, \
+        f"maps dropped: {len(s0['maps'])}+{len(s1['maps'])} (want 8+1)"
+    for m in s0["maps"] + s1["maps"]:
+        assert m.get("source") in ("override", "default", "unnamed"), \
+            f"{Path(m['file']).name}: source {m.get('source')!r}"
+    assert s0["maps"][0]["source"] == "override", \
+        "maps are not rank-sorted (a master default is served first)"
+    assert by["T_Fill_FX_B.png"].get("placeholder") is True, \
+        "T_Fill_FX_B not flagged placeholder"
+    assert by["T_Fill02_FX.png"].get("placeholder") is True
+    assert "placeholder" not in by["T_FX_Rope_ALB.png"], \
+        "placeholder key must be absent on a real map"
+    assert by["T_FX_Rope_B.png"]["role"] == "albedo", \
+        f"'Base Map' role {by['T_FX_Rope_B.png']['role']!r} (want albedo)"
+    assert by["T_Fill02_FX.png"]["role"] == "emissive"
+    assert by["T_FX_Rope_Mask.png"]["role"] == "mask", \
+        f"Colour Mask role {by['T_FX_Rope_Mask.png']['role']!r} (want mask)"
+    assert by["T_FX_Grunge_ORM.png"]["role"] == "mask"
+    orm = by["T_FX_Rope_ORM.png"]
+    assert orm["role"] == "packed" and orm.get("channels") == \
+        {"r": "ao", "g": "roughness", "b": "metallic"}, \
+        f"RGBTex -> *_ORM channels {orm.get('channels')!r}"
+    prim = rec["primary"]
+    assert "emissive" not in prim and "opacity" not in prim, \
+        f"primary serves a default emissive/opacity: {sorted(prim)}"
+    assert Path(prim.get("albedo", "")).name == "T_FX_Rope_ALB.png", prim
+    assert rec["resolved"] is True
+    assert "resolved" not in s0, "resolved key added to a resolved slot"
+    assert s1.get("resolved") is False and s1.get("unresolved_reason"), \
+        f"unresolved slot lost its marker: {sorted(s1)}"
+    from asset_service import scene_manifest as sm
+    assert hasattr(sm, "collapse_slot_maps"), "collapse_slot_maps missing"
+    assert prim == sm.collapse_slot_maps(s0), \
+        "primary is not the builder's collapse_slot_maps pick"
+    # a mesh whose only named maps are masks is not resolved
+    only_mask = {"name": "SM_FX_Masked", "materials": [
+        {"slot": 0, "name": "MI_FX_Masked", "textures": [
+            {"param": "Colour Mask", "role": "packed", "channels": None,
+             "file": "Textures/T_FX_Masked_Mask.png",
+             "source": "instance_override"}]}]}
+    assert mi._finish_recipe(mi._leartes_recipe(
+        only_mask, Path("fx_lib")))["resolved"] is False, \
+        "a mask-only mesh reads resolved:true"
+    # guard: KitBash maps keep their suffix roles (refraction has no rule)
+    kb = mi._finish_recipe(mi._kb3d_recipe(
+        {"materials": ["M_FX_Glass"],
+         "texture_files": ["M_FX_Glass_refraction.png",
+                           "M_FX_Glass_basecolor.png"]}, Path("fx_kit")))
+    assert sorted(m["role"] for m in kb["slots"][0]["maps"]) == \
+        ["albedo", "refraction"], kb["slots"][0]["maps"]
+
+
+def test_slot_map_precedence():
+    """2.1: the builder collapsed a slot with {role: file}, so the LAST map
+    per role won (TX_Fill placeholders listed after the real maps), and
+    the packed file and its channels could come from different maps."""
+    from asset_service import scene_manifest as sm
+    assert hasattr(sm, "collapse_slot_maps"), \
+        "scene_manifest.collapse_slot_maps does not exist (2.1)"
+    f = lambda n: f"fx_lib/Textures/{n}.png"                  # noqa: E731
+    rma = {"r": "roughness", "g": "metallic", "b": "ao"}
+    slot = {"slot": 0, "material": "MI_FX_Wall", "maps": [
+        {"role": "albedo", "file": f("T_FX_Wall_ALB"), "source": "override"},
+        {"role": "normal", "file": f("T_FX_Wall_NRM"), "source": "override"},
+        {"role": "packed", "file": f("T_FX_Wall_RMA"), "channels": rma,
+         "source": "override"},
+        {"role": "albedo", "file": f("TX_Fill_FX_ALB"), "source": "default",
+         "placeholder": True},
+        {"role": "normal", "file": f("TX_Fill_FX_NRM"), "source": "default",
+         "placeholder": True},
+        {"role": "roughness", "file": f("TX_Fill_FX_R"), "source": "default",
+         "placeholder": True},
+        {"role": "packed", "file": f("T_FX_Wall_Pack"), "channels": None,
+         "source": "default"},
+        {"role": "mask", "file": f("T_FX_Wall_Mask"), "channels": None,
+         "source": "default"},
+        {"role": "emissive", "file": f("TX_FX_Sheet_Diffuse"),
+         "source": "default"},
+        {"role": "opacity", "file": f("T_FX_Wall_Opacity"),
+         "source": "default"},
+    ]}
+    got = sm.collapse_slot_maps(slot)
+    assert got.get("albedo") == f("T_FX_Wall_ALB"), got
+    assert got.get("normal") == f("T_FX_Wall_NRM"), got
+    assert got.get("packed") == f("T_FX_Wall_RMA") and \
+        got.get("packed_channels") == rma, \
+        f"packed {got.get('packed')} / {got.get('packed_channels')}"
+    assert "roughness" not in got, "a placeholder roughness blocks the ORM"
+    assert "emissive" not in got and "opacity" not in got, sorted(got)
+    # channel-less packs only: the FIRST one, and no invented channels
+    bare = sm.collapse_slot_maps({"maps": [
+        {"role": "packed", "file": f("T_FX_A_RGB"), "channels": None},
+        {"role": "packed", "file": f("T_FX_B_RGB"), "channels": None}]})
+    assert bare.get("packed") == f("T_FX_A_RGB") and \
+        bare.get("packed_channels") is None, bare
+    # ...but the first packed map WITH channels beats an earlier bare one
+    mixed = sm.collapse_slot_maps({"maps": [
+        {"role": "packed", "file": f("T_FX_C_RGB"), "channels": None},
+        {"role": "packed", "file": f("T_FX_C_RMA"), "channels": rma}]})
+    assert mixed.get("packed") == f("T_FX_C_RMA") and \
+        mixed.get("packed_channels") == rma, mixed
+    # a mask is never the ORM
+    assert "packed" not in sm.collapse_slot_maps({"maps": [
+        {"role": "mask", "file": f("T_FX_Only_Mask"), "channels": None}]})
+    # a slot marked resolved:false keeps the FBX's own material
+    assert sm.collapse_slot_maps({"resolved": False, "maps": [
+        {"role": "albedo", "file": f("T_FX_Trim_D")}]}) == {}
+    # source guard: the builder uses the same helper
+    src = (REPO / "service" / "asset_service"
+           / "scene_builder.py").read_text(encoding="utf-8")
+    assert "collapse_slot_maps(" in src, \
+        "scene_builder.py does not call collapse_slot_maps"
+
+
+def test_packed_channel_letters():
+    """2.2: channel letters went through {r,g,b}.get(letter, "Green"), so
+    `a` (height, 3k+ maps) and any unknown letter silently read Green."""
+    from asset_service import scene_manifest as sm
+    assert hasattr(sm, "packed_channel_sockets"), \
+        "scene_manifest.packed_channel_sockets does not exist (2.2)"
+    got = sm.packed_channel_sockets(
+        {"r": "ao", "g": "roughness", "b": "metallic", "a": "height"})
+    assert got == [("Red", "ao"), ("Green", "roughness"),
+                   ("Blue", "metallic"), ("Alpha", "height")], got
+    assert sm.packed_channel_sockets({"x": "roughness", "b": "metallic"}) \
+        == [("Blue", "metallic")], "an unknown letter was not skipped"
+    assert sm.packed_channel_sockets(None) == []
+    src = (REPO / "service" / "asset_service"
+           / "scene_builder.py").read_text(encoding="utf-8")
+    assert "packed_channel_sockets(" in src and \
+        '.get(ch_letter, "Green")' not in src, \
+        "scene_builder still maps unknown channel letters to Green"
+
+
+def test_agent_index_triangles_from_fbx():
+    """1.3 (D4, D9): models.jsonl copied the UE manifest's triangles
+    (render LOD0; null for every SkeletalMesh). The exported FBX is the
+    truth; the engine value is kept as `triangles_engine`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        lib = tmp / "lib"
+        for i in range(10):          # the 10-pack / 10-row near-empty guards
+            ex = lib / f"FX_Pack_{i:02d}" / "Exports"
+            (ex / "FBX").mkdir(parents=True)
+            (ex / "FBX" / "m.fbx").write_bytes(_min_fbx())   # 1 tri, 3 verts
+            meshes = [{"name": "m", "kind": "StaticMesh", "fbx": "FBX/m.fbx",
+                       "triangles": 999 if i == 0 else 1, "vertices": 50,
+                       "bbox_m": [1.0, 1.0, 0.0], "materials": []}]
+            if i == 0:
+                meshes.append({"name": "skm", "kind": "SkeletalMesh",
+                               "fbx": "FBX/m.fbx", "triangles": None,
+                               "vertices": None, "bbox_m": [1.0, 1.0, 0.0],
+                               "materials": []})
+                # unparseable FBX: the engine value must survive
+                (ex / "FBX" / "bad.fbx").write_bytes(b"Kaydara FBX Binary  \x00")
+                meshes.append({"name": "bad", "kind": "StaticMesh",
+                               "fbx": "FBX/bad.fbx", "triangles": 7,
+                               "vertices": 9, "bbox_m": [1.0, 1.0, 0.0],
+                               "materials": []})
+            (ex / "manifest.json").write_text(json.dumps({
+                "schema": "pharos.pack.export/v2", "pack": f"FX_Pack_{i:02d}",
+                "counts": {"fbx_written": len(meshes)}, "meshes": meshes}),
+                encoding="utf-8")
+        r = _run("pipeline/agent_index/build_agent_index.py", {
+            "PHAROS_CONFIG": str(tmp / "missing_config.json"),
+            "PHAROS_LIBRARY_ROOT": str(lib)})
+        assert r.returncode == 0, (r.stderr or r.stdout or "")[-400:]
+        out = lib / "_Agent_Files" / "models.jsonl"
+        assert out.is_file(), "models.jsonl not written to the temp library"
+        rows = {row["name"]: row for row in (
+            json.loads(line) for line in
+            out.read_text(encoding="utf-8").splitlines() if line.strip())
+            if row["pack"] == "FX_Pack_00"}
+        sm_, skm, bad = rows["m"], rows["skm"], rows["bad"]
+        assert sm_["triangles"] == 1, \
+            f"StaticMesh triangles {sm_['triangles']} (want 1 from the FBX)"
+        assert skm["triangles"] == 1, \
+            f"SkeletalMesh triangles {skm['triangles']} (want 1 from the FBX)"
+        assert sm_.get("triangles_engine") == 999, sm_
+        assert sm_["vertices"] == 3 and skm["vertices"] == 3, (sm_, skm)
+        assert bad["triangles"] == 7 and bad["vertices"] == 9, bad
+
+
+def test_unknown_triangles_stay_null():
+    """1.3: the importer stored an unknown triangle count as 0, so the row
+    passed every max_tri filter and cost nothing in a budget."""
+    from asset_service import meshes_import as mi
+    rec = mi._record({"name": "SM_FX_Unknown", "pack": "FX_Pack",
+                      "triangles": None, "vertices": None},
+                     dict(mi.EMPTY_RECIPE), None, None)
+    assert rec["triangles"] is None, \
+        f"unknown triangles stored as {rec['triangles']!r} (want NULL)"
+    assert rec["vertices"] is None, \
+        f"unknown vertices stored as {rec['vertices']!r} (want NULL)"
+    known = mi._record({"name": "SM_FX_Known", "pack": "FX_Pack",
+                        "triangles": 12, "vertices": 8},
+                       dict(mi.EMPTY_RECIPE), None, None)
+    assert known["triangles"] == 12 and known["vertices"] == 8
+
+
+def test_recipe_primary_skips_mask_only_slot():
+    """1.2 (review fix): `primary` came from the first slot whose collapse
+    was non-empty, so a first slot holding only a mask made the mesh read
+    resolved:false and its real later slots were never served."""
+    from asset_service import meshes_import as mi
+    mesh = {"name": "SM_FX_MaskFirst", "materials": [
+        {"slot": 0, "name": "MI_FX_Decal", "textures": [
+            {"param": "Colour Mask", "role": "packed", "channels": None,
+             "file": "Textures/T_FX_Decal_Mask.png",
+             "source": "instance_override"}]},
+        {"slot": 1, "name": "MI_FX_Body", "textures": [
+            {"param": "DiffuseTex", "role": "albedo",
+             "file": "Textures/T_FX_Body_ALB.png",
+             "source": "instance_override"}]}]}
+    rec = mi._finish_recipe(mi._leartes_recipe(mesh, Path("fx_lib")))
+    assert rec["resolved"] is True and \
+        Path(rec["primary"].get("albedo", "")).name == "T_FX_Body_ALB.png", \
+        f"mask-only slot 0 hid slot 1: resolved={rec['resolved']} " \
+        f"primary={sorted(rec['primary'])}"
+    assert rec["primary_slot"] == 1, rec["primary_slot"]
+
+
+# ---- LEAD: 1.8 (ingest ASK block helpers) ----
+
+def test_not_indexed_dirs_claims_absolute_sections():
+    """1.8 (review fix): a section configured as an ABSOLUTE path inside
+    the library (config accepts that) was listed as an unclaimed folder."""
+    from asset_service.init import _not_indexed_dirs
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        for d in ("Audio", "Stuff", "Models", "_Agent_Files"):
+            (root / d).mkdir()
+        cfg = {"sections": {"audio": str(root / "Audio")},
+               "scan_folders": ["Models"]}
+        got = _not_indexed_dirs(root, cfg)
+        assert got == ["Stuff"], f"unclaimed folders {got} (want ['Stuff'])"
 
 
 if __name__ == "__main__":

@@ -179,11 +179,34 @@ material wiring: `slots[].maps[]` with `role`/`file`/`channels`) ·
 `dim_suspect` (dims withheld as unreliable) · `tier`/`mode`/`exact`
 (search-quality disclosure).
 
+**Axes:** `bbox_m` = [x, y, z] metres, **Z-up**, `height_m` = `bbox_m[2]`; scene-manifest positions are Y-up.
+**Ids:** mesh and texture `id`s are positional session handles (they change when an index is rebuilt); persist `fbx` / `rel` / `(pack, name)`, not ids.
+
+**Recipe contract** (`recipe.slots[].maps[]`): every texture the material
+references is served and flagged, never dropped.
+- `source`: `override` (the material instance's own wiring; KitBash maps
+  too) · `default` (the master material's fallback, often not live) ·
+  `unnamed` (used by the material, no named parameter). Maps are sorted
+  best source first.
+- `placeholder: true` marks master-material fill/stand-in textures
+  (`T_Fill_*`, `T_Default*`, ...); absent = false. Never wire one.
+- `role`: albedo · normal · roughness · metallic · ao · height · emissive ·
+  opacity · ... · `packed` · `mask` · `other`. `packed` carries `channels`
+  `{r|g|b|a: ao|roughness|metallic|height}`; `channels: null` = channel
+  order unknown, do not assume one. `mask` = a channel-less mask/grunge/
+  blend texture, never an ORM.
+- A slot with `resolved: false` (+ `unresolved_reason`) has no usable
+  wiring: keep the FBX's own material for it.
+- `recipe.primary` / `hero_textures`: one map per role from the first
+  usable slot -- the same pick the Blender builder wires; never a
+  placeholder, never a `default`-source emissive/opacity.
+
 **Dimension provenance** (they are NOT all measured the same way):
 `leartes` — exporter-reported per-mesh boxes (metres, trustworthy);
 `kitbash3d` — Blender world-space AABB over the placed assembly (axis
 order differs from the FBX file's own header); `scan` — file-level
-extents from the raw FBX/OBJ (multi-object files report one box over
+extents from the raw FBX/OBJ in RAW FILE AXES, not normalised to Z-up
+(multi-object files report one box over
 everything, no per-object transforms). Don't mix provenances in one
 comparison.
 

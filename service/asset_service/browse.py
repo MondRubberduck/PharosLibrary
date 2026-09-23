@@ -458,6 +458,17 @@ def _stems(word: str) -> set:
     return out
 
 
+def _word_hits(words: list, name_l: str, searchable: set) -> list:
+    """Per query word: 2 = a variant hits the name, 1 = a variant is in the
+    row's tags/themes/stems, 0 = no hit. `words` holds ONE stem-variant
+    group per query word ('crates' -> {'crates', 'crate'}); a word matches
+    when ANY of its variants does. Shared by the four item endpoints:
+    merging every word's variants into one set and requiring ALL of them
+    made plural queries fail AND matching."""
+    return [2 if any(_name_hit(x, name_l) for x in g)
+            else 1 if g & searchable else 0 for g in words]
+
+
 def _cluster_stems() -> list[set]:
     out = []
     for cl in ANIM_CLUSTERS:
@@ -558,14 +569,15 @@ def api_collection_items(params: dict) -> dict:
     except ValueError:
         size = 24
 
-    qstems: set = set()
-    for t in re.findall(r"[^\W_]+", q, re.UNICODE):
-        qstems |= _stems(t)
-    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
+    words = [{s for s in _stems(t) if len(s) >= 2}   # drop 1-char tokens
+             for t in re.findall(r"[^\W_]+", q, re.UNICODE)]
+    words = [w for w in words if w]
+    qstems: set = set().union(*words)
     if q and not qstems:
         # every token was dropped (single letters / punctuation) -- such a
         # query must match nothing, never the whole library
-        return {"total": 0, "page": page, "size": size, "q": q, "items": []}
+        return {"total": 0, "exact": 0, "mode": "and", "page": page,
+                "size": size, "q": q, "items": []}
     related: set = set()
     if qstems:
         for cl in COLL_CLUSTERS:
@@ -583,6 +595,7 @@ def api_collection_items(params: dict) -> dict:
     from urllib.parse import quote as _q
     items = []
     or_items = []
+    rel_items = []
     for r in _coll_rows():
         if store and r["store"] != store:
             continue
@@ -599,21 +612,14 @@ def api_collection_items(params: dict) -> dict:
             | set(meta.get("stems") or [])
         name_l = (r["name"] or "").lower()
         if qstems:
-            # AND over direct tokens; single-token matches are reserved as
-            # a fallback tier for list-style queries ("lamp sign hydrant")
-            direct = [t for t in qstems if len(t) >= 2]
-            and_ok = all(_name_hit(t, name_l) or (t in searchable) for t in direct)
-            or_ok = any(_name_hit(t, name_l) or (t in searchable) for t in direct) \
-                or any(s in name_l for s in rsub) \
-                or any(s in searchable for s in rsub)
-            if not and_ok and not or_ok:
+            # AND over query words; single-word matches are reserved as a
+            # fallback tier for list-style queries ("lamp sign hydrant"),
+            # and the related cluster only answers when NO word matches
+            hits = _word_hits(words, name_l, searchable)
+            if not any(hits) and not (any(s in name_l for s in rsub)
+                                      or any(s in searchable for s in rsub)):
                 continue
-            if and_ok and all(_name_hit(t, name_l) for t in direct):
-                tier = 1
-            elif and_ok:
-                tier = 2
-            else:
-                tier = 3
+            tier = (1 if min(hits) == 2 else 2) if all(hits) else 3
         else:
             tier = 0
         entry = {
@@ -627,13 +633,17 @@ def api_collection_items(params: dict) -> dict:
         if tier < 3:
             items.append(entry)
         else:
-            or_items.append(entry)
-    if not items and or_items:
-        items = or_items
+            (or_items if any(hits) else rel_items).append(entry)
+    if not items:
+        items = or_items or rel_items
     items.sort(key=lambda x: (x["tier"], x["store"], x["name"].lower()))
     total = len(items)
+    exact = sum(1 for e in items if e["tier"] < 3)
     lo = (page - 1) * size
-    return {"total": total, "page": page, "size": size, "q": q,
+    return {"total": total, "exact": exact if qstems else total,
+            "mode": ("or-fallback" if qstems and exact == 0 and total
+                     else "and"),
+            "page": page, "size": size, "q": q,
             "items": items[lo:lo + size]}
 
 
@@ -781,12 +791,13 @@ def api_textures_items(params: dict) -> dict:
         size = min(500, max(8, int((params.get("size") or ["24"])[0])))
     except ValueError:
         size = 24
-    qstems: set = set()
-    for t in re.findall(r"[^\W_]+", q, re.UNICODE):
-        qstems |= _stems(t)
-    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
+    words = [{s for s in _stems(t) if len(s) >= 2}   # drop 1-char tokens
+             for t in re.findall(r"[^\W_]+", q, re.UNICODE)]
+    words = [w for w in words if w]
+    qstems: set = set().union(*words)
     if q and not qstems:
-        return {"total": 0, "page": page, "size": size, "q": q, "items": []}
+        return {"total": 0, "exact": 0, "mode": "and", "page": page,
+                "size": size, "q": q, "items": []}
     related: set = set()
     if qstems:
         for cl in TEX_CLUSTERS:
@@ -801,6 +812,7 @@ def api_textures_items(params: dict) -> dict:
     from urllib.parse import quote as _q
     items = []
     or_items = []
+    rel_items = []
     for r in _tex_rows():
         if grp and r["grp"] != grp:
             continue
@@ -810,15 +822,13 @@ def api_textures_items(params: dict) -> dict:
                       | set(r["meta"].get("stems") or []))
         name_l = (r["name"] or "").lower()
         if qstems:
-            # AND first; single-token matches reserved as fallback tier
-            direct = [t for t in qstems if len(t) >= 2]
-            and_ok = all(_name_hit(t, name_l) or (t in searchable) for t in direct)
-            or_ok = any(_name_hit(t, name_l) or (t in searchable) for t in direct) \
-                or any(s in name_l for s in rsub) \
-                or any(s in searchable for s in rsub)
-            if not and_ok and not or_ok:
+            # AND first; single-word matches reserved as fallback tier; the
+            # related cluster only answers when NO query word matches
+            hits = _word_hits(words, name_l, searchable)
+            if not any(hits) and not (any(s in name_l for s in rsub)
+                                      or any(s in searchable for s in rsub)):
                 continue
-            tier = (1 if all(_name_hit(t, name_l) for t in direct) else 2) if and_ok else 3
+            tier = (1 if min(hits) == 2 else 2) if all(hits) else 3
         else:
             tier = 0
         entry = {
@@ -830,13 +840,17 @@ def api_textures_items(params: dict) -> dict:
         if tier < 3:
             items.append(entry)
         else:
-            or_items.append(entry)
-    if not items and or_items:
-        items = or_items
+            (or_items if any(hits) else rel_items).append(entry)
+    if not items:
+        items = or_items or rel_items
     items.sort(key=lambda x: (x["tier"], x["grp"], x["sub"], x["name"].lower()))
     total = len(items)
+    exact = sum(1 for e in items if e["tier"] < 3)
     lo = (page - 1) * size
-    return {"total": total, "page": page, "size": size, "q": q,
+    return {"total": total, "exact": exact if qstems else total,
+            "mode": ("or-fallback" if qstems and exact == 0 and total
+                     else "and"),
+            "page": page, "size": size, "q": q,
             "items": items[lo:lo + size]}
 
 
@@ -948,12 +962,13 @@ def api_audio_items(params: dict) -> dict:
         size = min(500, max(8, int((params.get("size") or ["24"])[0])))
     except ValueError:
         size = 24
-    qstems: set = set()
-    for t in re.findall(r"[^\W_]+", q, re.UNICODE):
-        qstems |= _stems(t)
-    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
+    words = [{s for s in _stems(t) if len(s) >= 2}   # drop 1-char tokens
+             for t in re.findall(r"[^\W_]+", q, re.UNICODE)]
+    words = [w for w in words if w]
+    qstems: set = set().union(*words)
     if q and not qstems:
-        return {"total": 0, "page": page, "size": size, "q": q, "items": []}
+        return {"total": 0, "exact": 0, "mode": "and", "page": page,
+                "size": size, "q": q, "items": []}
     related: set = set()
     if qstems:
         for cl in AUDIO_CLUSTERS:
@@ -967,6 +982,7 @@ def api_audio_items(params: dict) -> dict:
     rsub = {t for t in related if len(t) >= 3}
     items = []
     or_items = []
+    rel_items = []
     for r in _audio_rows():
         if cat and r["cat"] != cat:
             continue
@@ -978,15 +994,13 @@ def api_audio_items(params: dict) -> dict:
             | set(r["meta"].get("stems") or [])
         name_l = (r["name"] or "").lower()
         if qstems:
-            # AND first; single-token matches reserved as fallback tier
-            direct = [t for t in qstems if len(t) >= 2]
-            and_ok = all(_name_hit(t, name_l) or (t in searchable) for t in direct)
-            or_ok = any(_name_hit(t, name_l) or (t in searchable) for t in direct) \
-                or any(s in name_l for s in rsub) \
-                or any(s in searchable for s in rsub)
-            if not and_ok and not or_ok:
+            # AND first; single-word matches reserved as fallback tier; the
+            # related cluster only answers when NO query word matches
+            hits = _word_hits(words, name_l, searchable)
+            if not any(hits) and not (any(s in name_l for s in rsub)
+                                      or any(s in searchable for s in rsub)):
                 continue
-            tier = (1 if all(_name_hit(t, name_l) for t in direct) else 2) if and_ok else 3
+            tier = (1 if min(hits) == 2 else 2) if all(hits) else 3
         else:
             tier = 0
         entry = {
@@ -996,14 +1010,18 @@ def api_audio_items(params: dict) -> dict:
         if tier < 3:
             items.append(entry)
         else:
-            or_items.append(entry)
-    if not items and or_items:
-        items = or_items
+            (or_items if any(hits) else rel_items).append(entry)
+    if not items:
+        items = or_items or rel_items
     items.sort(key=lambda x: (x["tier"], x["cat"], x["sub"],
                               x["name"].lower()))
     total = len(items)
+    exact = sum(1 for e in items if e["tier"] < 3)
     lo = (page - 1) * size
-    return {"total": total, "page": page, "size": size, "q": q,
+    return {"total": total, "exact": exact if qstems else total,
+            "mode": ("or-fallback" if qstems and exact == 0 and total
+                     else "and"),
+            "page": page, "size": size, "q": q,
             "items": items[lo:lo + size]}
 
 
@@ -1072,7 +1090,7 @@ def _mesh_extras(r: dict) -> dict:
     if recipe.get("resolved"):
         primary = recipe.get("primary") or {}
         for role, path in primary.items():
-            if role == "packed_channels" or role == "other":
+            if role in ("packed_channels", "other", "mask"):
                 continue          # not a named material map
             hero[role] = path
         if "opacity" in hero:
@@ -1096,8 +1114,11 @@ def api_meshes(params: dict) -> dict:
     """Geometry-aware mesh search.
 
     Filters: q (name/tags/themes, stem-aware), pack, source, theme,
-    min_dim/max_dim (metres, on the largest axis), min_h/max_h (bbox Y),
-    max_tri (triangle budget), textures=1 (only textured), sort.
+    min_dim/max_dim (metres, on the largest axis), min_h/max_h (bbox Z:
+    the registry is Z-up), max_tri (triangle budget), textures=1 (only
+    textured), sort. Size and triangle filters exclude rows without that
+    measurement (unknown triangles are NULL) and disclose the count as
+    `unmeasured_excluded`.
     """
     q = (params.get("q") or [""])[0].strip().lower()
     pack = (params.get("pack") or [""])[0]
@@ -1124,20 +1145,21 @@ def api_meshes(params: dict) -> dict:
     except ValueError:
         size = 50
 
-    qstems: set = set()
-    for t in re.findall(r"[^\W_]+", q, re.UNICODE):
-        qstems |= _stems(t)
-    qstems = {t for t in qstems if len(t) >= 2}  # drop 1-char tokens
+    words = [{s for s in _stems(t) if len(s) >= 2}   # drop 1-char tokens
+             for t in re.findall(r"[^\W_]+", q, re.UNICODE)]
+    words = [w for w in words if w]
+    qstems: set = set().union(*words)
     if q and not qstems:
         # every token was dropped -- match nothing, never the whole library
         return {"total": 0, "exact": 0, "mode": "and", "page": page,
                 "size": size, "q": q, "items": []}
 
-    # a dimension/height filter is a MEASUREMENT query: rows without a
-    # measured dimension must be EXCLUDED, never silently passed through
-    # (unmeasured assets with max_dim 0 once won every size filter)
+    # a dimension/height/triangle filter is a MEASUREMENT query: rows
+    # without that measurement must be EXCLUDED, never silently passed
+    # through (unmeasured assets with max_dim 0 once won every size filter)
     dim_filter = (min_dim > 0 or max_dim < 1e9)
     h_filter = (min_h > 0 or max_h < 1e9)
+    tri_filter = max_tri < 1e12
     unmeasured = 0
 
     def _mesh_item(r, tier):
@@ -1149,7 +1171,7 @@ def api_meshes(params: dict) -> dict:
             "vertices": r["vertices"], "submeshes": r["submeshes"],
             "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],
             "max_dim_m": r["max_dim"], "max_dim": r["max_dim"],
-            "height_m": r["bbox_y"],
+            "height_m": r["bbox_z"],          # the registry is Z-up
             "materials": r["materials"] if isinstance(r["materials"], list)
                          else [],
             "texture_count": r["texture_count"],
@@ -1169,15 +1191,21 @@ def api_meshes(params: dict) -> dict:
         if theme and theme not in (r["meta"].get("themes") or []):
             continue
         if dim_filter or h_filter:
-            if not r["max_dim"] and not r["bbox_y"]:
+            if not r["max_dim"]:
                 unmeasured += 1
                 continue
             if r["max_dim"] and not (min_dim <= r["max_dim"] <= max_dim):
                 continue
-            if r["bbox_y"] and not (min_h <= r["bbox_y"] <= max_h):
+            # height is Z; a measured zero height fails min_h (a bbox_y
+            # guard here once let zero-height rows pass every filter)
+            if h_filter and not (min_h <= (r["bbox_z"] or 0) <= max_h):
                 continue
-        if r["triangles"] > max_tri:
-            continue
+        if tri_filter:
+            if r["triangles"] is None:        # unknown, never 0
+                unmeasured += 1
+                continue
+            if r["triangles"] > max_tri:
+                continue
         if only_tex and not r["texture_count"]:
             continue
         name_l = (r["name"] or "").lower()
@@ -1187,15 +1215,13 @@ def api_meshes(params: dict) -> dict:
             # AND first ("cobblestone medieval"); if the whole query then
             # yields nothing, fall back to OR tiers ("lamp sign hydrant"
             # is a list, not a phrase). OR rows are reserved for fallback.
-            direct = [x for x in qstems if len(x) >= 2]
-            and_ok = all(_name_hit(x, name_l) or (x in searchable) for x in direct)
-            if not and_ok:
-                if not (any(_name_hit(x, name_l) for x in direct)
-                        or qstems & searchable):
+            hits = _word_hits(words, name_l, searchable)
+            if not all(hits):
+                if not any(hits):
                     continue
                 or_items.append(r)
                 continue
-            q_tier = 1 if all(_name_hit(x, name_l) for x in direct) else 2
+            q_tier = 1 if min(hits) == 2 else 2
         items.append(_mesh_item(r, q_tier if qstems else 0))
     fallback_ranked = False
     if not items and or_items and qstems:
@@ -1224,8 +1250,9 @@ def api_meshes(params: dict) -> dict:
         fallback_ranked = True
     if sort == "max_dim":
         items.sort(key=lambda x: -(x["max_dim_m"] or 0))
-    elif sort == "triangles":
-        items.sort(key=lambda x: x["triangles"])
+    elif sort == "triangles":                 # unknown (NULL) counts last
+        items.sort(key=lambda x: (x["triangles"] is None,
+                                  x["triangles"] or 0))
     elif not fallback_ranked:
         # default alphabetical order; after a rarity-ranked OR fallback it
         # would destroy the ranking we just computed
@@ -1239,7 +1266,7 @@ def api_meshes(params: dict) -> dict:
                      else "and"),
             "page": page, "size": size, "q": q,
             "items": items[lo:lo + size]}
-    if dim_filter or h_filter:
+    if dim_filter or h_filter or tri_filter:
         # disclose the hidden set: rows excluded because no measurement
         # exists (the agent should know it is filtering over measured
         # assets only, and how much it cannot see)

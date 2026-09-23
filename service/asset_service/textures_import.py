@@ -4,8 +4,9 @@ Groups:
   - "4K Textures Gumroad": leaf folders under 4K_Textures_Gumroad/<subcat>/<set>/
     (each set folder holds the map channels + a <name>_render.jpg preview)
   - "Misc": everything else -- direct subfolders (leaf-most folders with
-    images) and loose files in the root, grouped into families by stripping
-    map-channel suffixes (X_albedo.tif + X_normal.tif + ... -> one card).
+    texture files, previewable or not) and loose files (in the root, or
+    beside subfolders), grouped into families by stripping map-channel
+    suffixes (X_albedo.tif + X_normal.tif + ... -> one card).
 
 Dual-audience tagging like the collection: `tags` human words + themes,
 `meta` = {stems, themes, facets} for the algorithm.
@@ -167,51 +168,93 @@ def _pretty(base: str) -> str:
     return out[:1].upper() + out[1:] if out else base
 
 
-def _walk_leaves(d: Path) -> list:
-    """Collect leaf-most directories under d that contain image files."""
+def _is_macos_meta(f: Path) -> bool:
+    """macOS metadata, not an asset (scanner.py skips the same names)."""
+    return f.name.startswith("._") or f.name == ".DS_Store"
+
+
+def _walk_leaves(d: Path, own: list | None = None) -> list:
+    """Collect leaf-most directories under d that contain texture files
+    (any FILE_EXT, previewable or not -- HDR/EXR-only sets were dropped).
+    A directory ABOVE such leaves that also holds texture files of its own
+    is appended to `own`: its files become families (they were lost)."""
     leaves: list = []
     try:
         children = [c for c in d.iterdir() if c.is_dir()]
+        has_files = any(f.suffix.lower() in FILE_EXT and not _is_macos_meta(f)
+                        for f in d.iterdir() if f.is_file())
     except OSError:
         return leaves
-    any_leaves = False
     for c in children:
-        sub = _walk_leaves(c)
-        if sub:
-            leaves.extend(sub)
-            any_leaves = True
-    if not any_leaves:
-        try:
-            has_images = any(f.suffix.lower() in DISPLAY_EXT
-                             for f in d.iterdir() if f.is_file())
-        except OSError:
-            return leaves
-        if has_images:
+        leaves.extend(_walk_leaves(c, own))
+    if has_files:
+        if not leaves:
             leaves.append(d)
+        elif own is not None:
+            own.append(d)
     return leaves
 
 
 def _record_from_dir(d: Path, grp: str, sub: str) -> dict | None:
     try:
-        all_files = [f for f in d.iterdir() if f.is_file()]
+        all_files = [f for f in d.iterdir()
+                     if f.is_file() and not _is_macos_meta(f)]
     except OSError:
+        return None
+    if not all_files:
         return None
     images = sorted((f for f in all_files if f.suffix.lower() in DISPLAY_EXT),
                     key=lambda p: p.name.lower())
-    if not images:
-        return None
+    # a set without a preview image is still a set (empty thumb, like
+    # loose families): HDR/EXR panoramas were silently dropped here
     render = next((i for i in images
                    if i.stem.lower().endswith("render")
                    or i.stem.lower() == d.name.lower()), None)
-    thumb = (render or images[0]).as_posix()
+    thumb = (render or images[0]).as_posix() if images else ""
     return {"name": _pretty(d.name), "grp": grp, "sub": sub,
             "folder": d.as_posix(),
             "files": json.dumps([f.as_posix() for f in all_files]),
             "images": json.dumps([i.as_posix() for i in images]),
             "file_count": len(all_files),
             "bytes": sum(f.stat().st_size for f in all_files if f.is_file()),
-            "first_image": images[0].as_posix(), "thumb": thumb,
+            "first_image": images[0].as_posix() if images else "",
+            "thumb": thumb,
             "src_name": d.name}
+
+
+def _families(d: Path, grp: str, sub: str) -> list:
+    """A directory's OWN texture files as family records, grouped by
+    stripping map-channel suffixes (X_albedo.tif + X_normal.tif -> one
+    card). Used for loose root files and for files beside subfolders."""
+    families: dict[str, dict] = {}
+    try:
+        loose = [f for f in d.iterdir()
+                 if f.is_file() and not _is_macos_meta(f)]
+    except OSError:
+        loose = []
+    for f in loose:
+        if f.suffix.lower() not in FILE_EXT:
+            continue
+        base = _family_base(f.stem)
+        fam = families.setdefault(base, {"files": [], "images": []})
+        fam["files"].append(f)
+        if f.suffix.lower() in DISPLAY_EXT:
+            fam["images"].append(f)
+    out = []
+    for base, fam in sorted(families.items()):
+        displayable = sorted(fam["images"], key=lambda p: p.name.lower())
+        out.append({
+            "name": _pretty(base), "grp": grp,
+            "sub": sub, "folder": d.as_posix(),
+            "files": json.dumps([f.as_posix() for f in fam["files"]]),
+            "images": json.dumps([i.as_posix() for i in displayable]),
+            "file_count": len(fam["files"]),
+            "bytes": sum(f.stat().st_size for f in fam["files"]),
+            "first_image": (displayable[0].as_posix()
+                            if displayable else ""),
+            "thumb": (displayable[0].as_posix() if displayable else ""),
+            "src_name": base})
+    return out
 
 
 def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
@@ -286,49 +329,28 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
         main = root / MAIN_NAME
         if main.is_dir():
             for subcat in sorted(p for p in main.iterdir() if p.is_dir()):
-                for leaf in _walk_leaves(subcat):
+                own: list = []
+                for leaf in _walk_leaves(subcat, own):
                     r = _record_from_dir(leaf, GROUP_MAIN, subcat.name)
                     if r:
                         records.append(r)
+                for d in own:
+                    records.extend(_families(d, GROUP_MAIN, subcat.name))
 
         if root.is_dir():
-            # Misc subfolders (leaf-most dirs with images)
+            # Misc subfolders (leaf-most dirs with texture files)
             for child in sorted(p for p in root.iterdir() if p.is_dir()):
                 if child.name == MAIN_NAME:
                     continue
-                for leaf in _walk_leaves(child):
+                own = []
+                for leaf in _walk_leaves(child, own):
                     r = _record_from_dir(leaf, GROUP_MISC, child.name)
                     if r:
                         records.append(r)
+                for d in own:
+                    records.extend(_families(d, GROUP_MISC, child.name))
             # loose files in root -> families
-            families: dict[str, dict] = {}
-            try:
-                loose = [f for f in root.iterdir() if f.is_file()]
-            except OSError:
-                loose = []
-            for f in loose:
-                if f.suffix.lower() not in FILE_EXT:
-                    continue
-                base = _family_base(f.stem)
-                fam = families.setdefault(base, {"files": [], "images": []})
-                fam["files"].append(f)
-                if f.suffix.lower() in DISPLAY_EXT:
-                    fam["images"].append(f)
-            for base, fam in sorted(families.items()):
-                if not fam["files"]:
-                    continue
-                displayable = sorted(fam["images"], key=lambda p: p.name.lower())
-                records.append({
-                    "name": _pretty(base), "grp": GROUP_MISC,
-                    "sub": "Loose Files", "folder": root.as_posix(),
-                    "files": json.dumps([f.as_posix() for f in fam["files"]]),
-                    "images": json.dumps([i.as_posix() for i in displayable]),
-                    "file_count": len(fam["files"]),
-                    "bytes": sum(f.stat().st_size for f in fam["files"]),
-                    "first_image": (displayable[0].as_posix()
-                                    if displayable else ""),
-                    "thumb": (displayable[0].as_posix() if displayable else ""),
-                    "src_name": base})
+            records.extend(_families(root, GROUP_MISC, "Loose Files"))
 
         for r in records:
             src = r.pop("src_name")

@@ -187,6 +187,61 @@ def check_paths(data: dict) -> list[str]:
     return missing
 
 
+# ---------------------------------------------------------------------------
+# material recipes (pure; the builder AND the registry importer use these)
+# ---------------------------------------------------------------------------
+
+def collapse_slot_maps(slot: dict) -> dict:
+    """One map per role for a recipe slot, in the shape the builder's
+    material code consumes: {role: file, ..., "packed": file,
+    "packed_channels": {...}|None}.
+
+    The registry's `primary` (meshes_import) is this same pick, so the
+    served hero maps and the built materials cannot disagree:
+      - a slot marked `resolved: false` gives {} (keep the FBX's material);
+      - maps flagged `placeholder`, and emissive/opacity maps whose
+        `source` is `default` (a master material's fallback), are skipped;
+      - any other role: the FIRST remaining map wins (served maps are
+        rank-sorted, best source first);
+      - packed: the first packed map WITH channels, else the first packed
+        map; file and channels always come from that one map and channels
+        are never invented. Role `mask` is never used as a packed ORM.
+    """
+    if slot.get("resolved") is False:
+        return {}
+    out: dict = {}
+    packed = None
+    for m in slot.get("maps") or []:
+        role = m.get("role") or "other"
+        if not m.get("file") or m.get("placeholder"):
+            continue
+        if role in ("emissive", "opacity") and m.get("source") == "default":
+            continue
+        if role.startswith("packed"):
+            if packed is None or (m.get("channels")
+                                  and not packed.get("channels")):
+                packed = m
+            continue
+        out.setdefault(role, m["file"])
+    if packed is not None:
+        out["packed"] = packed["file"]
+        ch = packed.get("channels")
+        out["packed_channels"] = dict(ch) if ch else None
+    return out
+
+
+# Packed-channel letter -> image output: r/g/b are the Separate Color
+# node's outputs, `a` is the image texture node's own Alpha output.
+PACKED_CHANNEL_SOCKETS = {"r": "Red", "g": "Green", "b": "Blue", "a": "Alpha"}
+
+
+def packed_channel_sockets(channels) -> list:
+    """[(socket, role), ...] for a packed map's `channels` {r|g|b|a: role}.
+    Unknown letters are skipped (never read as Green); null gives []."""
+    return [(PACKED_CHANNEL_SOCKETS[k], v) for k, v in (channels or {}).items()
+            if k in PACKED_CHANNEL_SOCKETS]
+
+
 def budget_check(data: dict, meshes_db: Optional[str] = None) -> dict:
     """Sum triangle budgets from the manifest assets.
     If meshes_db is provided, looks up actual triangle counts."""

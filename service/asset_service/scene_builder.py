@@ -286,21 +286,22 @@ def _make_material(name, recipe):
     packed = load_tex(recipe.get("packed"), non_color=True)
     channels = recipe.get("packed_channels") or {}
     if packed:
+        from scene_manifest import packed_channel_sockets  # on sys.path via build()
         sep = nodes.new("ShaderNodeSeparateColor")
         links.new(packed.outputs["Color"], sep.inputs["Color"])
 
         # map channel letters to BSDF inputs
         # Blender 5.x SeparateColor outputs: "Red", "Green", "Blue"
+        # null channels -> default ORM order; real *_RGB ORM maps rely on it
         ch_map = channels or {"r": "ao", "g": "roughness", "b": "metallic"}
-        CH_OUT = {"r": "Red", "g": "Green", "b": "Blue"}
         if "roughness" in ch_map.values():
-            for ch_letter, role in ch_map.items():
-                out_name = CH_OUT.get(ch_letter, "Green")
+            # `a` reads the image's own Alpha output; unknown letters skip
+            for out_name, role in packed_channel_sockets(ch_map):
+                out = (packed.outputs["Alpha"] if out_name == "Alpha"
+                       else sep.outputs[out_name])
                 if role == "roughness" and not rgh:
-                    out = sep.outputs[out_name]
                     links.new(out, bsdf.inputs["Roughness"])
                 elif role == "metallic" and not met:
-                    out = sep.outputs[out_name]
                     links.new(out, bsdf.inputs["Metallic"])
         print(f"    material: packed map with channels {ch_map}")
 
@@ -343,17 +344,12 @@ def _apply_recipe_slots(root, slots, aid):
     per slot and replace existing slots BY NAME, leaving unmatched slots
     untouched (never collapse a 33-slot building to one material)."""
     # slot shape: {slot, material, base, maps: [{role, param, file, channels}]}
+    from scene_manifest import collapse_slot_maps  # on sys.path via build()
     built = {}
     for s in slots:
-        maps = {m.get("role"): m.get("file")
-                for m in (s.get("maps") or []) if m.get("file")}
-        # collapse packed-channel info for the first packed map
-        for m in (s.get("maps") or []):
-            if (m.get("role") or "").startswith("packed"):
-                maps["packed"] = m.get("file")
-                if m.get("channels"):
-                    maps["packed_channels"] = {
-                        k: v for k, v in m["channels"].items()}
+        # one map per role, the same pick as the registry's `primary`; a
+        # `resolved: false` slot collapses to {} and keeps the FBX material
+        maps = collapse_slot_maps(s)
         if not maps:
             continue
         slot_name = s.get("material") or s.get("slot") or ""

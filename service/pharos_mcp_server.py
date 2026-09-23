@@ -58,6 +58,12 @@ def _db() -> sqlite3.Connection:
     return conn
 
 
+def _tokens(query: str) -> list:
+    """Query words with 1-char tokens dropped (the HTTP API's guard): a
+    bare 'a' substring-matched every row. All dropped -> no match."""
+    return [t for t in query.lower().split() if len(t) >= 2]
+
+
 def _animation_clip_count(conn: sqlite3.Connection) -> int:
     """Clips = FBX/BVH under the ANIMATION packs only (mesh packs contain
     FBX too; counting everything inflated this number on mixed libs)."""
@@ -112,12 +118,15 @@ def pharos_search_meshes(
     """Search 3D meshes with real-world dimensions in metres.
 
     Args:
-        query: name/tag search (stem-aware, synonyms active: car→vehicle etc.)
+        query: name/pack/tag search -- every word (2+ chars) must appear
+               as a case-insensitive substring; no stemming or synonyms
+               (the HTTP /api/meshes search does stems + OR fallback)
         pack: exact pack name (get names from pharos_list_packs)
         theme: controlled vocabulary (building, door, prop, street, scifi,
                medieval, fantasy, nature, wall, light, destruction, ...)
         min_dim/max_dim: filter on largest bbox axis in METRES
-        min_height/max_height: filter on bbox Y in METRES
+        min_height/max_height: filter on bbox Z (height; the registry is
+               Z-up) in METRES
         max_triangles: budget filter
         with_textures: only meshes with texture links
         limit: max results (1-100)
@@ -141,10 +150,10 @@ def pharos_search_meshes(
             where.append("max_dim <= ?")
             args.append(max_dim)
         if min_height is not None:
-            where.append("bbox_y >= ?")
+            where.append("bbox_z >= ?")
             args.append(min_height)
         if max_height is not None:
-            where.append("bbox_y <= ?")
+            where.append("bbox_z <= ?")
             args.append(max_height)
         if max_triangles is not None:
             where.append("triangles <= ?")
@@ -158,13 +167,12 @@ def pharos_search_meshes(
         # text filter first, THEN limit (SQL LIMIT would sample the wrong
         # alphabetical window before the query filter runs)
         if query:
-            ql = query.lower()
-            tokens = ql.split()
+            tokens = _tokens(query)
             def hit(r):
                 nl = (r["name"] or "").lower() + " " + (r["pack"] or "").lower()
                 tags = (r.get("tags") or "") + (r.get("meta") or "")
                 return all(t in nl or t in tags.lower() for t in tokens)
-            rows = [r for r in rows if hit(r)]
+            rows = [r for r in rows if tokens and hit(r)]
         # total is the TRUE match count; items are the limited window
         total = len(rows)
         rows = rows[:min(100, max(1, limit))]
@@ -172,13 +180,16 @@ def pharos_search_meshes(
         for r in rows:
             meta = json.loads(r.get("meta") or "{}")
             recipe = json.loads(r.get("recipe") or "null") if r.get("recipe") else None
+            prim = recipe.get("primary") if recipe else None
             out.append({
                 "name": r["name"], "pack": r["pack"], "source": r["source"],
                 "fbx_path": r["fbx"], "triangles": r["triangles"],
                 "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],
                 "max_dim_m": r["max_dim"],
                 "texture_count": r["texture_count"],
-                "hero_textures": recipe.get("primary") if recipe else None,
+                # `mask` is not a named material map (HTTP drops it too)
+                "hero_textures": ({k: v for k, v in prim.items()
+                                   if k != "mask"} if prim else prim),
                 "themes": meta.get("themes", []),
             })
         return json.dumps({"total": total, "items": out})
@@ -217,13 +228,12 @@ def pharos_search_textures(
             f"SELECT * FROM textures{w} ORDER BY grp, sub, name",
             args)]
         if query:
-            ql = query.lower()
-            tokens = ql.split()
+            tokens = _tokens(query)
             def hit(r):
                 nl = (r["name"] or "").lower()
                 tags = (r.get("tags") or "") + (r.get("meta") or "")
                 return all(t in nl or t in tags.lower() for t in tokens)
-            rows = [r for r in rows if hit(r)]
+            rows = [r for r in rows if tokens and hit(r)]
         # filter BEFORE the limit (the mesh tool documents this exact
         # rule): truncating first made resolution filters return false
         # "no 4K sets" answers on libraries over the limit. The meta blob
@@ -278,13 +288,12 @@ def pharos_search_audio(
             f"SELECT * FROM audio{w} ORDER BY cat, name",
             args)]
         if query:
-            ql = query.lower()
-            tokens = ql.split()
+            tokens = _tokens(query)
             def hit(r):
                 nl = (r["name"] or "").lower()
                 tags = (r.get("tags") or "") + (r.get("meta") or "")
                 return all(t in nl or t in tags.lower() for t in tokens)
-            rows = [r for r in rows if hit(r)]
+            rows = [r for r in rows if tokens and hit(r)]
         total = len(rows)
         rows = rows[:min(100, max(1, limit))]
         out = [{
@@ -329,13 +338,12 @@ def pharos_search_collection(
             f"SELECT * FROM collection{w} ORDER BY name",
             args)]
         if query:
-            ql = query.lower()
-            tokens = ql.split()
+            tokens = _tokens(query)
             def hit(r):
                 nl = (r["name"] or "").lower()
                 tags = (r.get("tags") or "") + (r.get("meta") or "")
                 return all(t in nl or t in tags.lower() for t in tokens)
-            rows = [r for r in rows if hit(r)]
+            rows = [r for r in rows if tokens and hit(r)]
         total = len(rows)
         rows = rows[:min(100, max(1, limit))]
         out = [{

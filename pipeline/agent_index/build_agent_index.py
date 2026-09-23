@@ -18,7 +18,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "service"))
 from _config import library_root
+from asset_service.fbx_dims import fbx_file_info
 LIB = library_root() or "."
 AGENT = os.path.join(LIB, "_Agent_Files")
 os.makedirs(AGENT, exist_ok=True)
@@ -58,6 +60,26 @@ def read_manifest(exports_dir):
         return json.load(io.open(p, encoding="utf-8"))
     except Exception:
         return None
+
+
+FBX_PARSE_MAX_BYTES = 512 * 1024 * 1024
+
+
+def fbx_counts(fb):
+    """(triangles, vertices) read from the exported FBX, or None.
+
+    The manifest's engine count is render LOD0 (the reduced fallback for
+    Nanite meshes) and null for every SkeletalMesh; the exported file is
+    the authority. Files over 512 MB are not parsed."""
+    try:
+        if os.path.getsize(fb) > FBX_PARSE_MAX_BYTES:
+            return None
+    except OSError:
+        return None
+    info = fbx_file_info(fb)
+    if not info:
+        return None
+    return info.get("triangles"), info.get("vertices")
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +194,8 @@ for pack, ex in manifest_dirs:
                 f = t.get("file")
                 if f:
                     tex_files.append(os.path.join(ex, f.replace("/", os.sep)))
+        # parse failed / too big -> keep the engine value
+        counts = fbx_counts(fb) if os.path.isfile(fb) else None
         rows.append({
             "pack": pack,
             "name": mesh.get("name"),
@@ -180,8 +204,9 @@ for pack, ex in manifest_dirs:
             "fbx": fb,
             "exists": os.path.isfile(fb),
             "bytes": mesh.get("bytes"),
-            "triangles": mesh.get("triangles"),
-            "vertices": mesh.get("vertices"),
+            "triangles": counts[0] if counts else mesh.get("triangles"),
+            "triangles_engine": mesh.get("triangles"),
+            "vertices": counts[1] if counts else mesh.get("vertices"),
             "bbox_m": mesh.get("bbox_m"),
             "max_dim_m": (max(mesh["bbox_m"]) if mesh.get("bbox_m") else None),
             "materials": [m.get("name") for m in (mesh.get("materials") or [])],

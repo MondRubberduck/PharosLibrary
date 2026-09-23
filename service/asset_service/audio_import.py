@@ -2,9 +2,9 @@
 
 Ground truth is the crawl agent's own index -- library_files.jsonl
 (one JSON per file: p/cat/sub/ext/bytes/dur/sr/ch) -- NOT a disk walk.
-Category descriptions + keywords come from library_index.json and are
-merged into every record's search structures (dual-audience tagging like
-collection/textures: `tags` human words + themes, `meta` for the algo).
+Category descriptions + keywords come from library_index.json; keywords
+feed a record's `themes` only, never its `stems` (dual-audience tagging
+like collection/textures: `tags` human words + themes, `meta` for the algo).
 
 Retention (mirrors meshes/textures): rows with source='scan' (written by
 scanner.py) survive every rebuild. UNIQUE(rel) forbids two rows for the
@@ -165,7 +165,11 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
         # crawl row REPLACES the scan row (same file, richer metadata:
         # sr/ch/dur from the crawl agent); scan rows for files the crawl
         # does not know stay untouched. sqlite_sequence is deliberately
-        # NOT reset: surviving scan rows keep their ids.
+        # NOT reset: surviving scan rows keep their ids. A file keeps its
+        # id across rebuilds too (agents persist ids; the re-insert used to
+        # renumber the whole table on every boot); new files get new ids.
+        old_ids = {r[0]: r[1] for r in
+                   conn.execute("SELECT rel, id FROM audio")}
         conn.execute("DELETE FROM audio WHERE source IS NOT 'scan'")
 
         cat_meta: dict = {}
@@ -212,9 +216,11 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
                 words = _words(stem) + [w for w in _words(cat) + _words(sub)
                                         if w not in ("files",)]
                 themes = _match_themes(" ".join([stem, cat, sub] + kw))
+                # the file's OWN words only: category keywords feed themes
+                # (adding them to stems made every row of a category match
+                # every keyword -- 'pigeon' hit hundreds of non-pigeons)
                 stems = list(dict.fromkeys(
-                    _stems(stem) + _stems(cat) + _stems(sub)
-                    + _stems(" ".join(kw))))
+                    _stems(stem) + _stems(cat) + _stems(sub)))
                 facets = {"cat": _kebab(cat), "sub": _kebab(sub)}
                 meta = json.dumps({"stems": stems, "themes": themes,
                                    "facets": facets}, ensure_ascii=False)
@@ -222,9 +228,10 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
                                   ensure_ascii=False)
                 conn.execute(
                     "INSERT OR REPLACE INTO audio "
-                    "(name,cat,sub,rel,ext,bytes,dur,sr,ch,"
-                    "playable,desc,tags,meta,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (_pretty(stem), cat, sub, rel, ext, e.get("bytes") or 0,
+                    "(id,name,cat,sub,rel,ext,bytes,dur,sr,ch,"
+                    "playable,desc,tags,meta,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (old_ids.get(rel), _pretty(stem), cat, sub, rel, ext,
+                     e.get("bytes") or 0,
                      e.get("dur") if e.get("dur") is not None else 0.0, e.get("sr"), e.get("ch"),
                      1 if ext in PLAYABLE else 0,
                      cm.get("desc") or "", tags, meta, "crawl"))

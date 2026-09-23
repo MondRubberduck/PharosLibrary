@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 from . import config
-from .init import detect
+from .init import _not_indexed_dirs, detect
 
 REPO = str(Path(__file__).resolve().parents[2])
 
@@ -196,17 +196,25 @@ def run_ingest(argv=None) -> int:
     qs.append("1. Are these ALL your asset folders? (other drives / "
               "external disks?) detected so far:")
     qs.append(f"   {root}")
-    if report.get("manifest_packs_found"):
-        qs.append(f"2. Crawl the {len(report['manifest_packs_found'])} Unreal "
-                  f"pack(s) for material recipes? (needs UE 5.x + "
-                  f"pipeline/conversion sandbox; chain 1)")
-    elif report.get("uasset_total"):
+    # raw (unconverted) packs are the question; converted packs are done
+    raw = report.get("raw_ue_packs") or []
+    done = report.get("manifest_packs_found") or []
+    if raw:
+        qs.append(f"2. {len(raw)} Unreal pack(s) with raw .uasset content "
+                  f"and NO conversion yet: {', '.join(raw)} -- convert them "
+                  f"with chain 1? It extracts FBX + textures + material "
+                  f"recipes; needs UE 5.x + the pipeline/conversion "
+                  f"sandbox; slow: roughly 1-30 min of engine time per pack")
+    elif report.get("uasset_total") and not done:
         qs.append(f"2. {report['uasset_total']} RAW .uasset/.umap files "
                   f"detected in {', '.join(report.get('uasset_folders', []))} "
                   f"-- convert them with chain 1? (needs UE 5.x)")
     else:
         qs.append("2. Any Unreal .uasset packs to convert? (none detected; "
                   "chain 1 needs UE 5.x)")
+    if done:
+        qs.append(f"   already converted, nothing to do: {len(done)} "
+                  f"pack(s) -- their recipes import automatically")
     if report.get("kitbash_root") or report.get("blend_folders"):
         qs.append("3. Export KitBash3D kits to per-assembly FBX and/or "
                   "enumerate .blend containers? (needs Blender; chains 2+3; "
@@ -219,6 +227,16 @@ def run_ingest(argv=None) -> int:
     qs.append("5. Audio/texture crawl-quality indexes (categories, "
               "keywords) need a vision crawl pass -- run it, or ship with "
               "scanner-only metadata?")
+    # blend folders and raw UE packs already have their own question
+    asked = set(report.get("blend_folders") or []) | {
+        p.split("/")[0] for p in raw}
+    stray = [d for d in _not_indexed_dirs(root, cfg, config.DB_PATH)
+             if d not in asked]
+    if stray:
+        qs.append(f"6. These top-level folders match no section and hold no "
+                  f"indexed assets: {', '.join(stray)} -- what are they? "
+                  f"(scan them with scanner.py, point a section at them in "
+                  f"pharos_config.json, or leave them out)")
     for q in qs:
         print("  " + q)
     print("-" * 66)

@@ -30,7 +30,19 @@ token cost.** Operating manual (setup + build doctrine):
   Responses carry absolute FBX paths, real bounding boxes, triangle counts,
   material recipes (`recipe`, `hero_textures`), a 3D preview URL, and
   `dim_suspect` flags. `/api/meshes/packs` lists exact pack names first so
-  `pack=` filters never fail on a guessed name.
+  `pack=` filters never fail on a guessed name. `bbox_m` is [x, y, z]
+  metres, Z-up, and `height_m` = `bbox_m[2]` (scan rows keep their raw
+  file axes); mesh and texture `id`s are session handles, so persist
+  `fbx` / `rel` / `(pack, name)` instead.
+- **Recipe contract**: `recipe.slots[].maps[]` serves every texture the
+  material references, flagged instead of dropped: `source`
+  (`override | default | unnamed`, best first), `placeholder: true` for
+  master-material fill textures, `role` incl. `packed` with `channels`
+  `{r|g|b|a: ao|roughness|metallic|height}` (null = order unknown, never
+  assume one) and `mask` (never an ORM). A slot with `resolved: false`
+  (+ `unresolved_reason`) keeps the FBX's own material. `recipe.primary`
+  and `hero_textures` are the builder's own pick: no placeholders, no
+  `default`-source emissive/opacity.
 - **Textures**: `/api/textures/items` — PBR sets by group/subcategory/query;
   item detail lists every map file in the set.
 - **Audio**: `/api/audio/items` — sounds by category/subcategory/duration;
@@ -130,8 +142,10 @@ pipelines own.
   `.max` is unreadable.
 - Material recipes exist only where manifests joined (~75% of a fully
   converted library); unresolvable chains report `resolved: false`
-  rather than guessing. Master-material placeholder fills can still
-  surface in `recipe.primary` (known, documented).
+  rather than guessing. Master-material placeholder fills and default
+  maps stay listed in `recipe.slots[]`, flagged (`placeholder`,
+  `source: default`); they never reach `recipe.primary`/`hero_textures`
+  or the builder's wiring.
 - The budget checker reports; it does not fail the build.
 - Single-user, localhost-only, no auth, no TLS — by design.
 - Animation previews are rendered by a browser once per clip (the server
