@@ -358,8 +358,7 @@ index = {
     "read_order": [
         "1. Read library_index.json (top folders, categories, map types, resolutions, naming conventions).",
         "2. Grep library_files.jsonl for files (path/top/cat/map/ext/bytes/w/h).",
-        "3. Grep material_sets.jsonl to find full PBR material sets and which maps they contain.",
-        "4. Only then open the concrete file paths.",
+        "3. Only then open the concrete file paths.",
     ],
     "totals": {"files": len(rows), "folders": nfolders, "size_bytes": TOT_B, "size_gb": round(TOT_B / 1e9, 2),
                "categories": len(cat_c), "material_sets_est": len(set_rows)},
@@ -381,8 +380,6 @@ index = {
         "by_category": 'grep \'"cat":"Wood"\' library_files.jsonl',
         "by_map_type": 'grep \'"map":"normal"\' library_files.jsonl',
         "by_resolution": 'grep \'"w":2048\' library_files.jsonl',
-        "sets_with_normal_and_roughness": 'grep -E \'"maps":\\[[^]]*"(normal|roughness)"\' material_sets.jsonl',
-        "sets_in_category": 'grep \'"cat":"Concrete"\' material_sets.jsonl',
     },
     "notes": {
         "layout": "Files are physically unchanged (NOT reorganised). This index provides virtual tags; texture/PBR sets must stay together for project references.",
@@ -393,7 +390,7 @@ index = {
     },
 }
 # LOUD target + refusal: a wrong root once overwrote live index files
-print("WRITE TARGET: %s (library_index/files/material_sets)" % ROOT)
+print("WRITE TARGET: %s (library_index.json + library_files.jsonl)" % ROOT)
 refuse_near_empty(len(rows), os.path.join(ROOT, "library_files.jsonl"),
                   "texture files")
 json.dump(index, open(os.path.join(ROOT, "library_index.json"), "w", encoding="utf-8"), ensure_ascii=True, indent=1)
@@ -402,13 +399,10 @@ with open(os.path.join(ROOT, "library_files.jsonl"), "w", encoding="utf-8") as f
     for r in rows:
         fh.write(json.dumps({"p": r["p"], "top": r["top"], "cat": r["cat"], "map": r["map"],
                              "ext": r["ext"], "bytes": r["bytes"], "w": r["w"], "h": r["h"]}, ensure_ascii=True) + "\n")
-with open(os.path.join(ROOT, "material_sets.jsonl"), "w", encoding="utf-8") as fh:
-    for s in set_rows:
-        fh.write(json.dumps(s, ensure_ascii=True) + "\n")
 
 print("files:", len(rows), "sets:", len(set_rows))
 print("cats:", dict(cat_c.most_common()))
 print("res:", dict(resb.most_common()))
 print("top:", dict(top_c.most_common()))
 print("set-map-profiles:", sets_with.most_common(5))
-print("wrote library_index.json, library_files.jsonl, material_sets.jsonl")
+print("wrote library_index.json, library_files.jsonl")

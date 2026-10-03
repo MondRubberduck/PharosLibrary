@@ -1,4 +1,4 @@
-"""3-tier non-destructive auto-categorizer.
+"""2-tier non-destructive auto-categorizer.
 
 Assigns every logical asset pack a virtual taxonomy:
     style        Photorealistic | Stylized | Neutral/Unclassified
@@ -16,21 +16,22 @@ Tiers:
     Layer 2  binary inspection: .uasset AssetClass via uasset_parser, FBX
              marker scan (pure animation takes vs embedded anims vs skinned
              character meshes).
-    Layer 3  OPTIONAL local vision (Ollama endpoint via ai.vision_endpoint
-             in library.yaml). Disabled by default -- nothing ever leaves
-             the workstation (license safety rule).
 
-All input is read from disk 'rb'; the classifier itself never touches a file.
+All input is read from disk 'rb'; the classifier itself never touches a file
+and nothing ever leaves the workstation (license safety rule).
 """
 
 from __future__ import annotations
 
-import json
 import re
-import urllib.request
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
+import sys as _sys
+
+_sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from asset_service import textmatch as tm  # noqa: E402
 
 DOMAINS = (
     "Human Animations", "Archviz", "Props", "Environment",
@@ -314,64 +315,43 @@ _SUBCATEGORY_TOKENS: dict[str, list[tuple[str, list[str]]]] = {
 }
 
 
-def _sub_category(domain: str, tokens: set[str]) -> str:
-    for name, sub_tokens in _SUBCATEGORY_TOKENS.get(domain, []):
+def _sub_category(domain: str, tokens: set[str], pack: PackInput) -> str:
+    """The bucket MOST of the pack's files fall into; a tie keeps the list
+    order. The first bucket any single file touched used to win, so a pack
+    of climb clips with a few idle clips was filed under Idle. Same evidence
+    and substring match as Layer 1: the pack's own path names a bucket for
+    every file in it, a filename only for that file."""
+    buckets = _SUBCATEGORY_TOKENS.get(domain, [])
+    # the pack's OWN folder name, as whole words: a substring test over the
+    # whole relative path filed 'Standard Animations/Walks' under Idle
+    # ('stand' in 'standard') and 'Kitchen_Bowls' under Weapons ('bow')
+    own = set()
+    for t in tm.tokens(pack.rel_path.replace("\\", "/").rsplit("/", 1)[-1]):
+        own |= tm.variants(t)
+    # file names as whole words too ('bow' is not in 'bowl')
+    names = []
+    for f in pack.files:
+        words = set()
+        for t in tm.tokens(_basename(f["relpath"]).rsplit(".", 1)[0]):
+            words |= tm.variants(t)
+        names.append(words)
+    best, best_key = "General", (0, False)
+    for name, sub_tokens in buckets:
+        keys = set(sub_tokens)
+        n = sum(1 for w in names if w & keys)
+        # the folder name breaks a tie (or decides when no file name
+        # helps); it no longer outvotes what most files say
+        key = (n, bool(own & set(sub_tokens)))
+        if key > best_key:
+            best, best_key = name, key
+    if best_key != (0, False):
+        return best
+    # neither the folder nor a filename names a bucket: the other pack-level
+    # tokens (pack name, sidecar text) decide, first bucket in list order
+    for name, sub_tokens in buckets:
         if tokens & set(sub_tokens):
             return name
     return "General"
-
-
-# ---------------------------------------------------------------------------
-# Layer 3: optional local vision (Ollama). Disabled unless configured.
-# ---------------------------------------------------------------------------
-
-class OllamaVision:
-    """Queries a LOCAL Ollama endpoint for style/domain from a preview image.
-    Never sends asset files anywhere off-machine; disabled unless
-    ai.vision_endpoint is set in config."""
-
-    PROMPT = (
-        "Classify this 3D asset preview. Answer ONLY with JSON: "
-        '{"style": "Photorealistic" or "Stylized", '
-        '"domain": one of "Human Animations", "Archviz", "Props", '
-        '"Environment", "Characters", "Textures_HDRI"}'
-    )
-
-    def __init__(self, endpoint: str, model: str):
-        self.endpoint = endpoint.rstrip("/")
-        self.model = model
-
-    def classify_preview(self, image_path: str) -> Optional[dict[str, str]]:
-        import base64
-        try:
-            with open(image_path, "rb") as fh:
-                b64 = base64.b64encode(fh.read()).decode("ascii")
-            payload = json.dumps({
-                "model": self.model, "prompt": self.PROMPT, "stream": False,
-                "images": [b64],
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                f"{self.endpoint}/api/generate", data=payload,
-                headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                answer = json.loads(resp.read().decode("utf-8")).get("response", "")
-            match = re.search(r"\{.*\}", answer, re.S)
-            if not match:
-                return None
-            result = json.loads(match.group(0))
-            if result.get("style") in STYLE_TOKENS and result.get("domain") in DOMAINS:
-                return result
-        except Exception:
-            return None
-        return None
-
-
-def get_vision_classifier(config: dict) -> Optional[OllamaVision]:
-    ai = (config or {}).get("ai") or {}
-    endpoint, model = ai.get("vision_endpoint"), ai.get("vision_model")
-    if not endpoint or not model:
-        return None
-    return OllamaVision(endpoint, model)
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +362,8 @@ def _basename(relpath: str) -> str:
     return relpath.rsplit("/", 1)[-1]
 
 
-def _layer1_scores(pack: PackInput) -> tuple[dict[str, float], set[str]]:
+def _layer1_scores(pack: PackInput) -> tuple[dict[str, float], Counter]:
+    """(score per domain, token -> how many files it speaks for)."""
     rel = pack.rel_path.replace("\\", "/")
     path_tokens = _tokens(rel.replace("/", " ") + " " + pack.name)
     seg_tokens = _segment_tokens(rel)
@@ -394,7 +375,10 @@ def _layer1_scores(pack: PackInput) -> tuple[dict[str, float], set[str]]:
     path_blob = rel.lower()
     file_blob = " ".join(_basename(f["relpath"]) for f in pack.files).lower()
     sidecar_blob = pack.sidecar_text[:4000].lower()
-    matched: set[str] = set()
+    # a token from the pack's own path or sidecar describes every file; a
+    # filename token only the files that carry it (host_tags ranks by this)
+    token_files: Counter = Counter(dict.fromkeys(
+        path_tokens | seg_tokens | sidecar_tokens, len(pack.files)))
     scores: dict[str, float] = {}
     for domain, domain_tokens in DOMAIN_TOKENS.items():
         score = 0.0
@@ -405,11 +389,13 @@ def _layer1_scores(pack: PackInput) -> tuple[dict[str, float], set[str]]:
                 score += 1.0 * min(name_tokens[tok], 5)
             if tok in path_blob or tok in file_blob:
                 score += 1.5       # substring: catches glued words (HornsVolume2)
-                matched.add(tok)
+                token_files[tok] = max(
+                    token_files[tok], len(pack.files) if tok in path_blob
+                    else file_blob.count(tok))
             if tok in sidecar_blob:
                 score += 0.5
         scores[domain] = score
-    return scores, path_tokens | seg_tokens | sidecar_tokens | matched
+    return scores, token_files
 
 
 MARKETPLACE_VENDORS = {"Gumroad", "Sketchfab", "Fab", "CGTrader", "TurboSquid"}
@@ -454,8 +440,7 @@ def _composition(pack: PackInput) -> dict[str, Any]:
     }
 
 
-def classify_pack(pack: PackInput, vision: Optional[OllamaVision] = None,
-                  preview_path: Optional[str] = None) -> Classification:
+def classify_pack(pack: PackInput) -> Classification:
     result = Classification()
     exts = sorted({f["ext"].lstrip(".") for f in pack.files if f["ext"]})
     result.formats = exts
@@ -472,7 +457,8 @@ def classify_pack(pack: PackInput, vision: Optional[OllamaVision] = None,
             targets.append("blender")
         result.targets = targets or ["blender"]
 
-    l1_scores, tokens = _layer1_scores(pack)
+    l1_scores, token_files = _layer1_scores(pack)
+    tokens = set(token_files)
     result.vendor, scan_source = _vendor(pack)
 
     # composition corrections BEFORE ranking
@@ -544,33 +530,21 @@ def classify_pack(pack: PackInput, vision: Optional[OllamaVision] = None,
             if result.vendor in VENDOR_STYLE_HINT:
                 result.style = VENDOR_STYLE_HINT[result.vendor]
 
-    # --- Layer 3 (optional, local-only) -------------------------------------
-    if vision and preview_path:
-        vision_result = vision.classify_preview(preview_path)
-        if vision_result:
-            result.evidence["vision"] = vision_result
-            if vision_result["domain"] == result.domain and (
-                    vision_result["style"] == result.style
-                    or result.style == "Neutral/Unclassified"):
-                result.confidence = 0.95
-                if result.style == "Neutral/Unclassified":
-                    result.style = vision_result["style"]
-            else:
-                result.confidence = 0.50
-                result.validation_status = "needs_review"
-
-    result.sub_category = _sub_category(result.domain, tokens)
+    result.sub_category = _sub_category(result.domain, tokens, pack)
 
     # --- host-app projection ------------------------------------------------
     result.host_category = ("HDRI" if result.domain == "Textures_HDRI"
                              and result.sub_category == "HDRI"
                              else "Textures" if result.domain == "Textures_HDRI"
                              else "Assets")
-    tag_pool = {result.sub_category.lower(), result.domain.lower()}
+    # taxonomy first, then the tokens most of the pack's files carry: an
+    # alphabetical cut at 12 dropped "walk" from packs full of walk clips
+    tags = [result.sub_category.lower(), result.domain.lower()]
     if result.vendor:
-        tag_pool.add(result.vendor.lower())
-    tag_pool |= {t for t in tokens if len(t) > 3}
-    result.host_tags = sorted(tag_pool)[:12]
+        tags.append(result.vendor.lower())
+    ranked = sorted(token_files.items(), key=lambda kv: (-kv[1], kv[0]))
+    tags += [t for t, _ in ranked if len(t) > 3 and t not in tags]
+    result.host_tags = tags[:12]
 
     result.evidence.setdefault("layer1_scores", {k: round(v, 1) for k, v in l1_scores.items()})
     result.evidence["composition"] = {"geometry": comp["geometry"],

@@ -261,6 +261,8 @@ def test_tex_index_self_builds_cache():
         assert "wrote library_index.json" in (r.stdout or "")
         files_jsonl = tex / "library_files.jsonl"
         assert files_jsonl.is_file()
+        assert not (tex / "material_sets.jsonl").exists(), \
+            "material_sets.jsonl is written although nothing reads it"
         rows = {json.loads(l)["p"]: json.loads(l)
                 for l in files_jsonl.read_text(
                     encoding="utf-8").splitlines() if l.strip()}
@@ -711,8 +713,8 @@ def test_indexer_prune_scoped_to_its_root():
             r.mkdir(parents=True)
             (r / f"pack_{n.lower()}.fbx").write_bytes(b"stubfbx")
             roots.append(tmp / n)
-        indexer.index_root(roots[0], dbp, config={})
-        indexer.index_root(roots[1], dbp, config={})
+        indexer.index_root(roots[0], dbp)
+        indexer.index_root(roots[1], dbp)
         import sqlite3
         conn = sqlite3.connect(str(dbp))
         n_before = conn.execute(
@@ -724,7 +726,7 @@ def test_indexer_prune_scoped_to_its_root():
         # NOT prune root A's rows
         import shutil
         shutil.rmtree(roots[0])
-        indexer.index_root(roots[1], dbp, config={})
+        indexer.index_root(roots[1], dbp)
         conn = sqlite3.connect(str(dbp))
         n_after = conn.execute(
             "SELECT COUNT(*) FROM assets WHERE canonical_root LIKE ?",
@@ -734,7 +736,7 @@ def test_indexer_prune_scoped_to_its_root():
             f"root A rows wiped by root B's run: {n_before} -> {n_after}"
         # but a NEW run against (the now-empty) root A prunes its own
         roots[0].mkdir()
-        indexer.index_root(roots[0], dbp, config={})
+        indexer.index_root(roots[0], dbp)
         conn = sqlite3.connect(str(dbp))
         n_final = conn.execute(
             "SELECT COUNT(*) FROM assets WHERE canonical_root LIKE ?",
@@ -1251,6 +1253,22 @@ def test_agent_index_finds_nested_packs():
         names = [json.loads(x)["name"] for x in
                  out.read_text(encoding="utf-8").splitlines() if x.strip()]
         assert names == ["deep_m"], f"nested pack rows: {names}"
+        # only what something reads: no packs.json, no readable guide
+        written = sorted(p.name for p in out.parent.iterdir())
+        assert written == ["models.jsonl"], f"unread index files: {written}"
+
+
+def test_availability_writes_only_jsonl():
+    """availability.json and AVAILABILITY_AGENT_INDEX.md repeated
+    availability.jsonl and nothing read them."""
+    src = (REPO / "pipeline" / "agent_index"
+           / "build_availability_catalog.py").read_text(encoding="utf-8")
+    assert '"availability.json"' not in src, "availability.json still written"
+    assert "AVAILABILITY_AGENT_INDEX" not in src, "readable index still written"
+    assert '"availability.jsonl"' in src
+    for gone in ("gen_md.py", "gen_tex_md.py"):
+        assert not (REPO / "pipeline" / "agent_index" / gone).exists(), \
+            f"{gone} still writes a section AGENT_INDEX.md nothing reads"
 
 
 def test_registry_stamp_and_message():

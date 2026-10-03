@@ -244,7 +244,7 @@ addEventListener('resize',()=>{clearTimeout(window._r);window._r=setTimeout(load
 async function openItem(id){
  const d=await(await fetch('/api/audio/item?id='+id)).json();
  if(d.error)return;
- const it=d.item;
+ const it=d.item||d;
  $('mname').textContent=it.name;
  const bits=[it.cat,it.sub];
  if(it.dur)bits.push(fmt(it.dur));

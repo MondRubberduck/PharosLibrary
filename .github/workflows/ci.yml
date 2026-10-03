@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.10", "3.12"]
+        python: ["3.10", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     env:
       # the MCP check must really run here: a missing mcp package FAILS
@@ -36,6 +36,8 @@ jobs:
         run: python -B tests/test_uasset_parser.py
       - name: Pipeline regression checks
         run: python -B tests/test_pack_verify.py
+      - name: Search, asset-fact and index checks
+        run: python -B tests/test_search.py
       - name: Fresh-install smoke (init -> importers -> API -> scanner -> docs)
         run: python -B tests/test_fresh_install.py
 

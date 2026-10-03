@@ -137,7 +137,7 @@ addEventListener('resize',()=>{clearTimeout(window._r);window._r=setTimeout(load
 async function openItem(id){
  const d=await(await fetch('/api/collection/item?id='+id)).json();
  if(d.error)return;
- const it=d.item;
+ const it=d.item||d;
  $('mname').textContent=it.name;
  const bits=[it.store,it.type_group];
  if(it.type_cat)bits.push(it.type_cat);

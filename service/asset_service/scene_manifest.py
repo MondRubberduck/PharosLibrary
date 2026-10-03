@@ -199,28 +199,42 @@ def collapse_slot_maps(slot: dict) -> dict:
     The registry's `primary` (meshes_import) is this same pick, so the
     served hero maps and the built materials cannot disagree:
       - a slot marked `resolved: false` gives {} (keep the FBX's material);
-      - maps flagged `placeholder`, and emissive/opacity maps whose
-        `source` is `default` (a master material's fallback), are skipped;
-      - any other role: the FIRST remaining map wins (served maps are
-        rank-sorted, best source first);
+      - maps flagged `placeholder` are skipped;
       - packed: the first packed map WITH channels, else the first packed
         map; file and channels always come from that one map and channels
-        are never invented. Role `mask` is never used as a packed ORM.
+        are never invented. Role `mask` is never used as a packed ORM;
+      - a map whose `source` is `default` (a master material's fallback,
+        the same file under every material of a pack) is skipped when its
+        role is emissive, opacity or height, or a role the chosen packed
+        map names in its channels while not being a `default` itself: the
+        slot's own ORM supplies roughness/metallic/ao, and the builder
+        never reads that channel behind a direct map. Without such a
+        packed map (none, channel-less, or a fallback too) the default
+        keeps the role -- it is what the engine renders;
+      - any other role: the FIRST remaining map wins (served maps are
+        rank-sorted, best source first).
+    Only the pick changes: the slot's `maps` are never altered.
     """
     if slot.get("resolved") is False:
         return {}
-    out: dict = {}
+    maps = [m for m in slot.get("maps") or []
+            if m.get("file") and not m.get("placeholder")]
     packed = None
-    for m in slot.get("maps") or []:
+    for m in maps:
+        if (m.get("role") or "").startswith("packed") and (
+                packed is None
+                or (m.get("channels") and not packed.get("channels"))):
+            packed = m
+    # roles a `default` map may not take. The packed map is chosen first:
+    # a hand-written manifest slot is not rank-sorted like a served one
+    barred = {"emissive", "opacity", "height"}
+    if packed is not None and packed.get("source") != "default":
+        barred.update((packed.get("channels") or {}).values())
+    out: dict = {}
+    for m in maps:
         role = m.get("role") or "other"
-        if not m.get("file") or m.get("placeholder"):
-            continue
-        if role in ("emissive", "opacity") and m.get("source") == "default":
-            continue
-        if role.startswith("packed"):
-            if packed is None or (m.get("channels")
-                                  and not packed.get("channels")):
-                packed = m
+        if role.startswith("packed") or (
+                role in barred and m.get("source") == "default"):
             continue
         out.setdefault(role, m["file"])
     if packed is not None:

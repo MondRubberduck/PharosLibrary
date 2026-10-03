@@ -24,6 +24,7 @@ from pathlib import Path
 # allow standalone execution
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
+from asset_service import textmatch as tm
 
 AUDIO_ROOT = config.AUDIO_ROOT
 JSONL = AUDIO_ROOT / "library_files.jsonl"
@@ -100,35 +101,6 @@ AUDIO_THEMES = {
               "futuristic"],
     "foley": ["foley", "door", "cloth", "paper", "kitchen", "tool", "prop"],
 }
-
-
-def _words(text: str) -> list[str]:
-    out = []
-    for w in re.findall(r"[A-Za-z0-9]+", text or ""):
-        parts = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", w).lower().split()
-        out.extend(parts)
-    return list(dict.fromkeys(w for w in out if len(w) > 2))
-
-
-def _stems(text: str) -> list[str]:
-    stems = []
-    for w in _words(text):
-        stems.append(w)
-        for suf, cut in (("ing", 3), ("ers", 3), ("er", 2), ("es", 2), ("s", 1)):
-            if w.endswith(suf) and len(w) > len(suf) + 2:
-                stems.append(w[:-cut])
-                break
-    return list(dict.fromkeys(stems))
-
-
-def _match_themes(text: str) -> list[str]:
-    low = " " + text.lower() + " "
-    hits = []
-    for theme, kws in AUDIO_THEMES.items():
-        found = [k for k in kws if k in low]
-        if len(found) >= 2 or (len(found) == 1 and len(found[0]) >= 5):
-            hits.append(theme)
-    return hits
 
 
 def _pretty(stem: str) -> str:
@@ -212,15 +184,18 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
                 ext = (e.get("ext") or "").lower()
                 stem = Path(rel).stem
                 cm = cat_meta.get(cat, {})
-                kw = cm.get("keywords") or []
-                words = _words(stem) + [w for w in _words(cat) + _words(sub)
-                                        if w not in ("files",)]
-                themes = _match_themes(" ".join([stem, cat, sub] + kw))
-                # the file's OWN words only: category keywords feed themes
-                # (adding them to stems made every row of a category match
-                # every keyword -- 'pigeon' hit hundreds of non-pigeons)
+                words = tm.words(stem, tm.STOPWORDS) + [
+                    w for w in tm.words(cat) + tm.words(sub)
+                    if w not in ("files",)]
+                # the file's OWN words plus its category, matched as WORDS.
+                # The category's keyword list used to be part of this text:
+                # every sound of a category then carried all its themes
+                # (q=horror: 550 sounds, about 100 of them horror) -- the
+                # same leak the stems below were already protected from
+                themes = tm.match_themes(" ".join([stem, cat, sub]),
+                                         AUDIO_THEMES, strict=True)
                 stems = list(dict.fromkeys(
-                    _stems(stem) + _stems(cat) + _stems(sub)))
+                    tm.stems(stem) + tm.stems(cat) + tm.stems(sub)))
                 facets = {"cat": _kebab(cat), "sub": _kebab(sub)}
                 meta = json.dumps({"stems": stems, "themes": themes,
                                    "facets": facets}, ensure_ascii=False)

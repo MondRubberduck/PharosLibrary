@@ -105,10 +105,8 @@ CREATE TABLE IF NOT EXISTS operations (
 CREATE INDEX IF NOT EXISTS idx_assets_domain        ON assets(domain);
 CREATE INDEX IF NOT EXISTS idx_assets_style         ON assets(style);
 CREATE INDEX IF NOT EXISTS idx_assets_vendor        ON assets(vendor);
-CREATE INDEX IF NOT EXISTS idx_assets_content_hash ON assets(content_hash);
 CREATE INDEX IF NOT EXISTS idx_assets_status        ON assets(status);
 CREATE INDEX IF NOT EXISTS idx_asset_files_asset   ON asset_files(asset_id);
-CREATE INDEX IF NOT EXISTS idx_asset_files_sha256  ON asset_files(sha256);
 CREATE INDEX IF NOT EXISTS idx_operations_status   ON operations(status);
 
 -- Full-text search over the taxonomy-facing columns. `assets` is a plain
@@ -212,6 +210,10 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
                 "TO host_thumbnail_path")
             conn.executescript(SCHEMA_SQL)
             conn.execute("INSERT INTO assets_fts(assets_fts) VALUES('rebuild')")
+    # no query looks assets up by content hash or files by checksum
+    # (the indexer no longer computes either): drop their indexes
+    conn.execute("DROP INDEX IF EXISTS idx_assets_content_hash")
+    conn.execute("DROP INDEX IF EXISTS idx_asset_files_sha256")
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
     return conn

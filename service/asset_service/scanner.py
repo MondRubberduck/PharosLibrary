@@ -10,6 +10,9 @@ Discovers:
     Exports/kit_manifest.json) are SKIPPED: they are imported through their
     manifests (pharos.py ingest). Scanning an Exports folder directly still
     reads its manifest.json for GEOMETRY STATS (triangles/bbox)
+  - A model file that already has a row from a richer source (native/blend
+    measured in Blender, leartes/kitbash3d from a manifest) is SKIPPED: one
+    file, one description. An earlier scan row of such a file is removed
 
 The scanner is honest about its limits:
   - FBX bounding boxes are extracted when possible (binary FBX parse for
@@ -34,6 +37,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
+from asset_service import textmatch as tm
 
 AUDIO_ROOT = config.AUDIO_ROOT
 
@@ -189,7 +193,7 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
 
     folder_str = folder.as_posix()
     summary = {
-        "meshes": 0, "texture_sets": 0, "audio": 0,
+        "meshes": 0, "parked": 0, "texture_sets": 0, "audio": 0,
         "manifests_read": 0, "skipped": 0, "errors": 0,
     }
 
@@ -211,6 +215,8 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
         # 'no such column: source' on a registry from an older Pharos)
         _migrate(conn)
         conn.executescript(MESHES_DDL + TEXTURES_DDL + AUDIO_DDL)
+        from asset_service.meshes_import import ensure_parked
+        ensure_parked(conn)
         # the audio source column and the textures scan-unique index
         # post-date some registries: make sure THIS writer can write
         # before any importer ever ran
@@ -288,6 +294,55 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
               f"imported through their manifests by 'pharos.py ingest', "
               f"not scanned", flush=True)
 
+    # a model file that already has a row from a richer source (native/
+    # blend: measured in Blender; leartes/kitbash3d: export manifest) gets
+    # no second SERVED row: the file-level reading here contradicted the
+    # measured one (one OBJ: 20,938 triangles there, 10,600 and a 2,484 m
+    # bbox here). Its scan row is PARKED (meshes_parked) instead: the next
+    # import serves it again if that richer row disappears. The sources
+    # spell one path differently (D:/Lib\Pack\x.fbx, D:\Lib\Pack\x.fbx,
+    # D:/Lib/Pack/x.fbx), so compare normalised text; ONE SELECT for the
+    # run, not one per file. A dry run reads the registry too (SELECT
+    # only): it must count what a real run writes.
+    reg = conn
+    if (reg is None and mesh_files
+            and Path(db_path or config.DB_PATH).is_file()):
+        reg = sqlite3.connect(db_path or config.DB_PATH)
+    if reg is not None and mesh_files:
+        from asset_service.db import _norm_path
+        cand = {_norm_path(p) for p in mesh_files}
+        try:
+            hits = [(rid, src, key) for rid, src, fbx in reg.execute(
+                        "SELECT id, source, fbx FROM meshes WHERE fbx != ''")
+                    if (key := _norm_path(fbx)) in cand]
+        except sqlite3.Error:
+            if conn is not None:
+                raise
+            hits = []            # dry run: this registry has no meshes yet
+        # a row WITHOUT a source name (pre-`source` registry; the next
+        # rebuild drops it) covers nothing: it must not cost a scan row
+        richer = {key: src for _, src, key in hits if src and src != "scan"}
+        # a file scanned BEFORE the richer source covered it kept its scan
+        # row (scan rows survive every rebuild): that row is the same
+        # duplicate. Scan rows of files nobody else covers are not touched.
+        stale = [rid for rid, src, key in hits
+                 if src == "scan" and key in richer]
+        if stale and conn is not None:
+            for rid in stale:
+                conn.execute("DELETE FROM meshes WHERE id=?", (rid,))
+            conn.commit()
+        if richer:
+            n_cov = sum(1 for p in mesh_files if _norm_path(p) in richer)
+            print(f"  parked {n_cov} model file(s) that already have a "
+                  f"richer row for the same file "
+                  f"({', '.join(sorted(set(richer.values())))}): no second, "
+                  f"file-level row is served (kept aside in case that row "
+                  f"goes away)", flush=True)
+    else:
+        richer = {}
+    if reg is not None and reg is not conn:
+        reg.close()
+
     # --- mesh records ---
     # if a manifest covers this folder, use its data (exact wiring)
     manifest_meshes = {}  # fbx_path -> record
@@ -364,13 +419,14 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
                         "bbox": geo["bbox"] if geo else [0, 0, 0],
                     }
 
+                covered = bool(richer) and _norm_path(mf) in richer
                 if dry_run:
                     if verbose:
                         print(f"  [mesh] {record['name']} tri={record['triangles']}")
-                    summary["meshes"] += 1
                 else:
-                    _insert_mesh(conn, record, folder_str)
-                    summary["meshes"] += 1
+                    _insert_mesh(conn, record, folder_str,
+                                 "meshes_parked" if covered else "meshes")
+                summary["parked" if covered else "meshes"] += 1
             except Exception as exc:                          # noqa: BLE001
                 summary["errors"] += 1
                 print(f"  [warn] skipped mesh {mf.name}: "
@@ -435,12 +491,33 @@ def _texture_stem(stem: str) -> str:
     return stem
 
 
-def _insert_mesh(conn, record, root):
-    tags = json.dumps([record["name"].lower(), record["pack"].lower()])
-    meta = json.dumps({"stems": [record["name"].lower()],
-                       "themes": [], "facets": {"pack": record["pack"].lower()}})
+def _word_meta(name: str, context: str, themes_table: dict,
+               strict: bool, facets: dict, extra: dict = None) -> tuple:
+    """(tags json, meta json) for a scanned row, cut by the SAME rules as
+    the richer importers (textmatch). A scanned row used to carry its raw
+    file name as its only tag and no theme at all, so a library indexed by
+    the scanner alone -- every fresh install without the optional chains
+    -- could not be filtered by theme and matched whole file names only."""
+    words = tm.words(name, tm.STOPWORDS)
+    themes = tm.match_themes(name, themes_table, strict=strict)
+    stems = tm.stems(name)
+    ctx = [w for w in tm.stems(context) if w not in stems and len(w) > 2]
+    return (json.dumps(list(dict.fromkeys(words + themes)),
+                       ensure_ascii=False),
+            json.dumps({"stems": stems, "ctx": ctx, "themes": themes,
+                        "facets": facets, **(extra or {})},
+                       ensure_ascii=False))
+
+
+def _insert_mesh(conn, record, root, table="meshes"):
+    from asset_service.meshes_import import scan_meta
+    tags, meta = scan_meta(record["name"], record["pack"], record["fbx"])
+    # one place per file: served (meshes) or parked (meshes_parked)
+    other = "meshes" if table == "meshes_parked" else "meshes_parked"
+    conn.execute(f"DELETE FROM {other} WHERE fbx=? AND source='scan'",
+                 (record["fbx"],))
     conn.execute(
-        "INSERT OR REPLACE INTO meshes (name,pack,source,kind,fbx,on_disk,"
+        f"INSERT OR REPLACE INTO {table} (name,pack,source,kind,fbx,on_disk,"
         "bytes,triangles,vertices,submeshes,bbox_x,bbox_y,bbox_z,max_dim,"
         "materials,texture_count,texture_files,tags,meta) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -454,8 +531,38 @@ def _insert_mesh(conn, record, root):
          "[]", 0, "[]", tags, meta))
 
 
+def _tex_themes() -> dict:
+    from asset_service.textures_import import TEX_THEMES
+    return TEX_THEMES
+
+
+def _audio_themes() -> dict:
+    from asset_service.audio_import import AUDIO_THEMES
+    return AUDIO_THEMES
+
+
 def _insert_texture_set(conn, stem, files, channels, folder):
     first = sorted(files)[0]
+    # the same file-derived facts the texture importer serves (measured
+    # pixel size, which file is which map, a preview as thumb): a scanned
+    # set used to carry none of them
+    from asset_service import imgmeta, textures_import
+    extra, thumb = {}, first.as_posix()
+    try:
+        shown = sorted((f for f in files if f.suffix.lower() in
+                        {".jpg", ".jpeg", ".png", ".webp"}),
+                       key=lambda p: p.name.lower())
+        facts = textures_import._facts(
+            folder, {f.name: f.stat().st_size for f in files
+                     if f.parent == folder}, shown)
+        px = next((list(s) for s in (imgmeta.image_size(r)
+                                     for r in facts["ref"]) if s), None)
+        extra = {"px": px, "maps": facts["maps"],
+                 "res": textures_import._res_label(max(px)) if px else "",
+                 "res_source": "measured" if px else "name"}
+        thumb = facts["thumb"] or thumb
+    except (OSError, ValueError, KeyError):
+        pass        # facts are a bonus; the set itself is still indexed
     conn.execute(
         "INSERT OR REPLACE INTO textures (name,grp,sub,folder,files,images,"
         "file_count,bytes,first_image,thumb,tags,meta,source) "
@@ -465,10 +572,9 @@ def _insert_texture_set(conn, stem, files, channels, folder):
          json.dumps([f.as_posix() for f in sorted(files)
                      if f.suffix.lower() in {".jpg", ".png", ".webp"}]),
          len(files), sum(f.stat().st_size for f in files),
-         first.as_posix(), first.as_posix(),
-         json.dumps([stem.lower()]),
-         json.dumps({"stems": [stem.lower()], "themes": [],
-                     "facets": {"grp": folder.name.lower()}}),
+         first.as_posix(), thumb,
+         *_word_meta(stem, folder.name, _tex_themes(), True,
+                     {"grp": folder.name.lower()}, extra),
          "scan"))
 
 
@@ -482,8 +588,16 @@ def _insert_audio(conn, af, duration, folder):
     except ValueError:
         rel = af.resolve().as_posix()
     # folder taxonomy beats a generic label: Impacts/Metal/x.wav ->
-    # cat "Impacts", sub "Metal"; loose root files fall back to SFX
-    parts = Path(rel).parts
+    # cat "Impacts", sub "Metal"; loose root files fall back to SFX. For a
+    # file OUTSIDE the audio section the folders come from the path below
+    # the scanned folder (from the absolute path they read 'C:\' > 'Users')
+    if Path(rel).is_absolute():
+        try:
+            parts = af.resolve().relative_to(folder.resolve()).parts
+        except ValueError:
+            parts = (af.name,)
+    else:
+        parts = Path(rel).parts
     conn.execute(
         "INSERT OR REPLACE INTO audio (name,cat,sub,rel,ext,bytes,dur,sr,ch,"
         "playable,desc,tags,meta,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -491,9 +605,12 @@ def _insert_audio(conn, af, duration, folder):
      parts[1] if len(parts) >= 3 else "", rel, af.suffix.lower(),
          af.stat().st_size, duration, 0, 0,
          1 if af.suffix.lower() != ".aif" else 0, "",
-         json.dumps([af.stem.lower()]),
-         json.dumps({"stems": [af.stem.lower()], "themes": [],
-                     "facets": {"cat": folder.name.lower()}}),
+         # the category folders are part of what a sound is called
+         # ('Impacts/Metal'); for a file outside the audio section `rel`
+         # is absolute, and its path must not turn into tags
+         *_word_meta(af.stem + " " + " ".join(parts[:-1][:2]), "",
+                     _audio_themes(), True,
+                     {"cat": folder.name.lower()}),
          "scan"))
 
 

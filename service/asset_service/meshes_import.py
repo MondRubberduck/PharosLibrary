@@ -36,6 +36,7 @@ _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
 from asset_service.material_roles import classify_param, packed_for
 from asset_service.scene_manifest import collapse_slot_maps
+from asset_service import textmatch as tm
 
 AGENT_FILES = config.AGENT_FILES
 MODELS = AGENT_FILES / "models.jsonl"
@@ -76,7 +77,12 @@ CREATE TABLE IF NOT EXISTS meshes (
   -- bbox_x/y/z (size) semantics are unchanged; bbox_min/max live beside them.
   recipe TEXT,
   bbox_min_x REAL, bbox_min_y REAL, bbox_min_z REAL,
-  bbox_max_x REAL, bbox_max_y REAL, bbox_max_z REAL
+  bbox_max_x REAL, bbox_max_y REAL, bbox_max_z REAL,
+  -- 0.10: the UNPRETTIFIED object name (needed to import one object out
+  -- of a .blend / multi-object file, and part of the stable key) and the
+  -- vendor's own asset path (Unreal: /Game/Pack/Folder/SM_Name)
+  object_name TEXT,
+  asset_path TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_meshes_pack ON meshes(pack);
 CREATE INDEX IF NOT EXISTS idx_meshes_maxdim ON meshes(max_dim);
@@ -108,6 +114,7 @@ MESH_EXTRA_COLUMNS = (
     ("recipe", "TEXT"),
     ("bbox_min_x", "REAL"), ("bbox_min_y", "REAL"), ("bbox_min_z", "REAL"),
     ("bbox_max_x", "REAL"), ("bbox_max_y", "REAL"), ("bbox_max_z", "REAL"),
+    ("object_name", "TEXT"), ("asset_path", "TEXT"),
 )
 
 # Where a texture binding came from, best first. An instance_override is the
@@ -156,9 +163,10 @@ MESH_THEMES = {
     "street": ["street", "road", "sidewalk", "pavement", "curb", "asphalt"],
     "prop": ["prop", "barrel", "crate", "box", "sign", "lamp", "post",
              "bench", "trash", "hydrant", "bin"],
-    "vehicle": ["car", "truck", "vehicle", "bus", "van"],
+    "vehicle": ["car", "truck", "vehicle", "bus", "van", "pickup", "sedan",
+                "suv", "jeep", "motorcycle", "wagon", "train", "tractor"],
     "nature": ["tree", "bush", "plant", "rock", "grass", "foliage",
-               "branch", "log"],
+               "branch", "log", "shrub", "ivy", "flower", "fern", "cliff"],
     "furniture": ["chair", "table", "sofa", "bed", "cabinet", "shelf",
                   "desk", "stool"],
     "stairs": ["stair", "step", "ladder", "ramp"],
@@ -183,6 +191,29 @@ MESH_THEMES = {
     "creature": ["creature", "monster", "beast", "animal", "dragon",
                  "shark", "wolf", "bird"],
 }
+
+# What a PACK NAME may say about its meshes: the setting, and only when
+# the name spells it out as a word. Object themes (building, vehicle,
+# prop ...) never come from the pack name: it used to be fed to a
+# substring test together with the mesh name, so every mesh of a pack
+# with 'house' in its name was a 'building' and every mesh of a pack
+# with 'tower' in its name 'medieval'.
+PACK_NAME_THEMES = {
+    "scifi": ["scifi", "sci", "cyber", "cyberpunk", "futuristic"],
+    "medieval": ["medieval"],
+    "fantasy": ["fantasy"],
+    "military": ["military", "warzone"],
+    "street": ["street", "urban", "city", "alley"],
+    "nature": ["nature", "forest"],
+}
+
+# Folder / material tokens that say nothing about the object
+_CTX_STOP = frozenset((
+    "game", "content", "meshes", "mesh", "models", "model", "assets",
+    "asset", "general", "static", "staticmeshes", "geometry", "fbx",
+    "nanite", "standard", "environment", "exports", "lod", "lods",
+    "collection", "scene", "master", "material", "materials", "mat",
+    "inst", "instance", "default", "lambert", "phong", "none", "kb3d"))
 
 # pack-identity backfill: packs whose whole identity implies themes the
 # per-name matcher may miss (2026-09-15 dry-run finding: 34% themeless)
@@ -319,7 +350,9 @@ def _finish_recipe(recipe: dict) -> dict:
     scene_manifest.collapse_slot_maps() -- the builder's own pick -- of the
     FIRST slot whose pick holds a real role (not only `other`/`mask`), else
     of the first slot that yields any map: no placeholder, no master-default
-    emissive/opacity, a real instance override before the TX_Fill fallback.
+    emissive/opacity/height, no master default over a role the slot's own
+    packed map supplies, a real instance override before the TX_Fill
+    fallback.
     """
     slots = []
     primary: dict = {}
@@ -495,33 +528,33 @@ def _bbox_pair(e: dict, raw_index: dict) -> tuple:
 # record shaping (unchanged semantics)
 # ---------------------------------------------------------------------------
 
-def _words(text: str) -> list[str]:
-    out = []
-    for w in re.findall(r"[A-Za-z0-9]+", text or ""):
-        parts = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", w).lower().split()
-        out.extend(parts)
-    return list(dict.fromkeys(w for w in out if len(w) > 2))
+def _context(e: dict, pack: str, mats) -> tuple:
+    """(context words, folder text) of a mesh: what is known about it
+    BESIDES its own name. Search treats these as weaker than a name hit.
 
-
-def _stems(text: str) -> list[str]:
-    stems = []
-    for w in _words(text):
-        stems.append(w)
-        for suf, cut in (("ing", 3), ("ers", 3), ("es", 2), ("s", 1)):
-            if w.endswith(suf) and len(w) > len(suf) + 2:
-                stems.append(w[:-cut])
-                break
-    return list(dict.fromkeys(stems))
-
-
-def _match_themes(text: str) -> list[str]:
-    low = " " + text.lower() + " "
-    hits = []
-    for theme, kws in MESH_THEMES.items():
-        found = [k for k in kws if k in low]
-        if found:
-            hits.append(theme)
-    return hits
+      - the pack name, also glued per run ('NeonPunk' -> 'neonpunk': a
+        pack named with two glued words was not found by that word)
+      - the vendor's folder taxonomy (Unreal asset path: Props, Foliage,
+        Vehicles ...; a Blender collection or container file name)
+      - material names ('MI_Rust_01a': q=rust found 24 meshes by name
+        while 300 more carry a rust material)
+    """
+    out = tm.stems(pack)
+    out += [tm.fold(run) for run in re.findall(r"[^\W_]+", pack or "")
+            if len(run) > 3 and not run.isdigit()]
+    ap = e.get("asset_path") or ""
+    folders = ap.split("/")[3:-1] if ap.startswith("/Game/") else []
+    if e.get("container"):
+        folders.append(Path(str(e["container"])).stem)
+    if e.get("collection"):
+        folders.append(str(e["collection"]))
+    folder_text = " ".join(folders)
+    out += tm.stems(folder_text)
+    if isinstance(mats, list):
+        for m in mats[:40]:             # per name: the cache hits per material
+            out += tm.stems(str(m))
+    return ([w for w in dict.fromkeys(out)
+             if len(w) > 2 and w not in _CTX_STOP], folder_text)
 
 
 def _pretty(stem: str) -> str:
@@ -555,19 +588,24 @@ def _record(e: dict, recipe: dict, bbox_min, bbox_max,
     # from (JSONL_SOURCE) -- never a guess from folder names in the path
     src = e.get("source") or default_source
     pretty = _pretty(name)
-    words = _words(pretty)
-    themes = _match_themes(pretty + " " + pack)
+    words = tm.words(pretty)
+    ctx, folder_text = _context(e, pack, mats)
+    # themes: the mesh's own name and its vendor folder as WORDS; the pack
+    # name only for the setting it spells out; plus the explicit table
     themes = list(dict.fromkeys(
-        themes + PACK_THEMES.get(pack.lower(), [])))
-    stems = list(dict.fromkeys(_stems(pretty) + _stems(pack)))
+        tm.match_themes(pretty + " " + folder_text, MESH_THEMES)
+        + tm.match_themes(pack, PACK_NAME_THEMES)
+        + PACK_THEMES.get(pack.lower(), [])))
+    stems = tm.stems(pretty)
+    ctx = [w for w in ctx if w not in stems]
     facets = {"pack": re.sub(r"[^a-z0-9]+", "-", pack.lower()),
               "source": src,
               "kind": re.sub(r"[^a-z0-9]+", "-",
                              (e.get("kind") or "").lower())}
     if suspect:
         facets["dim_suspect"] = True
-    meta = json.dumps({"stems": stems, "themes": themes, "facets": facets},
-                      ensure_ascii=False)
+    meta = json.dumps({"stems": stems, "ctx": ctx, "themes": themes,
+                       "facets": facets}, ensure_ascii=False)
     tags = json.dumps(list(dict.fromkeys(words + themes)),
                       ensure_ascii=False)
     # poisoned dims carry no trustworthy box, so the corners are withheld too
@@ -589,9 +627,14 @@ def _record(e: dict, recipe: dict, bbox_min, bbox_max,
                    (e.get("max_dim_m") or (max(bbox) if bbox else 0)),
         "materials": mat_json, "mat_count": mat_count,
         "texture_count": len(texs),
-        "texture_files": json.dumps(texs, ensure_ascii=False),
+        # the flat per-pack list is NOT stored any more: nothing reads it
+        # (the recipe carries the real per-slot files) and it was 13 MB of
+        # repeated absolute paths in a 99 MB registry. The count stays.
+        "texture_files": "[]",
         "tags": tags, "meta": meta,
         "raw_name": name,
+        "object_name": name or None,
+        "asset_path": (e.get("asset_path") or None),
         "recipe": json.dumps(recipe, ensure_ascii=False,
                              separators=(",", ":")),
         "bbox_min_x": bbox_min[0] if bbox_min else None,
@@ -614,13 +657,59 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE meshes ADD COLUMN {col} {typ}")
 
 
+def ensure_parked(conn: sqlite3.Connection) -> None:
+    """meshes_parked holds the scan rows of files that a richer source
+    (converted pack, Blender-measured model) covers. They are kept aside,
+    not deleted: when that source stops covering the file (its index was
+    rebuilt for another folder), the next import serves the scan row again
+    instead of leaving the file with no row at all. Same columns as
+    `meshes`; run after MESHES_DDL."""
+    cols = [(r[1], r[2]) for r in conn.execute("PRAGMA table_info(meshes)")
+            if r[1] != "id"]
+    have = {r[1] for r in conn.execute("PRAGMA table_info(meshes_parked)")}
+    if not have:
+        conn.execute("CREATE TABLE meshes_parked (" + ", ".join(
+            f"{c} {t}".strip() for c, t in cols) + ")")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS "
+                     "idx_meshes_parked_fbx ON meshes_parked(fbx)")
+        return
+    for c, t in cols:
+        if c not in have:
+            conn.execute(f"ALTER TABLE meshes_parked ADD COLUMN {c} {t}")
+
+
+def scan_meta(name: str, pack: str, fbx: str) -> tuple:
+    """(tags json, meta json) of a SCANNED model, by the rules of the
+    richer importers. The folders between the scanned folder (`pack`) and
+    the file are context words and feed the themes: a scan of 'Downloads'
+    holding 'Medieval Village Pack/house_01.fbx' made every row 'Downloads'
+    and q=village found nothing. Recomputed on every import, so rows
+    scanned by an older Pharos catch up without a re-scan."""
+    parts = (fbx or "").replace("\\", "/").split("/")[:-1]
+    sub: list = []
+    if pack and pack in parts:
+        sub = parts[len(parts) - parts[::-1].index(pack):]
+    folder_text = " ".join(sub)
+    words = tm.words(name, tm.STOPWORDS)
+    themes = list(dict.fromkeys(
+        tm.match_themes(name + " " + folder_text, MESH_THEMES)
+        + tm.match_themes(pack + " " + folder_text, PACK_NAME_THEMES)))
+    stems = tm.stems(name)
+    ctx = [w for w in dict.fromkeys(tm.stems(pack + " " + folder_text))
+           if w not in stems and len(w) > 2 and w not in _CTX_STOP]
+    return (json.dumps(list(dict.fromkeys(words + themes)), ensure_ascii=False),
+            json.dumps({"stems": stems, "ctx": ctx, "themes": themes,
+                        "facets": {"pack": (pack or "").lower()}},
+                       ensure_ascii=False))
+
+
 INSERT_SQL = (
     "INSERT INTO meshes (name,pack,source,kind,fbx,on_disk,"
     "bytes,triangles,vertices,submeshes,bbox_x,bbox_y,"
     "bbox_z,max_dim,materials,texture_count,texture_files,"
     "tags,meta,recipe,bbox_min_x,bbox_min_y,bbox_min_z,"
-    "bbox_max_x,bbox_max_y,bbox_max_z) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    "bbox_max_x,bbox_max_y,bbox_max_z,object_name,asset_path) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 
 
 def import_meshes(db_path: str | Path) -> int:
@@ -631,6 +720,7 @@ def import_meshes(db_path: str | Path) -> int:
     try:
         _migrate(conn)
         conn.executescript(MESHES_DDL)
+        ensure_parked(conn)
 
         by_ap, by_pn, raw_index, wiring, mstats = _manifest_index()
 
@@ -642,9 +732,13 @@ def import_meshes(db_path: str | Path) -> int:
         scan_cols = [d[0] for d in conn.execute(
             "SELECT * FROM meshes WHERE source='scan' LIMIT 0").description
             if d[0] != "id"]
-        scan_rows = [tuple(r) for r in conn.execute(
+        scan_rows = [list(r) for r in conn.execute(
             "SELECT " + ",".join(scan_cols) +
             " FROM meshes WHERE source='scan'")]
+        # ...and the parked ones: each import decides again (see below)
+        scan_rows += [list(r) for r in conn.execute(
+            "SELECT " + ",".join(scan_cols) + " FROM meshes_parked")]
+        conn.execute("DELETE FROM meshes_parked")
 
         conn.execute("DELETE FROM meshes")
         conn.execute("DELETE FROM sqlite_sequence WHERE name='meshes'")
@@ -701,7 +795,8 @@ def import_meshes(db_path: str | Path) -> int:
                         r["max_dim"], r["materials"], r["texture_count"],
                         r["texture_files"], r["tags"], r["meta"], r["recipe"],
                         r["bbox_min_x"], r["bbox_min_y"], r["bbox_min_z"],
-                        r["bbox_max_x"], r["bbox_max_y"], r["bbox_max_z"]))
+                        r["bbox_max_x"], r["bbox_max_y"], r["bbox_max_z"],
+                        r["object_name"], r["asset_path"]))
                     n += 1
 
         if scan_rows:
@@ -709,17 +804,37 @@ def import_meshes(db_path: str | Path) -> int:
             # (fbx) for any legacy buffer that still carries duplicates
             # from the old (name, pack) key era
             fi = scan_cols.index("fbx")
+            ni, pi = scan_cols.index("name"), scan_cols.index("pack")
+            ti, mi = scan_cols.index("tags"), scan_cols.index("meta")
+            # ...and one row per FILE across sources: a file the richer
+            # indexes above now cover (measured per object) keeps no
+            # file-level scan row beside them -- the two disagreed on
+            # triangles and size for the same file. Such a row is PARKED,
+            # and comes back once no richer row covers the file any more.
+            from asset_service.db import _norm_path
+            covered = {_norm_path(r[0]) for r in conn.execute(
+                "SELECT fbx FROM meshes WHERE fbx IS NOT NULL AND fbx != ''")}
             seen: set = set()
-            unique_rows = []
+            unique_rows, parked = [], []
             for r in scan_rows:
                 if r[fi] in seen:
                     continue
                 seen.add(r[fi])
-                unique_rows.append(r)
+                r[ti], r[mi] = scan_meta(r[ni] or "", r[pi] or "", r[fi] or "")
+                (parked if r[fi] and _norm_path(r[fi]) in covered
+                 else unique_rows).append(tuple(r))
+            marks = ",".join("?" for _ in scan_cols)
             conn.executemany(
                 f"INSERT OR IGNORE INTO meshes ({','.join(scan_cols)}) "
-                f"VALUES ({','.join('?' for _ in scan_cols)})", unique_rows)
+                f"VALUES ({marks})", unique_rows)
+            conn.executemany(
+                f"INSERT OR IGNORE INTO meshes_parked ({','.join(scan_cols)}) "
+                f"VALUES ({marks})", parked)
             n += len(unique_rows)
+            if parked:
+                print(f"meshes import: {len(parked)} scan row(s) parked: a "
+                      f"richer row covers the same file (served again when "
+                      f"it stops covering it)", flush=True)
 
         # A pack that owns mesh rows but no manifest FILE at all (CGTrader, ...)
         # still gets a row, with a ratio of None: no wiring exists to report. This

@@ -84,11 +84,26 @@ simply not started; ask the human to run:
 
 | Section   | Count | Query with |
 |---|---|---|
-| Meshes    | {meshes} ({mesh_packs} packs) | `/api/meshes?q=door&min_dim=1.8&max_dim=2.4` |
-| Textures  | {textures} PBR sets | `/api/textures/items?q=brick` |
-| Audio     | {audio} sounds | `/api/audio/items?q=siren&min_dur=5` |
+| Meshes    | {meshes} ({mesh_packs} packs) | `/api/meshes?q=door&min_dim=1.8&max_dim=2.4&size=10` |
+| Textures  | {textures} PBR sets | `/api/textures/items?q=brick&size=10` |
+| Audio     | {audio} sounds | `/api/audio/items?q=siren&min_dur=5&size=10` |
 | Purchases | {collection} owned ({local} on disk) | `/api/collection/items?avail=local` |
-| Animations| {clips} clips ({previews} previewed) | `/api/anim/clips?q=walk` |
+| Animations| {clips} clips ({previews} previewed) | `/api/anim/clips?q=walk&size=10` |
+
+Search answers are SHORT lists, best match first. Two follow-ups:
+
+- **The meshes you have chosen**: `/api/meshes/item?key=<key>` (repeat
+  `key=`; 5–10 per call, large buildings one at a time) returns material
+  recipe, material names and placement corners. Percent-encode the WHOLE
+  key (`#` becomes `%23`, spaces `%20`); remember the `key`, never the
+  `id`. Keys an answer had no room for come back in `not_returned`.
+- **What a pack looks like**: `/api/meshes/packs` lists each pack's
+  `purchases` when there are any; `/api/collection/item?id=<purchase id>`
+  lists its store images (`image_paths`) — open one or two.
+
+Read every answer's `mode`, `warnings` and `did_you_mean`: they say when
+the search fell back to partial matches, ignored a parameter, or knows a
+closer word.
 
 {unmeasured_note}
 
@@ -117,8 +132,10 @@ generate procedurally and say so.
    never modify/move/delete them.
 2. Prefer the API over disk walks — that is the entire point of this
    system: sizes, triangle counts and material recipes are in no text
-   file on disk. Keep mesh pages small (`size=8`): every mesh item
-   carries its full material recipe (~1–4k tokens).
+   file on disk. A mesh in a search answer costs about 130 tokens; its
+   recipe (1–25k tokens) is fetched only for the meshes you pick. A
+   search that finds nothing is not proof of absence: try the singular
+   word, a `did_you_mean` suggestion, or `/api/meshes/packs`.
 3. Dimension filters are METRES. `max_tri` is a triangle budget.
 4. Availability: `local` = on disk now; `owned-not-downloaded` =
    purchasable — surface it as a requisition list, never substitute
@@ -133,11 +150,12 @@ generate procedurally and say so.
 
 ## Step 4 — fallback if the server is down
 
-The per-section machine indexes beside this file (when present) let you
-work offline: `library_index.json` / `*_library_files.jsonl` for audio
-and textures, `models.jsonl` / `native_models.jsonl` for meshes,
-`availability.jsonl` for ownership. Paths inside JSONL files are
-RELATIVE — resolve against the section roots in `pharos_config.json`.
+The machine indexes (when present) let you work offline:
+`library_index.json` / `library_files.jsonl` inside the audio and texture
+section folders (paths relative to that folder, see `pharos_config.json`);
+`models.jsonl` / `native_models.jsonl` for meshes and `availability.jsonl`
+for ownership beside this file (absolute paths). The model index files carry NO per-slot material
+recipe and unchecked sizes — the API is the better source.
 
 ## Maintenance
 
@@ -150,7 +168,7 @@ RELATIVE — resolve against the section roots in `pharos_config.json`.
 API_TEMPLATE = """# AGENT_API — Pharos HTTP API reference
 
 Generated {generated}. Server: http://127.0.0.1:8765 (localhost, no
-auth). All list endpoints paginate (`page`, `size` 8–500) and share the
+auth). All list endpoints paginate (`page`, `size` 1–500) and share the
 search semantics in section D. File-serving routes are path-jailed to
 the configured roots — outside paths return 404/403.
 
@@ -158,39 +176,64 @@ the configured roots — outside paths return 404/403.
 
 | Endpoint | Key filters (all optional) | Result key |
 |---|---|---|
-| `/api/meshes` | `q`, `pack`, `source`, `theme`/`themes`, `min_dim`/`max_dim`, `min_h`/`max_h`, `max_tri`, `textures=1`, `sort=name|max_dim|triangles` | `items` |
-| `/api/meshes/packs` | — (exact pack names + wiring health; call BEFORE `pack=`) | `packs` |
+| `/api/meshes` | `q`, `pack`, `source`, `kind`, `theme` (one or a comma list), `style` (`Photorealistic`, `Stylized`, `Low Poly`; a comma list needs all), `min_dim`/`max_dim`, `min_h`/`max_h`, `max_tri`, `textures=1`, `sort` (see below), `detail=1` | `items` (short) |
+| `/api/meshes/item?key=` | `key` repeatable (up to 50), or `id` | `items` (full: recipe, materials, corners) + `not_returned` / `missing` / `candidates` |
+| `/api/meshes/packs` | — (pack names, counts, wiring health, linked `purchases`, the owner's `styles` / `pack_tags`) | `packs` |
+| `/api/pack_tags` | — (every pack folder with the owner's styles, domain and tags) | `packs` |
 | `/api/meshes/themes` | — (theme vocabulary + counts) | `themes` |
-| `/api/textures/items` | `q`, `group`, `sub` | `items` |
-| `/api/textures/item?id=` | — | object (fields at top level + `item` copy) |
-| `/api/audio/items` | `q`, `cat`, `sub`, `min_dur` (seconds) | `items` |
-| `/api/audio/item?id=` | — | object (fields at top level + `item` copy) |
-| `/api/collection/items` | `q`, `store`, `group`, `cat`, `avail=local|notdown` | `items` |
-| `/api/collection/item?id=` | — | object (fields at top level + `item` copy) |
-| `/api/anim/clips` | `q`, `packs` (pipe-separated), `page`, `size` | `clips` (NOT `items`) |
-| `/api/anim/tree` | — | folders + counts |
+| `/api/textures/items` | `q`, `group`, `sub`, `res=8K|4K|2K|1K|512` (measured), `min_px`, `has=height,normal` | `items` |
+| `/api/textures/item?id=` | — | object (files, `maps` role → file, `px`) |
+| `/api/textures/tree` | — (valid `group` / `sub` values) | `groups` |
+| `/api/audio/items` | `q`, `cat`, `sub`, `min_dur`, `max_dur` (seconds) | `items` |
+| `/api/audio/item?id=` | — | object |
+| `/api/audio/tree` | — (valid `cat` / `sub` values) | `cats` |
+| `/api/collection/items` | `q`, `store`, `group`, `cat`, `avail=local|notdown` (`owned-not-downloaded` = notdown) | `items` |
+| `/api/collection/item?id=` | — | object (`image_paths`: the store images) |
+| `/api/collection/tree` | — (valid `store` / `group` / `cat` values) | `stores`, `groups`, `cats` |
+| `/api/anim/clips` | `q`, `packs` (pack ids or folders from `/api/anim/tree`, pipe-separated), `page`, `size` | `clips` (NOT `items`) |
+| `/api/anim/tree` | — | folders, clip counts, `skeletons` per folder |
 | `/api/stats` | — | `stats` (legacy packs) + `sections` (live totals) |
+
+Styles and `pack_tags` are the owner's own labels per pack (kept in
+`pack_tags.csv` beside this file). A pack the owner has not tagged has no
+style: never read a missing style as "not photorealistic". Your query
+words also match these tags (`q=low poly tree`).
+
+`warnings` reports what an answer could not use: an unknown parameter or
+an unreadable value (the answer is then NOT filtered by it), and a filter
+value that names nothing in this library (`pack`, `theme`, `store`,
+`cat` ...: 0 results, with the closest names). Filter values ignore letter
+case. A missing record answers HTTP 404, a malformed id 400.
+
+**Sort directions** (`/api/meshes`): `relevance` (default with `q`) ·
+`name` · `max_dim` = largest first · `-max_dim` = smallest first ·
+`triangles` = fewest first · `-triangles` = most first. Unmeasured rows
+come last.
 
 (Windows PowerShell: `curl` is aliased to `Invoke-WebRequest` and the
 `-s` flags hang — use `curl.exe`, or
 `python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8765/api/stats').read()[:200])"`. HEAD requests work for link checks.)
 
-## B. Mesh item fields (the ones that matter)
+## B. Mesh items
 
-Token budget: a mesh item is ~1–4k tokens because it carries the full
-`recipe`; browse with `size=8` (the minimum page) and refine the query
-instead of paging through hundreds of meshes.
+**Short item** (search answers, about 130 tokens): `key` · `name` · `pack` ·
+`source` · `kind` · `fbx` (absolute path) · `bbox_m` [x,y,z] extents in
+metres · `max_dim_m` · `height_m` · `triangles` · `texture_count` ·
+`wired` (a resolved material recipe exists) · `themes` · `tier` ·
+`container` + `object_name` (only when the file holds several objects:
+import that object by this exact name) · `dim_suspect` (only when the
+size was withheld as unreliable).
 
-`fbx`/`fbx_path` absolute path · `bbox_m` [x,y,z] extents in metres ·
-`max_dim_m`/`height_m` · `triangles` · `materials` (slot names) ·
-`texture_count` · `themes` · `view_url` (3D preview) · `recipe` (per-slot
-material wiring: `slots[].maps[]` with `role`/`file`/`channels`) ·
-`hero_textures` (role → texture path; `{}` = unknown, NOT untextured) ·
-`dim_suspect` (dims withheld as unreliable) · `tier`/`mode`/`exact`
-(search-quality disclosure).
+**Full item** (`/api/meshes/item?key=`, or `detail=1` on a search; 1–25k
+tokens, an answer stops at ~20k tokens and lists the rest in
+`not_returned`): the short item plus `recipe` (per-slot material wiring:
+`slots[].maps[]` with `role`/`file`/`channels`) · `hero_textures` (role →
+texture path; `{}` = unknown, NOT untextured) · `materials` (slot names) ·
+`bbox_min`/`bbox_max` (placement corners; where the origin sits) ·
+`vertices` · `format` · `view_url` (3D preview page).
 
 **Axes:** `bbox_m` = [x, y, z] metres, **Z-up**, `height_m` = `bbox_m[2]`; scene-manifest positions are Y-up.
-**Ids:** mesh and texture `id`s are positional session handles (they change when an index is rebuilt); persist `fbx` / `rel` / `(pack, name)`, not ids.
+**Keys:** `key` is the stable handle of a mesh (library-relative file path, plus `#object` inside multi-object files): persist it, and percent-encode it as a whole in a URL (`#` → `%23`; an un-encoded `#` is cut off by every HTTP client, and the answer then lists the file's object keys as `candidates`). `id`s are positional and change when an index is rebuilt; `(pack, name)` is not unique.
 
 **Recipe contract** (`recipe.slots[].maps[]`): every texture the material
 references is served and flagged, never dropped.
@@ -209,17 +252,21 @@ references is served and flagged, never dropped.
   wiring: keep the FBX's own material for it.
 - `recipe.primary` / `hero_textures`: one map per role from the first
   usable slot -- the same pick the Blender builder wires; never a
-  placeholder, never a `default`-source emissive/opacity.
+  placeholder, never a `default`-source emissive/opacity/height, and
+  never a `default`-source map for a role the slot's packed map supplies
+  (read roughness/metallic/ao from `packed_channels` then).
 
 **Dimension provenance** (they are NOT all measured the same way):
 `leartes` — any Unreal pack converted by chain 1 (historical name, not a
 vendor filter): exporter-reported per-mesh boxes (metres, trustworthy);
 `kitbash3d` — Blender world-space AABB over the placed assembly (axis
-order differs from the FBX file's own header); `scan` — file-level
-extents from the raw FBX/OBJ in RAW FILE AXES, not normalised to Z-up
-(multi-object files report one box over
-everything, no per-object transforms). Don't mix provenances in one
-comparison.
+order differs from the FBX file's own header); `native` / `blend` —
+measured in Blender by chain 3 from the file as authored: the UNIT is
+whatever the author used, so a size far from what the name suggests
+means centimetres or an unscaled export, not a giant object; `scan` —
+file-level extents from the raw FBX/OBJ in RAW FILE AXES, not normalised
+to Z-up (multi-object files report one box over everything, no
+per-object transforms). Don't mix provenances in one comparison.
 
 ## C. Files, previews, OS integration (GET)
 
@@ -231,30 +278,54 @@ paths resolve against the section roots).
 
 ## D. Search semantics (all item endpoints)
 
-- Tokens: `a-z0-9` words, stemmed, 1-char tokens dropped. A query whose
-  tokens are ALL dropped returns 0 (never the whole library).
-- AND across tokens first; if nothing matches, automatic OR fallback —
-  the response says so: `mode: "or-fallback"`, `exact: 0`, items
-  `tier: 3`, ranked by token rarity (selective tokens first).
-- `tier`: 1 = all tokens hit the name; 2 = AND via tags/themes/stems;
-  3 = OR fallback. 0 = no query.
-- Short tokens match on word boundaries (`lamp` ≠ `clamp`); tokens ≥5
-  chars match as substrings.
-- Percent-encode spaces: `?q=brick%20wall`. `size` clamps to 8–500 on
-  every list endpoint (a floor of 8 always applies).
+- Words: letters and digits, split at camelCase (`PropFuseBox`) and at
+  letter/digit boundaries; a code such as `lod0`, `v2`, `9mm`, `4k` stays
+  ONE word; plurals and -ing/-ed forms are folded on both sides
+  (`benches` finds `Bench`); accents are ignored; free-standing single
+  letters are dropped. A query whose words are ALL dropped returns 0
+  (never the whole library) and says so in `warnings`.
+- Connective words (`with`, `of`, `and`, `the`, `on` ...) are optional:
+  `door with frame` needs `door` and `frame`.
+- Every other word must match. `tier` 1 = each word is a whole word of
+  the name (meshes: also of the object's own file name, `SM_Wagon`);
+  `tier` 2 = each word matches somehow: at the start or end of a longer
+  name word with three letters left over (`chair` in `Armchair`; not
+  `round` in `Ground`), a part of a known compound (`door` in `Doorway`),
+  in the pack / folder / material / category words, as a theme, or
+  through an alias (`couch` → sofa). Tier 1 is listed first.
+- Short words match whole words only: `car` is not `cardboard`.
+- `-word` excludes, also hyphenated: `chair -office`, `chair -sci-fi`; a
+  query of exclusions only lists everything else.
+- Adjacent words are also tried glued: `street lamp` finds `Streetlamp`,
+  `sci fi door` meets the theme `scifi`.
+- If no row matches every word, rows matching SOME word are served
+  instead and the answer says so: `mode: "or-fallback"`, `exact: 0`,
+  items `tier: 3`, ranked by word rarity (the selective word first);
+  failing that, rows of a related concept (`stucco` → plaster).
+- `did_you_mean` lists the closest words the section does contain for a
+  query word it does not know (`barel` → `barrel`).
+- Mesh answers spread packs: within a tier each pack's best match comes
+  first. `packs` in the answer counts the matches per pack — narrow with
+  `pack=` instead of paging.
+- Animation: related motions (`walk` → jog, run) follow the matches as
+  tier 3 and are not counted in `exact`.
+- Percent-encode parameter values: `?q=brick%20wall`, keys as a whole.
 
 ## E. POST endpoints (mutations — explicit instruction only)
 
 `/api/collection/tag` add/remove a tag · `/api/collection/thumb` set
-thumbnail · `/api/retag` bulk pack taxonomy · `/api/preview/store`
+thumbnail · `/api/pack_tags` set one pack's styles / domain / tags ·
+`/api/retag` bulk pack domain / style · `/api/preview/store`
 upload rendered preview · `/api/pack_source` set a pack's store URL.
 
 ## F. MCP alternative
 
-Same registry via stdio MCP (`docs/MCP_SETUP.md`): `pharos_stats`,
-`pharos_search_meshes`, `pharos_search_textures`, `pharos_search_audio`,
-`pharos_search_collection`, `pharos_list_packs`. Note: MCP filters are
-simpler than the HTTP stack — prefer HTTP for nuanced queries.
+Same registry and the SAME search via stdio MCP (`docs/MCP_SETUP.md`):
+`pharos_stats`, `pharos_tree`, `pharos_list_packs`,
+`pharos_search_meshes`, `pharos_get_meshes`, `pharos_search_textures`,
+`pharos_get_texture`, `pharos_search_audio`, `pharos_search_animations`,
+`pharos_search_collection`. Each search tool calls the function behind
+the matching HTTP endpoint, so both routes give the same answer.
 """
 
 
@@ -284,9 +355,7 @@ def generate(db_path: str | None = None, repo_hint: str | None = None) -> list[P
 
     paths = []
     for name, body in (("AGENT_START_HERE.md", start), ("AGENT_API.md", api)):
-        p = target / name
-        if p.is_file():                      # keep one generation of history
-            p.replace(p.with_suffix(".md.bak-previous"))   # overwrites old bak
+        p = target / name            # derived: regenerated, never backed up
         p.write_text(body, encoding="utf-8")
         paths.append(p)
     return paths

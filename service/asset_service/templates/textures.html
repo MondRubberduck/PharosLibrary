@@ -134,7 +134,7 @@ addEventListener('resize',()=>{clearTimeout(window._r);window._r=setTimeout(load
 async function openItem(id){
  const d=await(await fetch('/api/textures/item?id='+id)).json();
  if(d.error)return;
- const it=d.item;
+ const it=d.item||d;
  $('mname').textContent=it.name;
  const bits=[it.grp,it.sub];
  if(it.file_count)bits.push(it.file_count+' files');

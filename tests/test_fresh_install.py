@@ -400,14 +400,26 @@ def main() -> int:
               or u1["total"] >= 1, f"q=vâse total={u1['total']}")
         check("B7: plain query finds accented asset too",
               u2["total"] >= 1, f"q=vase total={u2['total']}")
-        # B8: OR-fallback items carry the same fields as primary items
+        # B8: OR-fallback items carry the same fields as primary items --
+        # the short ones by default, the full ones with detail=1 (0.10)
         mf_all = browse.api_meshes({"q": ["plate lid"]})   # AND fails -> OR
         fb_items = mf_all["items"]
+        # the precondition is a check of its own: if 'plate lid' ever stops
+        # being a fallback, the two B8 checks below must not vanish silently
+        check("B8 precondition: 'plate lid' is an OR fallback",
+              bool(fb_items) and mf_all.get("mode") == "or-fallback",
+              f"mode={mf_all.get('mode')} items={len(fb_items)}")
         if fb_items and mf_all.get("mode") == "or-fallback":
-            check("B8: OR-fallback items keep fbx_path/view_url/height_m",
+            check("B8: OR-fallback items keep key/fbx/height_m",
+                  all(i.get("key") and i.get("fbx") and "height_m" in i
+                      for i in fb_items),
+                  str([i.get("key") for i in fb_items][:2]))
+            fb_full = browse.api_meshes({"q": ["plate lid"],
+                                         "detail": ["1"]})["items"]
+            check("B8: detail=1 fallback items keep fbx_path/view_url/recipe",
                   all(i.get("fbx_path") and i.get("view_url")
-                      and "height_m" in i for i in fb_items),
-                  str([i.get("view_url") for i in fb_items][:2]))
+                      and "recipe" in i for i in fb_full),
+                  str([sorted(i)[:6] for i in fb_full][:1]))
 
         # ---- Lane B: 1.3 (NULL triangles), 1.4, 1.6b-d, 1.7, 1.2 mask ----
         # Planted crawl rows: the rebuild below wipes them anyway; they are
@@ -441,7 +453,8 @@ def main() -> int:
               h2["total"] == 0 and h2_all == 1,
               f"filtered={h2['total']} unfiltered={h2_all}")
         # 1.2 mask role: not a named material map (excluded like `other`)
-        _hp = browse.api_meshes({"q": ["fixturepole"]})["items"]
+        _hp = browse.api_meshes({"q": ["fixturepole"],
+                                 "detail": ["1"]})["items"]
         _hero = _hp[0]["hero_textures"] if _hp else {}
         check("1.2 mask: HTTP hero_textures excludes mask",
               "albedo" in _hero and "mask" not in _hero, str(_hero))
@@ -559,7 +572,11 @@ def main() -> int:
                   [i["name"] for i in _mh["items"]] == ["FixturePole"],
                   str([i["name"] for i in _mh["items"]]))
             _mp = json.loads(_srv.pharos_search_meshes(query="fixturepole"))
-            _mhero = ((_mp["items"] or [{}])[0].get("hero_textures") or {})
+            # search items are short (0.10): the recipe of a chosen mesh
+            # comes from pharos_get_meshes, by its stable key
+            _mk = [i["key"] for i in _mp["items"]][:1]
+            _mg = json.loads(_srv.pharos_get_meshes(_mk)) if _mk else {}
+            _mhero = ((_mg.get("items") or [{}])[0].get("hero_textures") or {})
             check("1.2 mask: MCP hero_textures excludes mask",
                   "albedo" in _mhero and "mask" not in _mhero, str(_mhero))
 
@@ -611,8 +628,16 @@ def main() -> int:
         meshes_import.import_meshes(dbp)
         meshes_import.import_meshes(dbp)      # the collision case
         m4 = browse.api_meshes({})
+        # 5 rows, not 6: the crawler row names crate.obj, a file the
+        # scanner indexed too. One file keeps ONE row -- the richer one
+        # (0.10; the scan row and the measured row disagreed on triangles
+        # and size for the same file). The other 4 scan rows survive.
         check("crawler + scan rows stable across double rebuild",
-              m4["total"] == 6, f"total={m4['total']}")
+              m4["total"] == 5, f"total={m4['total']}")
+        _crate = [i["source"] for i in m4["items"]
+                  if i["fbx"].replace("\\", "/").endswith("MyModels/crate.obj")]
+        check("one row per file: the richer source replaces the scan row",
+              _crate == ["leartes"], str(_crate))
         srcs = {i["source"] for i in m4["items"]}
         check("both sources present after double rebuild",
               "scan" in srcs and "leartes" in srcs, str(srcs))
@@ -634,7 +659,7 @@ def main() -> int:
             cp_ok = False
         m5 = browse.api_meshes({})
         check("cp1252 jsonl survives the geometry rebuild",
-              cp_ok and m5["total"] == 7, f"total={m5['total']}")
+              cp_ok and m5["total"] == 6, f"total={m5['total']}")
 
         # 5c. A5: scanner audio keeps the folder taxonomy
         r = subprocess.run(
@@ -752,9 +777,10 @@ def main() -> int:
                      for fn in (_srv.pharos_search_meshes,
                                 _srv.pharos_search_textures,
                                 _srv.pharos_search_audio,
-                                _srv.pharos_search_collection)}
+                                _srv.pharos_search_collection,
+                                _srv.pharos_search_animations)}
             _real = json.loads(_srv.pharos_search_meshes(query="plate"))
-            check("1.6d: MCP q=a -> 0 on all four search tools",
+            check("1.6d: MCP q=a -> 0 on all five search tools",
                   not any(_bomb.values()) and _real["total"] >= 1,
                   f"{_bomb} plate={_real['total']}")
 
@@ -908,23 +934,17 @@ def main() -> int:
               "doctor" in body and "never indexed" in body,
               body[-500:-300])
 
-        # This check used to be `generate(...) is not []`, an identity test
-        # against a fresh list literal -- True for every possible return
-        # value.  Assert the documented behaviour instead: the previous
-        # generation moves to .md.bak-previous, and the NEXT run REPLACES
-        # that bak rather than piling up or dying on an existing file
-        # (the Windows rename->replace bug).
-        gen1_on_disk = start_file.read_text(encoding="utf-8")
+        # The docs are derived: a re-run overwrites them in place (no
+        # dying on an existing file, the old Windows rename bug) and
+        # leaves no backup copies behind.
+        start_file.write_text("stale", encoding="utf-8")
         gen2 = agent_docs.generate(dbp, repo_hint=str(REPO))
-        bak = config.AGENT_FILES / "AGENT_START_HERE.md.bak-previous"
-        one_bak = bak.is_file() and bak.read_text(encoding="utf-8") == gen1_on_disk
-        gen2_on_disk = start_file.read_text(encoding="utf-8")
         gen3 = agent_docs.generate(dbp, repo_hint=str(REPO))
-        baks = list(config.AGENT_FILES.glob("AGENT_START_HERE.md.bak*"))
-        check("docs regenerates (bak overwrite bug)",
-              bool(gen2) and bool(gen3) and one_bak and len(baks) == 1
-              and bak.read_text(encoding="utf-8") == gen2_on_disk,
-              f"baks={[b.name for b in baks]}")
+        baks = [b.name for b in config.AGENT_FILES.glob("AGENT_*.md.*")]
+        check("docs regenerate in place, no backup copies",
+              bool(gen2) and bool(gen3) and not baks
+              and start_file.read_text(encoding="utf-8") != "stale",
+              f"copies={baks}")
 
         # 6b. doctor: the one-command setup check must parse, report live
         # section counts, and pass on a correctly-prepared fixture install

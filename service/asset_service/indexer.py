@@ -1,7 +1,7 @@
 """Non-destructive crawler + registry filler.
 
 Walks the canonical asset root, groups files into LOGICAL PACKS, probes
-binary headers (.uasset classes, FBX animation markers), runs the 3-tier
+binary headers (.uasset classes, FBX animation markers), runs the
 auto-classifier and upserts everything into the SQLite registry.
 
 Pack rule (v1): a top-level folder that directly contains asset files is one
@@ -12,7 +12,7 @@ Animation -> Actor / daily-activities) without ever touching the disk layout.
 
 Safety: files are opened 'rb' only; the only writes are to the registry
 database under the pipeline root. Re-runs are idempotent (upserts keyed by
-pack path; content_hash from the hero file).
+pack path).
 
 CLI:
     python indexer.py [--root <asset root>] [--db ...] [--limit N]
@@ -22,7 +22,6 @@ CLI:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 import time
@@ -39,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config                                # noqa: E402
 from asset_service import db                                    # noqa: E402
 from asset_service.auto_classifier import (                     # noqa: E402
-    PackInput, classify_pack, get_vision_classifier, probe_fbx_markers,
+    PackInput, classify_pack, probe_fbx_markers,
 )
 from asset_service.uasset_parser import UassetParseError, parse_uasset  # noqa: E402
 
@@ -67,23 +66,11 @@ SKIP_DIRS = ({"$RECYCLE.BIN", "System Volume Information"}
              | set(config.INDEXER_SKIP_DIRS))
 
 FBX_PROBE_BYTES = 16 * 1024 * 1024
-HASH_CHUNK = 4 * 1024 * 1024
-HASH_FULL_LIMIT = 512 * 1024 * 1024   # above this: partial hash + size salt
-
-
-def sha256_file(path: Path) -> tuple[str, bool]:
-    """(hash, was_partial). Full hash; >512 MiB files get a 64 MiB prefix hash."""
-    h = hashlib.sha256()
-    partial = path.stat().st_size > HASH_FULL_LIMIT
-    with path.open("rb") as fh:
-        if partial:
-            h.update(fh.read(64 * 1024 * 1024))
-        else:
-            for chunk in iter(lambda: fh.read(HASH_CHUNK), b""):
-                h.update(chunk)
-    if partial:
-        h.update(str(path.stat().st_size).encode())
-    return h.hexdigest(), partial
+# assets.content_hash is NOT NULL in every registry already on disk and
+# db.upsert_asset requires a value, but nothing ever read it: hashing the
+# hero file cost a multi-GB read on every run. The column is fed this
+# marker (never a digest) so existing registries need no migration.
+NO_CONTENT_HASH = "unhashed"
 
 
 def _file_entry(path: Path, root: Path) -> Optional[dict]:
@@ -215,7 +202,7 @@ def build_pack_input(pack_path: str, files: list[dict], root: Path) -> PackInput
 
 
 def index_root(root: Path, db_path: Path, limit: int = 0, dry_run: bool = False,
-               verbose: bool = False, config: Optional[dict] = None,
+               verbose: bool = False,
                subtree: Optional[str] = None) -> dict:
     t0 = time.perf_counter()
     packs = discover_packs(root)
@@ -236,7 +223,6 @@ def index_root(root: Path, db_path: Path, limit: int = 0, dry_run: bool = False,
     if limit:
         packs = packs[:limit]
 
-    vision = get_vision_classifier(config or {})
     conn = db.init_db(db_path) if not dry_run else None
 
     domain_dist: Counter = Counter()
@@ -251,15 +237,12 @@ def index_root(root: Path, db_path: Path, limit: int = 0, dry_run: bool = False,
         hero = pick_hero(files) or (files[0] if files else None)
         if hero is None:
             continue
+        # the hero is recorded as a PATH only (pack page, prune check below);
+        # its bytes are never read, so a locked or unreadable hero file no
+        # longer drops the whole pack
         hero_abs = root / hero["relpath"]
-        try:
-            content_hash, hashed_partially = sha256_file(hero_abs)
-        except OSError as exc:
-            print(f"  SKIP {pack_path}: hero unreadable ({exc})")
-            continue
 
-        preview = None  # previews arrive with host-app thumbnails
-        result = classify_pack(pack, vision=vision, preview_path=preview)
+        result = classify_pack(pack)
 
         license_files = [f for f in files
                          if any(k in Path(f["relpath"]).name.lower()
@@ -270,7 +253,6 @@ def index_root(root: Path, db_path: Path, limit: int = 0, dry_run: bool = False,
             "total_bytes": sum(f["size"] for f in files),
             "by_type": dict(by_type),
             "engine_versions": getattr(pack, "engine_versions", []),
-            "hashed_partially": hashed_partially,
         }
 
         domain_dist[result.domain] += 1
@@ -306,13 +288,12 @@ def index_root(root: Path, db_path: Path, limit: int = 0, dry_run: bool = False,
                 "technical_meta": technical_meta,
                 "host_category": result.host_category,
                 "host_tags": result.host_tags,
-                "content_hash": content_hash,
+                "content_hash": NO_CONTENT_HASH,
             })
             db.replace_asset_files(
                 conn, f"pack::{pack_path}",
                 [{"relative_path": f["relpath"], "file_type": f["file_type"],
-                  "file_size": f["size"],
-                  "sha256": content_hash if f is hero else None}
+                  "file_size": f["size"]}
                  for f in files])
         if verbose:
             print(f"         evidence: {json.dumps(result.evidence)[:300]}")
@@ -408,7 +389,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(db.foreign_registry_message(args.db, owner,
                                               config.LIBRARY_ROOT))
             return 2
-    index_root(root, Path(args.db), args.limit, args.dry_run, args.verbose, cfg,
+    index_root(root, Path(args.db), args.limit, args.dry_run, args.verbose,
                subtree=args.subtree)
     return 0
 

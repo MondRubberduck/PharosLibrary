@@ -20,6 +20,7 @@ writes nothing except its own access log output to stdout.
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import mimetypes
@@ -44,6 +45,9 @@ from asset_service import collection_import  # noqa: E402
 from asset_service import textures_import  # noqa: E402
 from asset_service import audio_import  # noqa: E402
 from asset_service import meshes_import  # noqa: E402
+from asset_service import textmatch as tm  # noqa: E402
+from asset_service import skeleton  # noqa: E402
+from asset_service import pack_tags  # noqa: E402
 from asset_service.auto_classifier import DOMAINS, STYLES  # noqa: E402
 
 DEFAULT_DB = config.DB_PATH
@@ -80,50 +84,96 @@ def _audio_hero_uri() -> str:
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
-def _fold(s: str) -> str:
-    """Accent-fold for search: 'vâse' <-> 'vase'. Names in non-English
-    libraries are full of umlauts/accents; folding BOTH sides of the
-    comparison keeps plain-keyboard queries working."""
-    import unicodedata
-    return "".join(c for c in unicodedata.normalize("NFD", s)
-                   if not unicodedata.combining(c))
+# Word matching lives in textmatch.py: ONE implementation for the importers,
+# the HTTP endpoints and the MCP tools (it used to exist five times with
+# different rules -- 'benches' found nothing in a library with 38 benches).
 
 
-def _name_hit(tok: str, name_l: str) -> bool:
-    """Short tokens match on word boundaries only ('lamp' != 'clamp');
-    longer tokens may substring ('hologram' in 'holograms02'). Both
-    sides are accent-folded so 'vase' finds 'Vâse'."""
-    name_l = _fold(name_l)
-    tok = _fold(tok)
-    if len(tok) >= 5:
-        return tok in name_l
-    return re.search(r"\b" + re.escape(tok), name_l) is not None
+class _Params:
+    """Request parameters with honest feedback.
 
+    A mistyped or unsupported filter used to be dropped silently and the
+    UNFILTERED result came back looking authoritative (max_dur=3 returned
+    the same sounds as no filter at all). Every list endpoint now reads
+    its parameters through this class and reports what it could not use
+    in `warnings`."""
 
-SYNONYMS = {
-    "ac": ["acunit", "airconditioner", "hvac", "air"],
-    "tv": ["television", "monitor", "screen"],
-    "car": ["vehicle", "automobile", "sedan", "suv"],
-    "bike": ["motorcycle", "motorbike", "scooter"],
-    "shack": ["favela", "slum", "shanty", "cabin", "shed"],
-    "trash": ["garbage", "dumpster", "rubble", "debris"],
-    "sofa": ["couch", "settee"],
-    "gun": ["firearm", "pistol", "rifle", "weapon"],
-    "phone": ["smartphone", "mobile", "telephone"],
-}
+    def __init__(self, params: dict):
+        self.params = params or {}
+        self.used: set = set()
+        self.warnings: list = []
 
+    def s(self, *names: str) -> str:
+        """First present alias, as a string ('' when absent)."""
+        self.used.update(names)
+        for n in names:
+            v = self.params.get(n)
+            if v:
+                return v[0]
+        return ""
 
-def _synonyms(token: str) -> set:
-    """Return synonym stems for known abbreviations/aliases."""
-    out = set()
-    for base, syns in SYNONYMS.items():
-        if token == base or token in syns:
-            out.add(base)
-            out.update(_stems(" ".join(syns)))
-    if out:
-        out.add(token)
-        out |= _stems(token)
-    return out
+    def num(self, name: str, default: float) -> float:
+        self.used.add(name)
+        v = self.params.get(name)
+        if not v or v[0] == "":
+            return default
+        try:
+            return float(v[0])
+        except ValueError:
+            self.warn(f"{name}={v[0]!r} is not a number: filter ignored")
+            return default
+
+    def page_size(self, default: int) -> tuple:
+        self.used.update(("page", "size"))
+        out = []
+        for name, dflt, hi in (("page", 1, 10 ** 9), ("size", default, 500)):
+            v = self.params.get(name)
+            try:
+                n = int(v[0]) if v and v[0] != "" else dflt
+            except ValueError:
+                self.warn(f"{name}={v[0]!r} is not a number: using {dflt}")
+                n = dflt
+            out.append(min(hi, max(1, n)))
+        return out[0], out[1]
+
+    def flag(self, name: str) -> bool:
+        """1 / true / yes / on -> True; anything else unknown is reported
+        (textures=true used to be ignored and returned every mesh)."""
+        v = self.s(name).strip().lower()
+        if v in ("1", "true", "yes", "on"):
+            return True
+        if v not in ("", "0", "false", "no", "off"):
+            self.warn(f"{name}={v!r} is not 1 or 0: ignored")
+        return False
+
+    def pick(self, label: str, value: str, have) -> str:
+        """`value` matched case-insensitively against the values the
+        section HAS. An unknown value still filters (to nothing) and is
+        reported with the closest names: '0 results' must not read as
+        'the library has none'."""
+        v = (value or "").strip()
+        if not v:
+            return ""
+        known = {h.lower(): h for h in have if h}
+        if v.lower() in known:
+            return known[v.lower()]
+        near = difflib.get_close_matches(v, list(known.values()), n=3,
+                                         cutoff=0.5)
+        self.warn(f"no row has {label}={value!r}"
+                  + (f"; did you mean {near}?" if near else ""))
+        return v
+
+    def warn(self, text: str) -> None:
+        self.warnings.append(text)
+
+    def done(self, resp: dict) -> dict:
+        unknown = sorted(k for k in self.params if k not in self.used)
+        if unknown:
+            self.warn("ignored unknown parameter(s): " + ", ".join(unknown)
+                      + " -- accepted here: " + ", ".join(sorted(self.used)))
+        if self.warnings:
+            resp["warnings"] = self.warnings
+        return resp
 
 
 def _thumb_path(r):
@@ -145,6 +195,7 @@ def _load_tpl(name: str) -> str:
 ASSETS_PAGE = _load_tpl("assets.html")
 TEXTURES_PAGE = _load_tpl("textures.html")
 AUDIO_PAGE = _load_tpl("audio.html")
+TAGS_PAGE = _load_tpl("tags.html")
 THUMB_LIMIT = 8000
 PREVIEW_EXTS = {".fbx", ".bvh"}
 TEXTURE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
@@ -316,6 +367,13 @@ def api_stats() -> dict:
                 f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
         except sqlite3.OperationalError:
             sections[tbl] = 0      # table not created yet (importer skipped)
+    try:
+        # clips were the one section missing here: an agent reading the
+        # live totals saw no animation at all
+        sections["animations"] = db.anim_clip_count(
+            conn, config.SECTIONS.get("animation"))
+    except sqlite3.OperationalError:
+        sections["animations"] = 0
     row = conn.execute(
         "SELECT MAX(updated_at) AS last, COUNT(*) AS n FROM assets").fetchone()
     conn.close()
@@ -327,7 +385,8 @@ def api_stats() -> dict:
     except (OSError, ValueError):
         status = None
     return {"stats": stats, "sections": sections, "extension_status": status,
-            "domains": list(DOMAINS), "styles": list(STYLES)}
+            "domains": list(DOMAINS),
+            "styles": [*pack_tags.MARKERS, "Neutral/Unclassified"]}
 
 
 def api_packs(params: dict) -> list[dict]:
@@ -337,10 +396,24 @@ def api_packs(params: dict) -> list[dict]:
     vendor = (params.get("vendor") or [""])[0].strip() or None
     validated = (params.get("validated") or [""])[0] in ("1", "true")
     conn = db.connect(_DB_PATH)
-    rows = db.search_assets(conn, q or None, style=style, domain=domain,
-                            vendor=vendor, validated_only=validated, limit=500)
+    # domain and style are filtered below, AFTER the owner's pack tags
+    # replaced the classifier's guesses
+    rows = db.search_assets(conn, q or None, vendor=vendor,
+                            validated_only=validated, limit=500)
+    tags = _tag_rows()
+    want = pack_tags.marker(style) if style else ""
     out = []
     for r in rows:
+        pt = tags.get(r["id"][len("pack::"):].lower())
+        styles = (pt["styles"] if pt and pt["styles"] else
+                  [r["style"]] if r["style"] in _LOOKS else [])
+        dom = pt["domain"] if pt and pt["domain"] else r["domain"]
+        if domain and dom != domain:
+            continue
+        if style and not (want in styles if want else
+                          style == "Neutral/Unclassified"
+                          and not set(styles) & set(_LOOKS)):
+            continue
         detail = None
         if (params.get("detail") or [""])[0] == "1":
             detail = db.get_asset_details(conn, r["id"])
@@ -349,8 +422,14 @@ def api_packs(params: dict) -> list[dict]:
             "FROM asset_files WHERE asset_id = ?", (r["id"],)).fetchone()
         thumb = _pack_thumb.get(r["id"])
         out.append({
-            "id": r["id"], "name": r["name"], "domain": r["domain"],
-            "sub_category": r["sub_category"], "style": r["style"],
+            "id": r["id"], "name": r["name"], "domain": dom,
+            "sub_category": r["sub_category"],
+            "style": next((s for s in styles if s in _LOOKS),
+                          "Neutral/Unclassified"),
+            "styles": styles,
+            "owner_tagged": bool(pt and (pt["styles"] or pt["domain"]
+                                         or pt["tags"])),
+            "pack_tags": pt["tags"] if pt else [],
             "confidence": r["confidence_score"],
             "validation": r["validation_status"], "status": r["status"],
             "vendor": r["vendor"], "formats": json.loads(r["formats"] or "[]"),
@@ -364,6 +443,107 @@ def api_packs(params: dict) -> list[dict]:
     conn.close()
     return out
 
+
+# ---- pack tags: the owner's labels, kept in <agent_files>/pack_tags.csv ----
+
+_LOOKS = ("Photorealistic", "Stylized")
+
+
+def _tag_rows() -> dict:
+    """The pack-tag file's rows; {} while it cannot be read (a search must
+    not fail because a spreadsheet holds the file)."""
+    try:
+        return pack_tags.load()
+    except OSError:
+        return {}
+
+
+def _sync_pack_tags() -> int:
+    """Give every pack folder a row in the tag file, so new packs appear
+    after an ingest. The purchase section holds store images, not assets,
+    and gets none. Labels the owner set in the registry are copied in when
+    the file is first made."""
+    conn = db.connect(_DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT id, name, domain, style, validation_status FROM assets "
+            "WHERE substr(id, 1, 6) = 'pack::'").fetchall()
+    finally:
+        conn.close()
+    coll = (config.SECTIONS.get("collection") or "").strip("/").lower()
+    packs, seed = [], {}
+    for r in rows:
+        folder = r["id"][len("pack::"):]
+        low = folder.lower()
+        if coll and (low == coll or low.startswith(coll + "/")):
+            continue
+        packs.append((folder, r["name"]))
+        if r["validation_status"] == "human_verified":
+            seed[folder] = (r["domain"],
+                            r["style"] if r["style"] in _LOOKS else "")
+    return pack_tags.sync(packs, seed)
+
+
+def api_pack_tags() -> dict:
+    """Every pack with the owner's tags, the classifier's guess beside
+    them, and whether its folder is still indexed."""
+    _sync_pack_tags()
+    rows = _tag_rows()
+    conn = db.connect(_DB_PATH)
+    try:
+        packs = {r["id"][len("pack::"):].lower(): dict(r) for r in conn.execute(
+            "SELECT a.id AS id, a.domain AS domain, a.style AS style, "
+            "COUNT(f.id) AS files, COALESCE(SUM(f.file_size), 0) AS bytes "
+            "FROM assets a LEFT JOIN asset_files f ON f.asset_id = a.id "
+            "WHERE substr(a.id, 1, 6) = 'pack::' GROUP BY a.id")}
+    finally:
+        conn.close()
+    out = []
+    for k, r in sorted(rows.items(), key=lambda kv: kv[1]["folder"].lower()):
+        p = packs.get(k)
+        thumb = _pack_thumb.get(p["id"]) if p else None
+        out.append({
+            "folder": r["folder"], "name": r["name"], "styles": r["styles"],
+            "domain": r["domain"], "tags": r["tags"], "found": p is not None,
+            "guess": ({"style": p["style"] if p["style"] in _LOOKS else "",
+                       "domain": p["domain"]} if p else None),
+            "files": p["files"] if p else 0, "bytes": p["bytes"] if p else 0,
+            "thumb": f"/thumb/{thumb}" if thumb is not None else None})
+    return {"file": str(pack_tags.PATH), "markers": list(pack_tags.MARKERS),
+            "domains": list(DOMAINS), "packs": out}
+
+
+def api_pack_tags_set(body: dict) -> tuple:
+    """POST {folder, styles?, domain?, tags?} -> (answer, HTTP status).
+    A field left out stays as it is; "" / [] clears it."""
+    folder = body.get("folder")
+    if not isinstance(folder, str) or not folder.strip():
+        return {"error": "folder missing"}, 400
+    styles = body.get("styles")
+    if styles is not None:
+        if not isinstance(styles, list):
+            return {"error": "styles must be a list"}, 400
+        bad = [s for s in styles if not pack_tags.marker(str(s))]
+        if bad:
+            return {"error": f"unknown style(s) {bad}; use: "
+                             f"{', '.join(pack_tags.MARKERS)}"}, 400
+        styles = [pack_tags.marker(str(s)) for s in styles]
+    domain = body.get("domain")
+    if domain not in (None, "") and domain not in DOMAINS:
+        return {"error": f"unknown domain {domain!r}; use: "
+                         f"{', '.join(DOMAINS)}"}, 400
+    tags = body.get("tags")
+    if tags is not None:
+        tags = pack_tags.split_tags(
+            ", ".join(map(str, tags)) if isinstance(tags, list) else str(tags))
+    try:
+        row = pack_tags.update(folder, styles=styles, domain=domain, tags=tags)
+    except KeyError:
+        return {"error": "no such pack folder in the tag file"}, 404
+    except pack_tags.TagFileBusy as exc:
+        return {"error": str(exc)}, 409
+    return {"ok": True, "pack": {k: row[k] for k in (
+        "folder", "name", "styles", "domain", "tags")}}, 200
 
 
 def _jailed(t, root) -> bool:
@@ -413,7 +593,7 @@ def api_clips(params: dict) -> dict:
 def api_pack_files(params: dict) -> dict:
     """File-level contents of one pack (server-side pagination + filters)."""
     pack_id = _normalize_pack_id((params.get("id") or [""])[0])
-    if not re.fullmatch(r"pack::[\w .()&!',#%-]+", pack_id):
+    if not re.fullmatch(r"pack::[\w .()&!',#%/+-]+", pack_id):
         return {"error": "bad pack id"}
     q = (params.get("q") or [""])[0].strip()
     ext = re.sub(r"[^a-z0-9]", "", (params.get("ext") or [""])[0].lower())
@@ -467,37 +647,89 @@ def _preview_key(rel: str) -> str:
     return hashlib.sha1(rel.encode("utf-8")).hexdigest()[:20]
 
 
-def _stems(word: str) -> set:
-    w = word.lower()
-    out = {w}
-    for suf, cut in (("ing", 3), ("ed", 2), ("s", 1), ("er", 2)):
-        if w.endswith(suf) and len(w) > len(suf) + 2:
-            out.add(w[:-cut])
-    for s in list(out):
-        if len(s) > 3 and s[-1] == s[-2] and s[-1] not in "lsz":
-            out.add(s[:-1])          # running -> runn -> run
-    return out
+def _query(q_raw: str, P) -> "tm.Query":
+    """Parse a search string; warn when it leaves no usable word (single
+    letters and punctuation are ignored), so a 0 is not read as 'absent'."""
+    query = tm.Query(q_raw)
+    if query.empty:
+        P.warn(f"q={q_raw!r} has no usable search word (single letters and "
+               "punctuation are ignored)")
+    return query
 
 
-def _word_hits(words: list, name_l: str, searchable: set) -> list:
-    """Per query word: 2 = a variant hits the name, 1 = a variant is in the
-    row's tags/themes/stems, 0 = no hit. `words` holds ONE stem-variant
-    group per query word ('crates' -> {'crates', 'crate'}); a word matches
-    when ANY of its variants does. Shared by the four item endpoints:
-    merging every word's variants into one set and requiring ALL of them
-    made plural queries fail AND matching."""
-    return [2 if any(_name_hit(x, name_l) for x in g)
-            else 1 if g & searchable else 0 for g in words]
-
-
-def _cluster_stems() -> list[set]:
-    out = []
-    for cl in ANIM_CLUSTERS:
-        st = set()
+def _related(query, clusters) -> set:
+    """Words of every concept cluster the query touches, minus the query
+    itself: 'stucco' -> plaster, brick, facade ... (curated, offline)."""
+    if not query:
+        return set()
+    qstems = query.stems
+    out: set = set()
+    for cl in clusters:
+        cst: set = set()
         for w in cl:
-            st |= _stems(w)
-        out.append(st)
-    return out
+            cst |= tm.variants(w)
+        if qstems & cst:
+            out |= cst
+    return {w for w in out - qstems if len(w) >= 3}
+
+
+def _match_rows(rows, query, name_of, context_of, clusters=(),
+                glued: bool = False) -> tuple:
+    """The one AND-first matcher behind every list endpoint.
+
+    Returns (matched, mode): entries {'r', 'tier', 'score', '_hits'}.
+      tier 1/2  every query word matches (1 = all as whole name words)
+      tier 3    OR fallback -- served ONLY when no row matches every word;
+                ranked by word rarity (documented for all sections, but
+                only the mesh endpoint used to do it: the others listed
+                fallback hits alphabetically)
+      tier 3    related-cluster rows -- served only when no query word
+                matches anything at all
+    No query word -> every row, tier 0, minus '-word' exclusions."""
+    if not query:
+        return [{"r": r, "tier": 0, "score": 0, "_hits": []} for r in rows
+                if not (query.exclude and tm.excluded(
+                    query, name_of(r), context_of(r)))], "and"
+    related = _related(query, clusters)
+    matched, partial, adjacent = [], [], []
+    for r in rows:
+        name = name_of(r)
+        ctx = context_of(r)
+        if tm.excluded(query, name, ctx):
+            continue
+        hits = tm.hits(query, name, ctx, glued=glued)
+        if all(hits):
+            matched.append({"r": r, "tier": tm.tier(hits),
+                            "score": sum(hits) + tm.bonus(query, name),
+                            "_hits": hits})
+        elif any(hits):
+            partial.append({"r": r, "tier": 3, "score": sum(hits),
+                            "_hits": hits})
+        elif related and (related & tm.name_forms(name)[0] or related & ctx):
+            adjacent.append({"r": r, "tier": 3, "score": 0, "_hits": hits})
+    if matched:
+        return matched, "and"
+    if partial:
+        tm.rarity_rank(partial, query)
+        return partial, "or-fallback"
+    return adjacent, ("or-fallback" if adjacent else "and")
+
+
+def _suggest(resp: dict, query, rows, name_of, best_tier: int = 0) -> None:
+    """Unless a whole-word name match exists, name the closest words the
+    section DOES contain for query words it does not know ('barel' ->
+    'barrel'): a thin or empty answer must not read as "not in the
+    library"."""
+    if not query or best_tier == 1:
+        return
+    vocab = set()
+    for r in rows:
+        vocab.update(tm.tokens(name_of(r)))
+    # only for words the section does not contain at all
+    missing = {g["word"] for g in query.groups if not (g["exact"] & vocab)}
+    near = tm.did_you_mean(query, vocab, missing) if missing else {}
+    if near:
+        resp["did_you_mean"] = near
 
 
 # ---------------------------------------------------------------------------
@@ -575,49 +807,44 @@ def api_collection_tree() -> dict:
     }
 
 
-def api_collection_items(params: dict) -> dict:
-    q = (params.get("q") or [""])[0].strip().lower()
-    store = (params.get("store") or [""])[0]
-    group = (params.get("group") or [""])[0]
-    cat = (params.get("cat") or [""])[0]
-    avail_f = (params.get("avail") or [""])[0]
-    try:
-        page = max(1, int((params.get("page") or ["1"])[0]))
-    except ValueError:
-        page = 1
-    try:
-        size = min(500, max(8, int((params.get("size") or ["24"])[0])))
-    except ValueError:
-        size = 24
+def _row_context(r: dict) -> set:
+    """A row's searchable words besides its name: tags, themes, stems."""
+    meta = r.get("meta") or {}
+    return tm.searchable(r.get("taglist") if "taglist" in r else r.get("tags"),
+                         meta.get("themes"), meta.get("stems"))
 
-    words = [{s for s in _stems(t) if len(s) >= 2}   # drop 1-char tokens
-             for t in re.findall(r"[^\W_]+", q, re.UNICODE)]
-    words = [w for w in words if w]
-    qstems: set = set().union(*words)
-    if q and not qstems:
+
+def api_collection_items(params: dict) -> dict:
+    P = _Params(params)
+    q_raw = P.s("q").strip()
+    q = q_raw.lower()
+    store = P.s("store")
+    group = P.s("group")
+    cat = P.s("cat")
+    avail_f = P.s("avail")
+    page, size = P.page_size(24)
+    query = _query(q_raw, P)
+    if query.empty:
         # every token was dropped (single letters / punctuation) -- such a
         # query must match nothing, never the whole library
-        return {"total": 0, "exact": 0, "mode": "and", "page": page,
-                "size": size, "q": q, "items": []}
-    related: set = set()
-    if qstems:
-        for cl in COLL_CLUSTERS:
-            cst: set = set()
-            for w in cl:
-                cst |= _stems(w)
-            if qstems & cst:
-                related |= cst
-        related -= qstems
-
-    # 1-2 letter stems ('fi' from 'sci fi') would substring-match 'file' etc.
-    qsub = {t for t in qstems if len(t) >= 3}
-    rsub = {t for t in related if len(t) >= 3}
+        return P.done({"total": 0, "exact": 0, "mode": "and", "page": page,
+                       "size": size, "q": q, "items": []})
 
     from urllib.parse import quote as _q
-    items = []
-    or_items = []
-    rel_items = []
-    for r in _coll_rows():
+    all_rows = _coll_rows()
+    store = P.pick("store", store, {r["store"] for r in all_rows})
+    group = P.pick("group", group, {r["type_group"] for r in all_rows})
+    cat = P.pick("cat", cat, {r["type_cat"] for r in all_rows})
+    # items show availability 'owned-not-downloaded': accept that spelling
+    avail_f = {"local": "local", "notdown": "notdown",
+               "owned-not-downloaded": "notdown",
+               "not-downloaded": "notdown"}.get(avail_f.strip().lower(),
+                                                avail_f.strip())
+    if avail_f not in ("", "local", "notdown"):
+        P.warn(f"avail={avail_f!r} is not local or notdown: ignored")
+        avail_f = ""
+    rows = []
+    for r in all_rows:
         if store and r["store"] != store:
             continue
         if group and r["type_group"] != group:
@@ -628,44 +855,31 @@ def api_collection_items(params: dict) -> dict:
             continue
         if avail_f == "notdown" and r["availability"] == "local":
             continue
-        meta = r.get("meta") or {}
-        searchable = set(r["taglist"]) | set(meta.get("themes") or []) \
-            | set(meta.get("stems") or [])
-        name_l = (r["name"] or "").lower()
-        if qstems:
-            # AND over query words; single-word matches are reserved as a
-            # fallback tier for list-style queries ("lamp sign hydrant"),
-            # and the related cluster only answers when NO word matches
-            hits = _word_hits(words, name_l, searchable)
-            if not any(hits) and not (any(s in name_l for s in rsub)
-                                      or any(s in searchable for s in rsub)):
-                continue
-            tier = (1 if min(hits) == 2 else 2) if all(hits) else 3
-        else:
-            tier = 0
-        entry = {
+        rows.append(r)
+    name_of = lambda r: r["name"] or ""                       # noqa: E731
+    matched, mode = _match_rows(rows, query, name_of, _row_context,
+                                COLL_CLUSTERS)
+    if mode == "and":
+        matched.sort(key=lambda e: (e["tier"], -e["score"], e["r"]["store"],
+                                    (e["r"]["name"] or "").lower()))
+    items = []
+    lo = (page - 1) * size
+    for e in matched[lo:lo + size]:
+        r = e["r"]
+        items.append({
             "id": r["id"], "name": r["name"], "store": r["store"],
             "group": r["type_group"], "cat": r["type_cat"], "sub": r["type_sub"],
             "seller": r["seller"], "price": r["price"], "url": r["url"],
             "image_count": r["image_count"],
             "availability": r.get("availability") or "",
             "thumb": "/cimg?path=" + _q(_thumb_path(r)) if _thumb_path(r) else "",
-            "tier": tier}
-        if tier < 3:
-            items.append(entry)
-        else:
-            (or_items if any(hits) else rel_items).append(entry)
-    if not items:
-        items = or_items or rel_items
-    items.sort(key=lambda x: (x["tier"], x["store"], x["name"].lower()))
-    total = len(items)
-    exact = sum(1 for e in items if e["tier"] < 3)
-    lo = (page - 1) * size
-    return {"total": total, "exact": exact if qstems else total,
-            "mode": ("or-fallback" if qstems and exact == 0 and total
-                     else "and"),
-            "page": page, "size": size, "q": q,
-            "items": items[lo:lo + size]}
+            "tier": e["tier"]})
+    total = len(matched)
+    resp = {"total": total, "exact": total if mode == "and" else 0,
+            "mode": mode, "page": page, "size": size, "q": q, "items": items}
+    _suggest(resp, query, rows, name_of,
+             matched[0]["tier"] if matched else 0)
+    return P.done(resp)
 
 
 def api_collection_item(params: dict) -> dict:
@@ -703,7 +917,7 @@ def api_collection_item(params: dict) -> dict:
         r["tags"] = []
     r.pop("taglist", None)
     r.pop("meta", None)
-    out = dict(r); out["item"] = r; return out
+    return r
 
 
 def api_collection_tag(params: dict, body: dict) -> dict:
@@ -801,78 +1015,90 @@ def api_textures_tree() -> dict:
 
 
 def api_textures_items(params: dict) -> dict:
-    q = (params.get("q") or [""])[0].strip().lower()
-    grp = (params.get("group") or [""])[0]
-    sub = (params.get("sub") or [""])[0]
-    try:
-        page = max(1, int((params.get("page") or ["1"])[0]))
-    except ValueError:
-        page = 1
-    try:
-        size = min(500, max(8, int((params.get("size") or ["24"])[0])))
-    except ValueError:
-        size = 24
-    words = [{s for s in _stems(t) if len(s) >= 2}   # drop 1-char tokens
-             for t in re.findall(r"[^\W_]+", q, re.UNICODE)]
-    words = [w for w in words if w]
-    qstems: set = set().union(*words)
-    if q and not qstems:
-        return {"total": 0, "exact": 0, "mode": "and", "page": page,
-                "size": size, "q": q, "items": []}
-    related: set = set()
-    if qstems:
-        for cl in TEX_CLUSTERS:
-            cst: set = set()
-            for w in cl:
-                cst |= _stems(w)
-            if qstems & cst:
-                related |= cst
-        related -= qstems
-    qsub = {t for t in qstems if len(t) >= 3}
-    rsub = {t for t in related if len(t) >= 3}
+    P = _Params(params)
+    q_raw = P.s("q").strip()
+    q = q_raw.lower()
+    grp = P.s("group")
+    sub = P.s("sub")
+    res = P.s("res", "resolution").strip().upper()
+    if res.isdigit():                     # res=4096 means the 4K label
+        res = textures_import._res_label(int(res))
+    min_px = P.num("min_px", 0.0)
+    has = [h.strip() for h in P.s("has").lower().split(",") if h.strip()]
+    page, size = P.page_size(24)
+    query = _query(q_raw, P)
+    if query.empty:
+        return P.done({"total": 0, "exact": 0, "mode": "and", "page": page,
+                       "size": size, "q": q, "items": []})
     from urllib.parse import quote as _q
-    items = []
-    or_items = []
-    rel_items = []
-    for r in _tex_rows():
+    all_rows = _tex_rows()
+    grp = P.pick("group", grp, {r["grp"] for r in all_rows})
+    sub = P.pick("sub", sub, {r["sub"] for r in all_rows})
+    if res:
+        res = P.pick("res", res, {(r["meta"] or {}).get("res") for r in all_rows
+                                  if isinstance(r["meta"], dict)}).upper()
+    if has:
+        roles = set()
+        for r in all_rows:
+            if isinstance(r["meta"], dict):
+                roles.update((r["meta"].get("maps") or {}).keys())
+        for h in has:
+            if h not in roles:
+                P.warn(f"has={h!r}: no set has that map role; roles: "
+                       + ", ".join(sorted(roles)))
+    rows = []
+    unmeasured = 0
+    for r in all_rows:
         if grp and r["grp"] != grp:
             continue
         if sub and r["sub"] != sub:
             continue
-        searchable = (set(r["tags"]) | set(r["meta"].get("themes") or [])
-                      | set(r["meta"].get("stems") or []))
-        name_l = (r["name"] or "").lower()
-        if qstems:
-            # AND first; single-word matches reserved as fallback tier; the
-            # related cluster only answers when NO query word matches
-            hits = _word_hits(words, name_l, searchable)
-            if not any(hits) and not (any(s in name_l for s in rsub)
-                                      or any(s in searchable for s in rsub)):
+        meta = r["meta"] if isinstance(r["meta"], dict) else {}
+        if res and (meta.get("res") or "").upper() != res:
+            continue
+        if min_px:
+            # a pixel filter is a MEASUREMENT query: unmeasured sets are
+            # excluded and counted, never passed through
+            px = meta.get("px")
+            if not (isinstance(px, list) and px):
+                unmeasured += 1
                 continue
-            tier = (1 if min(hits) == 2 else 2) if all(hits) else 3
-        else:
-            tier = 0
+            if max(px) < min_px:
+                continue
+        if has and not all(h in (meta.get("maps") or {}) for h in has):
+            continue
+        rows.append(r)
+    name_of = lambda r: r["name"] or ""                       # noqa: E731
+    matched, mode = _match_rows(rows, query, name_of, _row_context,
+                                TEX_CLUSTERS)
+    if mode == "and":
+        matched.sort(key=lambda e: (e["tier"], -e["score"], e["r"]["grp"],
+                                    e["r"]["sub"],
+                                    (e["r"]["name"] or "").lower()))
+    items = []
+    lo = (page - 1) * size
+    for e in matched[lo:lo + size]:
+        r = e["r"]
+        meta = r["meta"] if isinstance(r["meta"], dict) else {}
         entry = {
             "id": r["id"], "name": r["name"], "grp": r["grp"], "sub": r["sub"],
             "image_count": len(r["images"]),
-            "res": (r.get("meta") or {}).get("res") or "",
+            "res": meta.get("res") or "",
             "thumb": "/timg?path=" + _q(r["thumb"]) if r["thumb"] else "",
-            "tier": tier}
-        if tier < 3:
-            items.append(entry)
-        else:
-            (or_items if any(hits) else rel_items).append(entry)
-    if not items:
-        items = or_items or rel_items
-    items.sort(key=lambda x: (x["tier"], x["grp"], x["sub"], x["name"].lower()))
-    total = len(items)
-    exact = sum(1 for e in items if e["tier"] < 3)
-    lo = (page - 1) * size
-    return {"total": total, "exact": exact if qstems else total,
-            "mode": ("or-fallback" if qstems and exact == 0 and total
-                     else "and"),
-            "page": page, "size": size, "q": q,
-            "items": items[lo:lo + size]}
+            "tier": e["tier"]}
+        if meta.get("px"):
+            entry["px"] = meta["px"]              # measured, not the folder name
+        if meta.get("maps"):
+            entry["maps"] = sorted(meta["maps"])  # roles; paths: /api/textures/item
+        items.append(entry)
+    total = len(matched)
+    resp = {"total": total, "exact": total if mode == "and" else 0,
+            "mode": mode, "page": page, "size": size, "q": q, "items": items}
+    if min_px:
+        resp["unmeasured_excluded"] = unmeasured
+    _suggest(resp, query, rows, name_of,
+             matched[0]["tier"] if matched else 0)
+    return P.done(resp)
 
 
 def api_textures_item(params: dict) -> dict:
@@ -885,16 +1111,20 @@ def api_textures_item(params: dict) -> dict:
     r = next((x for x in rows if x["id"] == tid), None)
     if r is None:
         return {"error": "not found"}
+    meta = r["meta"] if isinstance(r["meta"], dict) else {}
     r["images"] = ["/timg?path=" + _q(i) for i in r["images"]]
     total_mb = (r.get("bytes") or 0) / 1e6
     r["size_str"] = (f"{total_mb:.0f} MB" if total_mb >= 1
                      else f"{(r.get('bytes') or 0) / 1e3:.0f} KB")
     r["tags"] = [t for t in r["tags"] if t not in
                  ("loose", "files", "4k", "textures", "gumroad")][:16]
-    r["res"] = (r.get("meta") or {}).get("res") or ""
-    r["desc"] = (r.get("meta") or {}).get("desc") or ""
-    r["themes"] = (r.get("meta") or {}).get("themes") or []
-    out = dict(r); out["item"] = r; return out
+    r["res"] = meta.get("res") or ""
+    r["px"] = meta.get("px")
+    r["res_source"] = meta.get("res_source") or ""
+    r["maps"] = meta.get("maps") or {}
+    r["desc"] = meta.get("desc") or ""
+    r["themes"] = meta.get("themes") or []
+    return r
 
 
 # ---------------------------------------------------------------------------
@@ -966,84 +1196,52 @@ def api_audio_tree() -> dict:
 
 
 def api_audio_items(params: dict) -> dict:
-    q = (params.get("q") or [""])[0].strip().lower()
-    cat = (params.get("cat") or [""])[0]
-    sub = (params.get("sub") or [""])[0]
-    min_dur = None
-    try:
-        min_dur = float((params.get("min_dur") or
-                         params.get("min_duration") or ["0"])[0])
-    except ValueError:
-        min_dur = None
-    try:
-        page = max(1, int((params.get("page") or ["1"])[0]))
-    except ValueError:
-        page = 1
-    try:
-        size = min(500, max(8, int((params.get("size") or ["24"])[0])))
-    except ValueError:
-        size = 24
-    words = [{s for s in _stems(t) if len(s) >= 2}   # drop 1-char tokens
-             for t in re.findall(r"[^\W_]+", q, re.UNICODE)]
-    words = [w for w in words if w]
-    qstems: set = set().union(*words)
-    if q and not qstems:
-        return {"total": 0, "exact": 0, "mode": "and", "page": page,
-                "size": size, "q": q, "items": []}
-    related: set = set()
-    if qstems:
-        for cl in AUDIO_CLUSTERS:
-            cst: set = set()
-            for w in cl:
-                cst |= _stems(w)
-            if qstems & cst:
-                related |= cst
-        related -= qstems
-    qsub = {t for t in qstems if len(t) >= 3}
-    rsub = {t for t in related if len(t) >= 3}
-    items = []
-    or_items = []
-    rel_items = []
-    for r in _audio_rows():
+    P = _Params(params)
+    q_raw = P.s("q").strip()
+    q = q_raw.lower()
+    cat = P.s("cat")
+    sub = P.s("sub")
+    min_dur = P.num("min_dur", 0.0) or P.num("min_duration", 0.0)
+    max_dur = P.num("max_dur", 0.0) or P.num("max_duration", 0.0)
+    page, size = P.page_size(24)
+    query = _query(q_raw, P)
+    if query.empty:
+        return P.done({"total": 0, "exact": 0, "mode": "and", "page": page,
+                       "size": size, "q": q, "items": []})
+    all_rows = _audio_rows()
+    cat = P.pick("cat", cat, {r["cat"] for r in all_rows})
+    sub = P.pick("sub", sub, {r["sub"] for r in all_rows})
+    rows = []
+    for r in all_rows:
         if cat and r["cat"] != cat:
             continue
         if sub and r["sub"] != sub:
             continue
-        if min_dur is not None and (r["dur"] or 0) < min_dur:
+        if min_dur and (r["dur"] or 0) < min_dur:
             continue
-        searchable = set(r["tags"]) | set(r["meta"].get("themes") or []) \
-            | set(r["meta"].get("stems") or [])
-        name_l = (r["name"] or "").lower()
-        if qstems:
-            # AND first; single-word matches reserved as fallback tier; the
-            # related cluster only answers when NO query word matches
-            hits = _word_hits(words, name_l, searchable)
-            if not any(hits) and not (any(s in name_l for s in rsub)
-                                      or any(s in searchable for s in rsub)):
-                continue
-            tier = (1 if min(hits) == 2 else 2) if all(hits) else 3
-        else:
-            tier = 0
-        entry = {
-            "id": r["id"], "name": r["name"], "cat": r["cat"], "sub": r["sub"],
-            "dur": r["dur"], "playable": r["playable"], "rel": r["rel"],
-            "tier": tier}
-        if tier < 3:
-            items.append(entry)
-        else:
-            (or_items if any(hits) else rel_items).append(entry)
-    if not items:
-        items = or_items or rel_items
-    items.sort(key=lambda x: (x["tier"], x["cat"], x["sub"],
-                              x["name"].lower()))
-    total = len(items)
-    exact = sum(1 for e in items if e["tier"] < 3)
+        # an unknown duration (0 / NULL) is not "short": it fails max_dur
+        if max_dur and not (0 < (r["dur"] or 0) <= max_dur):
+            continue
+        rows.append(r)
+    name_of = lambda r: r["name"] or ""                       # noqa: E731
+    matched, mode = _match_rows(rows, query, name_of, _row_context,
+                                AUDIO_CLUSTERS)
+    if mode == "and":
+        matched.sort(key=lambda e: (e["tier"], -e["score"], e["r"]["cat"],
+                                    e["r"]["sub"],
+                                    (e["r"]["name"] or "").lower()))
     lo = (page - 1) * size
-    return {"total": total, "exact": exact if qstems else total,
-            "mode": ("or-fallback" if qstems and exact == 0 and total
-                     else "and"),
-            "page": page, "size": size, "q": q,
-            "items": items[lo:lo + size]}
+    items = [{"id": e["r"]["id"], "name": e["r"]["name"],
+              "cat": e["r"]["cat"], "sub": e["r"]["sub"],
+              "dur": e["r"]["dur"], "playable": e["r"]["playable"],
+              "rel": e["r"]["rel"], "tier": e["tier"]}
+             for e in matched[lo:lo + size]]
+    total = len(matched)
+    resp = {"total": total, "exact": total if mode == "and" else 0,
+            "mode": mode, "page": page, "size": size, "q": q, "items": items}
+    _suggest(resp, query, rows, name_of,
+             matched[0]["tier"] if matched else 0)
+    return P.done(resp)
 
 
 def api_audio_item(params: dict) -> dict:
@@ -1057,7 +1255,7 @@ def api_audio_item(params: dict) -> dict:
         return {"error": "not found"}
     r["relfull"] = (AUDIO_ROOT / r["rel"]).as_posix()
     r["tags"] = [t for t in r["tags"]][:18]
-    out = dict(r); out["item"] = r; return out
+    return r
 
 
 # ---------------------------------------------------------------------------
@@ -1067,29 +1265,171 @@ def api_audio_item(params: dict) -> dict:
 _EMPTY_RECIPE = {"slots": [], "primary": {}, "resolved": False,
                  "primary_slot": None}
 
+# what matching and a list item need; the heavy JSON columns (recipe,
+# materials: ~40 MB on a 12k-mesh library) are read only for the rows that
+# are actually returned
+_MESH_LIGHT = ("id,name,pack,source,kind,fbx,on_disk,triangles,bbox_x,"
+               "bbox_y,bbox_z,max_dim,texture_count,tags,meta")
+_MESH_HEAVY = ("id", "vertices", "submeshes", "materials", "recipe",
+               "bbox_min_x", "bbox_min_y", "bbox_min_z",
+               "bbox_max_x", "bbox_max_y", "bbox_max_z")
+_MESH_SORTS = ("relevance", "name", "max_dim", "-max_dim",
+               "triangles", "-triangles")
 
-def _mesh_rows() -> list:
+
+def _mesh_light_rows() -> list:
+    """Every mesh row WITHOUT its heavy JSON columns. Each request used to
+    SELECT * and json-decode recipe + materials + texture_files of ALL rows
+    (56 MB, ~0.7 s) before filtering -- for an answer of 8 items."""
     conn = db.connect(_DB_PATH)
     try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(meshes)")}
+        if not cols:
+            return []       # table not created yet (importer skipped)
+        wired = ("(instr(recipe,'\"resolved\":true')"
+                 "+instr(recipe,'\"resolved\": true'))>0"
+                 if "recipe" in cols else "0")
+        obj = "object_name" if "object_name" in cols else "NULL"
         rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM meshes ORDER BY pack, name")]
+            f"SELECT {_MESH_LIGHT},{obj} AS object_name,{wired} AS wired "
+            f"FROM meshes ORDER BY pack, name")]
     except sqlite3.OperationalError:
-        rows = []       # table not created yet (importer skipped) -> empty
+        rows = []
     finally:
         conn.close()
     for r in rows:
-        for key in ("tags", "meta", "materials", "texture_files"):
+        for key, kind in (("tags", list), ("meta", dict)):
             try:
-                r[key] = json.loads(r.get(key) or "[]")
+                v = json.loads(r.get(key) or "null")
             except (ValueError, TypeError):
-                r[key] = []
-        try:
-            r["recipe"] = json.loads(r.get("recipe") or "null")
-        except (ValueError, TypeError):
-            r["recipe"] = None
-        if not isinstance(r["recipe"], dict):
-            r["recipe"] = dict(_EMPTY_RECIPE)
+                v = None
+            r[key] = v if isinstance(v, kind) else kind()
+        # the object's own name is a name too: agents paste
+        # 'KB3D_XYZ_PropFuseBox_A_grp' or 'SM_Wagon', and the prettified
+        # name alone lacked their prefix and code words
+        obj = r.get("object_name")
+        if obj and obj != r["name"]:
+            r["_mname"] = f"{r['name']} {obj}"
+    _mesh_keys(rows)
+    look = pack_tags.Lookup(_tag_rows())
+    for r in rows:
+        r["_ptag"] = look(r["_file"])
     return rows
+
+
+def _mesh_heavy(ids: list) -> dict:
+    """id -> heavy columns, for the handful of rows being returned."""
+    out: dict = {}
+    if not ids:
+        return out
+    conn = db.connect(_DB_PATH)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(meshes)")}
+        want = [c for c in _MESH_HEAVY if c in cols]
+        for i in range(0, len(ids), 400):          # SQLite variable limit
+            chunk = ids[i:i + 400]
+            for r in conn.execute(
+                    f"SELECT {','.join(want)} FROM meshes WHERE id IN "
+                    f"({','.join('?' * len(chunk))})", chunk):
+                out[r["id"]] = dict(r)
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
+    for h in out.values():
+        try:
+            h["materials"] = json.loads(h.get("materials") or "[]")
+        except (ValueError, TypeError):
+            h["materials"] = []
+        try:
+            h["recipe"] = json.loads(h.get("recipe") or "null")
+        except (ValueError, TypeError):
+            h["recipe"] = None
+        if not isinstance(h["recipe"], dict):
+            h["recipe"] = dict(_EMPTY_RECIPE)
+    return out
+
+
+def _lib_rel(path: str) -> str:
+    """Library-relative spelling of a file path (forward slashes); the
+    normalised absolute path for a file outside every library root. The
+    registry holds three spellings of one root ('D:/Lib\\\\x', 'D:\\\\Lib\\\\x',
+    'D:/Lib/x'), so nothing may compare raw paths."""
+    p = (path or "").replace("\\", "/")
+    low = p.lower()
+    for root in CANONICAL_ROOTS:
+        base = root.as_posix().rstrip("/") + "/"
+        if low.startswith(base.lower()):
+            return p[len(base):]
+    return p
+
+
+def _mesh_keys(rows: list) -> None:
+    """Give every row its stable `key`: the library-relative file path,
+    plus '#<object name>' when that file holds more than one indexed
+    object (a .blend or a multi-object FBX). Ids are positional and change
+    at every import, and (pack, name) is ambiguous for some rows; this
+    pair is unique and survives rebuilds and a move of the library."""
+    count: dict = {}
+    for r in rows:
+        r["_file"] = _lib_rel(r["fbx"])
+        k = r["_file"].lower()
+        count[k] = count.get(k, 0) + 1
+    for r in rows:
+        r["container"] = count[r["_file"].lower()] > 1
+        r["key"] = (r["_file"] + "#" + (r.get("object_name") or r["name"] or "")
+                    if r["container"] else r["_file"])
+
+
+def _mesh_item(r: dict, tier: int) -> dict:
+    """The SHORT list item (~400 bytes): what an agent needs to choose.
+    The material recipe is 60-80% of a full item and only matters for the
+    few meshes that get picked -- ask for it with detail=1 or
+    /api/meshes/item?key=..."""
+    item = {
+        "key": r["key"], "id": r["id"], "name": r["name"], "pack": r["pack"],
+        "source": r["source"], "kind": r["kind"], "fbx": r["fbx"],
+        "on_disk": r["on_disk"],
+        "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],
+        "max_dim_m": r["max_dim"],
+        "height_m": r["bbox_z"],          # the registry is Z-up
+        "triangles": r["triangles"],
+        "texture_count": r["texture_count"],
+        "wired": bool(r.get("wired")),    # a resolved material recipe exists
+        "themes": r["meta"].get("themes") or [],
+        "tier": tier,
+    }
+    if r.get("container"):
+        # the file holds several objects: this one's exact name is needed
+        # to import it (names above are prettified)
+        item["container"] = True
+        item["object_name"] = r.get("object_name") or r["name"]
+    if (r["meta"].get("facets") or {}).get("dim_suspect"):
+        item["dim_suspect"] = True
+    pt = r.get("_ptag")             # the owner's pack tags, when set
+    if pt and pt["styles"]:
+        item["styles"] = pt["styles"]
+    if pt and pt["tags"]:
+        item["pack_tags"] = pt["tags"]
+    return item
+
+
+def _mesh_full(r: dict, tier: int, heavy: dict) -> dict:
+    """The full item: short item + recipe, material names, placement
+    corners and the pre-0.10 aliases (fbx_path, max_dim, view_url)."""
+    h = heavy or {}
+    item = _mesh_item(r, tier)
+    mats = h.get("materials")
+    item.update({
+        "fbx_path": r["fbx"], "max_dim": r["max_dim"],
+        "vertices": h.get("vertices"), "submeshes": h.get("submeshes"),
+        "materials": mats if isinstance(mats, list) else [],
+        "object_name": r.get("object_name") or None,
+        "format": Path(r["fbx"] or "").suffix.lower().lstrip("."),
+        "view_url": "/viewer?file=" + url_quote(r["fbx"] or ""),
+        **_mesh_extras({**r, **h}),
+    })
+    return item
 
 
 def _mesh_extras(r: dict) -> dict:
@@ -1120,9 +1460,10 @@ def _mesh_extras(r: dict) -> dict:
             hero["packed_channels"] = primary["packed_channels"]
     meta = r.get("meta") or {}
     return {
-        "dim_suspect": bool((meta.get("facets") or {}).get("dim_suspect")),"recipe": recipe, "hero_textures": hero,
-            "bbox_min": _bbox_triple(r, "bbox_min"),
-            "bbox_max": _bbox_triple(r, "bbox_max")}
+        "dim_suspect": bool((meta.get("facets") or {}).get("dim_suspect")),
+        "recipe": recipe, "hero_textures": hero,
+        "bbox_min": _bbox_triple(r, "bbox_min"),
+        "bbox_max": _bbox_triple(r, "bbox_max")}
 
 
 def _bbox_triple(r: dict, prefix: str):
@@ -1131,49 +1472,69 @@ def _bbox_triple(r: dict, prefix: str):
     return None if all(v is None for v in vals) else vals
 
 
+def _spread_packs(entries: list) -> None:
+    """Order AND matches by relevance, then deal them out pack by pack.
+
+    Results used to be sorted by pack name: weak matches from an early
+    pack came before exact ones, and for 'wall' 44 of the first 50 came
+    from one pack out of 945 matches. Within a tier every pack now
+    contributes its best match first, then its second best, and so on."""
+    entries.sort(key=lambda e: (e["tier"], -e["score"], len(e["r"]["name"] or ""),
+                                (e["r"]["name"] or "").lower(),
+                                e["r"]["pack"] or ""))
+    seen: dict = {}
+    for e in entries:
+        k = (e["tier"], e["r"]["pack"])
+        e["turn"] = seen.get(k, 0)
+        seen[k] = e["turn"] + 1
+    entries.sort(key=lambda e: (e["tier"], e["turn"]))     # stable
+
+
 def api_meshes(params: dict) -> dict:
     """Geometry-aware mesh search.
 
-    Filters: q (name/tags/themes, stem-aware), pack, source, theme,
-    min_dim/max_dim (metres, on the largest axis), min_h/max_h (bbox Z:
-    the registry is Z-up), max_tri (triangle budget), textures=1 (only
-    textured), sort. Size and triangle filters exclude rows without that
-    measurement (unknown triangles are NULL) and disclose the count as
-    `unmeasured_excluded`.
+    Filters: q (name words, stem-aware, '-word' excludes; the owner's pack
+    tags count as words), pack, source, kind, theme, style (the owner's
+    pack tags: Photorealistic, Stylized, Low Poly; a comma list needs
+    all), min_dim/max_dim (metres, on the largest axis),
+    min_h/max_h (bbox Z: the registry is Z-up), max_tri (triangle
+    budget), textures=1 (only textured), sort, page, size. Items are SHORT
+    by default; detail=1 adds recipe, material names and corners. Size
+    and triangle filters exclude rows without that measurement (unknown
+    triangles are NULL) and disclose the count as `unmeasured_excluded`.
     """
-    q = (params.get("q") or [""])[0].strip().lower()
-    pack = (params.get("pack") or [""])[0]
-    source = (params.get("source") or [""])[0]
-    theme = (params.get("theme") or params.get("themes") or [""])[0]
+    P = _Params(params)
+    q_raw = P.s("q").strip()
+    q = q_raw.lower()
+    pack = P.s("pack")
+    source = P.s("source")
+    kind = P.s("kind")
+    theme = P.s("theme", "themes")
+    want_styles = []
+    for s in P.s("style", "styles").split(","):
+        if s.strip():
+            m = pack_tags.marker(s)
+            if not m:
+                P.warn(f"style={s.strip()!r} is not a style; use one of: "
+                       f"{', '.join(pack_tags.MARKERS)} (0 results)")
+            want_styles.append(m)
+    min_dim, max_dim = P.num("min_dim", 0.0), P.num("max_dim", 1e9)
+    min_h, max_h = P.num("min_h", 0.0), P.num("max_h", 1e9)
+    max_tri = P.num("max_tri", 1e12)
+    only_tex = P.flag("textures")
+    detail = P.flag("detail")
+    sort = P.s("sort")
+    page, size = P.page_size(20)
+    if sort and sort not in _MESH_SORTS:
+        P.warn(f"sort={sort!r} is not supported and was ignored; "
+               f"use one of: {', '.join(_MESH_SORTS)}")
+        sort = ""
 
-    def _f(name: str, default: float = 0.0) -> float:
-        try:
-            return float((params.get(name) or [str(default)])[0])
-        except ValueError:
-            return default
-
-    min_dim, max_dim = _f("min_dim"), _f("max_dim", 1e9)
-    min_h, max_h = _f("min_h"), _f("max_h", 1e9)
-    max_tri = _f("max_tri", 1e12)
-    only_tex = (params.get("textures") or [""])[0] == "1"
-    sort = (params.get("sort") or ["name"])[0]
-    try:
-        page = max(1, int((params.get("page") or ["1"])[0]))
-    except ValueError:
-        page = 1
-    try:
-        size = min(500, max(8, int((params.get("size") or ["50"])[0])))
-    except ValueError:
-        size = 50
-
-    words = [{s for s in _stems(t) if len(s) >= 2}   # drop 1-char tokens
-             for t in re.findall(r"[^\W_]+", q, re.UNICODE)]
-    words = [w for w in words if w]
-    qstems: set = set().union(*words)
-    if q and not qstems:
+    query = _query(q_raw, P)
+    if query.empty:
         # every token was dropped -- match nothing, never the whole library
-        return {"total": 0, "exact": 0, "mode": "and", "page": page,
-                "size": size, "q": q, "items": []}
+        return P.done({"total": 0, "exact": 0, "mode": "and", "page": page,
+                       "size": size, "q": q, "items": []})
 
     # a dimension/height/triangle filter is a MEASUREMENT query: rows
     # without that measurement must be EXCLUDED, never silently passed
@@ -1183,34 +1544,36 @@ def api_meshes(params: dict) -> dict:
     tri_filter = max_tri < 1e12
     unmeasured = 0
 
-    def _mesh_item(r, tier):
-        return {
-            "id": r["id"], "name": r["name"], "pack": r["pack"],
-            "source": r["source"], "kind": r["kind"],
-            "fbx": r["fbx"], "fbx_path": r["fbx"],
-            "on_disk": r["on_disk"], "triangles": r["triangles"],
-            "vertices": r["vertices"], "submeshes": r["submeshes"],
-            "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],
-            "max_dim_m": r["max_dim"], "max_dim": r["max_dim"],
-            "height_m": r["bbox_z"],          # the registry is Z-up
-            "materials": r["materials"] if isinstance(r["materials"], list)
-                         else [],
-            "texture_count": r["texture_count"],
-            "view_url": "/viewer?file=" + url_quote(r["fbx"]),
-            "themes": r["meta"].get("themes") or [],
-            **_mesh_extras(r),
-            "tier": tier,
-        }
+    rows = _mesh_light_rows()
+    pack = P.pick("pack", pack, {r["pack"] for r in rows})
+    kind = P.pick("kind", kind, {r["kind"] for r in rows})
+    source = P.pick("source", source, {r["source"] for r in rows})
+    pack_l, kind_l, source_l = pack.lower(), kind.lower(), source.lower()
+    # theme=: one theme or a comma list (any of them); names as listed by
+    # /api/meshes/themes, letter case ignored
+    themes = set()
+    if theme:
+        have = {t for r in rows for t in (r["meta"].get("themes") or [])}
+        themes = {P.pick("theme", t, have) for t in theme.split(",")
+                  if t.strip()}
 
-    items = []
-    or_items = []
-    for r in _mesh_rows():
-        if pack and r["pack"] != pack:
+    matched = []        # every query word matches
+    partial = []        # only some do: served as OR fallback
+    for r in rows:
+        if pack and (r["pack"] or "").lower() != pack_l:
             continue
-        if source and r["source"] != source:
+        if source and (r["source"] or "").lower() != source_l:
             continue
-        if theme and theme not in (r["meta"].get("themes") or []):
+        if kind and (r["kind"] or "").lower() != kind_l:
             continue
+        meta = r["meta"]
+        if themes and not themes & set(meta.get("themes") or []):
+            continue
+        pt = r.get("_ptag")
+        if want_styles and not (pt and all(s in pt["styles"]
+                                           for s in want_styles)):
+            continue
+        ptw = pt["words"] if pt else ()
         if dim_filter or h_filter:
             if not r["max_dim"]:
                 unmeasured += 1
@@ -1229,70 +1592,177 @@ def api_meshes(params: dict) -> dict:
                 continue
         if only_tex and not r["texture_count"]:
             continue
-        name_l = (r["name"] or "").lower()
-        searchable = set(r["tags"]) | set(r["meta"].get("stems") or []) \
-            | set(r["meta"].get("themes") or [])
-        if qstems:
-            # AND first ("cobblestone medieval"); if the whole query then
-            # yields nothing, fall back to OR tiers ("lamp sign hydrant"
-            # is a list, not a phrase). OR rows are reserved for fallback.
-            hits = _word_hits(words, name_l, searchable)
-            if not all(hits):
-                if not any(hits):
-                    continue
-                or_items.append(r)
-                continue
-            q_tier = 1 if min(hits) == 2 else 2
-        items.append(_mesh_item(r, q_tier if qstems else 0))
-    fallback_ranked = False
-    if not items and or_items and qstems:
-        # OR fallback, ranked by token RARITY (inverse frequency among the
-        # fallback rows): a row hitting the selective token ('cobblestone',
-        # ~24 rows) outranks one hitting only the broad token ('medieval',
-        # ~1400 rows). Name hits count double.
-        for r in or_items:
-            toks = {x for x in qstems
-                    if _name_hit(x, (r["name"] or "").lower())
-                    or x in (set(r["tags"])
-                             | set(r["meta"].get("stems") or [])
-                             | set(r["meta"].get("themes") or []))}
-            e = _mesh_item(r, 3)
-            e["_toks"] = toks
-            items.append(e)
-        freq: dict = {}
-        for e in items:
-            for t in e["_toks"]:
-                freq[t] = freq.get(t, 0) + 1
-        items.sort(key=lambda e: -sum(
-            (2.0 if _name_hit(t, e["name"].lower()) else 1.0) / freq[t]
-            for t in e["_toks"]))
-        for e in items:
-            e.pop("_toks", None)
-        fallback_ranked = True
-    if sort == "max_dim":
-        items.sort(key=lambda x: -(x["max_dim_m"] or 0))
-    elif sort == "triangles":                 # unknown (NULL) counts last
-        items.sort(key=lambda x: (x["triangles"] is None,
-                                  x["triangles"] or 0))
-    elif not fallback_ranked:
-        # default alphabetical order; after a rarity-ranked OR fallback it
-        # would destroy the ranking we just computed
-        items.sort(key=lambda x: (x["pack"], x["name"].lower()))
-    total = len(items)
-    exact = sum(1 for e in items if e.get("tier", 0) < 3)
+        name = r.get("_mname") or r["name"] or ""
+        if not query:
+            if not (query.exclude and tm.excluded(
+                    query, name, tm.searchable(r["tags"], meta.get("stems"),
+                                               meta.get("themes")),
+                    tm.searchable(meta.get("ctx"), ptw))):
+                matched.append({"r": r, "tier": 0, "score": 0, "_hits": []})
+            continue
+        ctx = tm.searchable(r["tags"], meta.get("stems"), meta.get("themes"))
+        extra = tm.searchable(meta.get("ctx"), ptw)
+        if tm.excluded(query, name, ctx, extra):
+            continue
+        hits = tm.hits(query, name, ctx, extra)
+        if all(hits):
+            matched.append({"r": r, "tier": tm.tier(hits),
+                            "score": sum(hits) + tm.bonus(query, name),
+                            "_hits": hits})
+        elif any(hits):
+            partial.append({"r": r, "tier": 3, "score": sum(hits),
+                            "_hits": hits})
+
+    mode = "and"
+    if query and not matched and partial:
+        # AND found nothing: the query was a list, not a phrase ("lamp sign
+        # hydrant"). Serve rows that hit SOME word, ranked by word rarity.
+        matched = partial
+        tm.rarity_rank(matched, query)
+        mode = "or-fallback"
+
+    # max_dim = largest first (the 0.x meaning), -max_dim = smallest first;
+    # triangles = fewest first, -triangles = most first. Unmeasured rows
+    # (size 0 / triangles NULL) always come last.
+    if sort in ("max_dim", "-max_dim"):
+        sign = -1 if sort == "max_dim" else 1
+        matched.sort(key=lambda e: (not e["r"]["max_dim"],
+                                    sign * (e["r"]["max_dim"] or 0)))
+    elif sort in ("triangles", "-triangles"):
+        sign = 1 if sort == "triangles" else -1
+        matched.sort(key=lambda e: (e["r"]["triangles"] is None,
+                                    sign * (e["r"]["triangles"] or 0)))
+    elif sort == "name" or not query:
+        matched.sort(key=lambda e: (e["r"]["pack"] or "",
+                                    (e["r"]["name"] or "").lower()))
+    elif mode == "and":
+        _spread_packs(matched)
+    # (an OR fallback keeps its rarity order)
+
+    total = len(matched)
+    exact = total if mode == "and" else 0
     lo = (page - 1) * size
-    resp = {"total": total,
-            "exact": exact if qstems else total,
-            "mode": ("or-fallback" if qstems and exact == 0 and total
-                     else "and"),
-            "page": page, "size": size, "q": q,
-            "items": items[lo:lo + size]}
+    window = matched[lo:lo + size]
+    not_returned = []
+    if detail:
+        items, not_returned = _full_items(
+            [(e["r"], e["tier"]) for e in window], P)
+    else:
+        items = [_mesh_item(e["r"], e["tier"]) for e in window]
+    resp = {"total": total, "exact": exact, "mode": mode,
+            "page": page, "size": size, "q": q, "items": items}
+    if not_returned:
+        resp["not_returned"] = not_returned
+    if query and total > len(items):
+        # where the matches are: narrow with pack= instead of paging
+        by_pack: dict = {}
+        for e in matched:
+            by_pack[e["r"]["pack"]] = by_pack.get(e["r"]["pack"], 0) + 1
+        resp["packs"] = [{"pack": k, "n": v} for k, v in sorted(
+            by_pack.items(), key=lambda kv: (-kv[1], kv[0] or ""))[:10]]
+    _suggest(resp, query, rows, lambda r: r["name"] or "",
+             matched[0]["tier"] if matched else 0)
     if dim_filter or h_filter or tri_filter:
         # disclose the hidden set: rows excluded because no measurement
         # exists (the agent should know it is filtering over measured
         # assets only, and how much it cannot see)
         resp["unmeasured_excluded"] = unmeasured
-    return resp
+    return P.done(resp)
+
+
+_FULL_BUDGET = 80_000      # bytes of full records per answer (~20k tokens)
+_FULL_MAX_KEYS = 50
+
+
+def _full_items(entries: list, P=None) -> tuple:
+    """Full records for (row, tier) pairs, kept under _FULL_BUDGET bytes.
+
+    One building's recipe can be 100 KB; ten of them were a 240 KB answer
+    that an agent's tool limit (about 25,000 tokens) turned into an error.
+    Records past the budget are not dropped silently: their keys come
+    back in `not_returned`, to ask for again."""
+    heavy = _mesh_heavy([r["id"] for r, _ in entries])
+    items, rest, used = [], [], 0
+    for r, tier in entries:
+        if rest:
+            rest.append(r["key"])
+            continue
+        item = _mesh_full(r, tier, heavy.get(r["id"]))
+        n = len(json.dumps(item, ensure_ascii=False))
+        if items and used + n > _FULL_BUDGET:
+            rest.append(r["key"])
+            continue
+        items.append(item)
+        used += n
+    if rest and P is not None:
+        P.warn(f"{len(rest)} full record(s) not returned to keep this answer "
+               f"under ~{_FULL_BUDGET // 4000}k tokens: ask again for the keys "
+               "in not_returned")
+    return items, rest
+
+
+def api_meshes_item(params: dict) -> dict:
+    """Full items (recipe, material names, placement corners) for the
+    meshes an agent has CHOSEN: ?key=<key> (repeatable) or ?id=<id>.
+    Search results stay short; this is where the recipe lives.
+
+    A key is percent-encoded as a whole in a URL ('#' -> %23). A key that
+    arrives cut at its '#' (a client dropped the fragment) names a
+    multi-object file: the answer then lists that file's object keys as
+    `candidates` instead of a bare 404. An absolute file path is accepted
+    as a key."""
+    P = _Params(params)
+    keys = [k for k in (params.get("key") or []) if k]
+    P.used.update(("key", "id"))
+    ids = set()
+    for v in params.get("id") or []:
+        try:
+            ids.add(int(v))
+        except ValueError:
+            P.warn(f"id={v!r} is not a number: ignored")
+    if not keys and not ids:
+        return {"error": "bad id", "detail": "pass key=<key from a search "
+                                               "result> (repeatable) or id="}
+    over = keys[_FULL_MAX_KEYS:]
+    keys = keys[:_FULL_MAX_KEYS]
+    rows = _mesh_light_rows()
+    by_key = {r["key"].lower(): r for r in rows}
+    by_file: dict = {}
+    for r in rows:
+        if r.get("container"):
+            by_file.setdefault(r["_file"].lower(), []).append(r["key"])
+    found, missing, candidates = [], [], {}
+    for k in keys:
+        norm = _lib_rel(k).lower()
+        r = by_key.get(norm)
+        if r is None:
+            if norm in by_file:
+                candidates[k] = by_file[norm][:50]
+            missing.append(k)
+        elif r not in found:
+            found.append(r)
+    for r in rows:
+        if r["id"] in ids and r not in found:
+            found.append(r)
+    if not found:
+        out = {"error": "not found", "missing": missing}
+        if candidates:
+            out["candidates"] = candidates
+            out["detail"] = ("a key that names a multi-object file was cut at "
+                             "its '#': percent-encode the whole key (%23)")
+        return P.done(out)
+    items, rest = _full_items([(r, 0) for r in found], P)
+    out = {"items": items}
+    if over:
+        P.warn(f"at most {_FULL_MAX_KEYS} keys per call: {len(over)} not "
+               "looked up (in not_returned)")
+    if rest or over:
+        out["not_returned"] = rest + over
+    if missing:
+        out["missing"] = missing
+    if candidates:
+        out["candidates"] = candidates
+    return P.done(out)
 
 
 def api_meshes_packs() -> dict:
@@ -1310,17 +1780,34 @@ def api_meshes_packs() -> dict:
       "no-manifest"  no manifest file at all (CGTrader, TurboSquid, ...)
     The label is written by the importer (meshes_import), so a v1 manifest can
     no longer be mistaken for a pack that has no manifest on disk.
+
+    `purchases` lists every purchase record whose folder holds files of the
+    pack: its store images are the cheapest way to see what a pack looks
+    like (/api/collection/item?id=...). Several purchases can share one
+    folder, so it is a list, never a guess.
     """
     conn = db.connect(_DB_PATH)
     rows = [dict(r) for r in conn.execute(
         "SELECT pack, source, COUNT(*) AS n, MAX(max_dim) AS tallest "
         "FROM meshes GROUP BY pack, source ORDER BY pack")]
+    # the distinct folders of each pack's files (one sample file named only
+    # the first sub-pack of a pack that spans several purchases)
+    folders: dict = {}
+    for pk, fbx in conn.execute("SELECT DISTINCT pack, fbx FROM meshes"):
+        d = (fbx or "").replace("\\", "/").rsplit("/", 1)[0].lower()
+        folders.setdefault(pk, set()).add(d)
     wiring: dict = {}
     if conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
                     "AND name='mesh_pack_wiring'").fetchone():
         wiring = {r["pack"]: dict(r) for r in conn.execute(
             "SELECT pack, slots_total, slots_resolved, wiring_ratio, method "
             "FROM mesh_pack_wiring")}
+    try:
+        bought = [dict(r) for r in conn.execute(
+            "SELECT id, name, image_count, asset_path FROM collection "
+            "WHERE asset_path IS NOT NULL AND asset_path != ''")]
+    except sqlite3.OperationalError:
+        bought = []         # no purchases table / older schema
     conn.close()
     for r in rows:
         w = wiring.get(r["pack"]) or {}
@@ -1338,19 +1825,97 @@ def api_meshes_packs() -> dict:
         if r.get("tallest") and (not m.get("tallest")
                                  or r["tallest"] > m["tallest"]):
             m["tallest"] = r["tallest"]
+    look = pack_tags.Lookup(_tag_rows())
     for m in merged.values():
         m["source"] = "+".join(sorted(set(m.pop("sources")))) or None
+        dirs = folders.get(m["pack"]) or set()
+        styles, ptags = set(), []
+        for d in dirs:
+            pt = look(_lib_rel(d) + "/f")
+            if pt:
+                styles.update(pt["styles"])
+                ptags += [x for x in pt["tags"] if x not in ptags]
+        if styles:
+            m["styles"] = [s for s in pack_tags.MARKERS if s in styles]
+        if ptags:
+            m["pack_tags"] = ptags
+        hits = []
+        for b in bought:
+            base = (b["asset_path"] or "").replace("\\", "/").rstrip("/").lower()
+            if base and any(d == base or d.startswith(base + "/")
+                            for d in dirs):
+                # the image files themselves: /api/collection/item?id=
+                hits.append({"id": b["id"], "name": b["name"],
+                             "images": b["image_count"]})
+        if hits:
+            m["purchases"] = hits
     return {"packs": sorted(merged.values(), key=lambda m: m["pack"] or "")}
 
 
 def api_meshes_themes() -> dict:
     counts: dict = {}
-    for r in _mesh_rows():
+    for r in _mesh_light_rows():
         for t in (r["meta"].get("themes") or []):
             counts[t] = counts.get(t, 0) + 1
     return {"themes": [{"name": k, "n": v}
                        for k, v in sorted(counts.items(),
                                           key=lambda kv: -kv[1])]}
+
+
+_skel_cache: dict = {}          # (path, size, mtime) -> bone names
+
+
+def _skeletons() -> dict:
+    """pack id -> the skeleton(s) its clips use and the character files of
+    this library whose bones match.
+
+    The tree used to tell every agent that all clips retarget onto ONE
+    body. A library with clips for two rig families (Character Creator
+    and the Unreal mannequin) had a third of its clips share no bone name
+    with that body, while fitting characters sat unlinked in a model pack.
+    A few dozen file reads on the first call, cached afterwards."""
+    prefix = _anim_prefix()
+    conn = db.connect(_DB_PATH)
+    try:
+        files = conn.execute(
+            "SELECT a.id AS pack, f.relative_path AS rel FROM assets a "
+            "JOIN asset_files f ON f.asset_id = a.id "
+            "WHERE substr(a.id, 1, ?) = ? AND (lower(f.relative_path) LIKE "
+            "'%.fbx' OR lower(f.relative_path) LIKE '%.bvh')",
+            (len(prefix), prefix)).fetchall()
+        try:
+            bodies = [r[0] for r in conn.execute(
+                "SELECT DISTINCT fbx FROM meshes WHERE kind='SkeletalMesh' "
+                "AND on_disk=1 AND fbx != ''")]
+        except sqlite3.OperationalError:
+            bodies = []         # no mesh table yet
+    finally:
+        conn.close()
+    if not files:
+        return {}           # no clips: no reason to open a character file
+    root = CANONICAL_ROOTS[0]
+    # no answer cache: pack_skeletons re-checks size + mtime of the few
+    # files it samples, so a replaced clip is read again instead of being
+    # answered stale until the next restart
+    clips: dict = {}
+    for r in files:
+        folder = str(root / r["pack"][len("pack::"):])
+        clips.setdefault(folder, []).append(str(root / r["rel"]))
+    rig = _rig_rel()
+    if rig:
+        bodies.append(str(root / rig))
+    found = skeleton.pack_skeletons(clips, bodies, cache=_skel_cache)
+    out = {}
+    for folder, records in found.items():
+        pack = "pack::" + _lib_rel(folder)
+        out[pack] = [{"family": rec["family"], "bones": rec["bones"],
+                      # a folder-per-clip layout lists hundreds of names
+                      "subfolders": rec["subfolders"][:24],
+                      "subfolders_total": len(rec["subfolders"]),
+                      "clips": rec["clips"],
+                      "bodies": sorted(_lib_rel(b) for b in rec["bodies"])}
+                     for rec in records]
+    return out
 
 
 def api_anim_tree() -> dict:
@@ -1365,78 +1930,102 @@ def api_anim_tree() -> dict:
         "GROUP BY a.id ORDER BY a.id",
         (len(prefix), prefix)).fetchall()
     conn.close()
+    skel = _skeletons()
+    folders = []
+    for r in rows:
+        f = {"pack": r["id"], "folder": r["id"][len("pack::"):],
+             "name": r["name"], "clips": r["n"]}
+        if r["id"] in skel:
+            f["skeletons"] = skel[r["id"]]
+        folders.append(f)
     return {"rig_body": _rig_rel() or None,
-            "rig_note": "skeleton-only clips retarget onto this body "
-                        "(bone-name match, CC rig family); null = no rig "
-                        "in this library, clips show as bones",
-            "folders": [
-        {"pack": r["id"],
-         "folder": r["id"][len("pack::"):],
-         "name": r["name"], "clips": r["n"]}
-        for r in rows]}
+            "rig_note": "the preview body for Character-Creator-family "
+                        "clips. It does NOT fit every clip: each folder "
+                        "lists its own `skeletons` (family, bone count and "
+                        "the character files in this library whose bones "
+                        "match); null = no rig in this library",
+            "folders": folders}
 
 
 def api_anim_clips(params: dict) -> dict:
-    """All animation clips with tiered search:
-    tier 1 = query in title, tier 2 = related concept in title,
-    tier 3 = query in folder name; no query -> everything, folder-sorted."""
-    q = (params.get("q") or [""])[0].strip().lower()
+    """All animation clips, searched like every other section: every query
+    word must match (tier 1 = all as whole words of the clip title, tier 2
+    = via folder words, part of a longer word or an alias); only when no
+    clip matches every word are single-word matches served (tier 3,
+    mode 'or-fallback'). Clips of a RELATED motion ('walk' -> jog, run)
+    follow at the end as tier 3 and are not counted in `exact`."""
+    P = _Params(params)
+    q_raw = P.s("q").strip()
+    q = q_raw.lower()
     prefix = _anim_prefix()
-    packs = [p for p in ((params.get("packs") or [""])[0]).split("|")
-             if p.startswith(prefix)]
-    try:
-        page = max(1, int((params.get("page") or ["1"])[0]))
-    except ValueError:
-        page = 1
-    try:
-        size = min(500, max(8, int((params.get("size") or ["24"])[0])))
-    except ValueError:
-        size = 24
+    # `packs`: pack ids, pipe-separated; the folder spelling the tree also
+    # shows ('<section>/Walks') is accepted. An entry that names no pack
+    # was dropped silently and the UNFILTERED list came back.
+    packs = []
+    for p in (x.strip() for x in P.s("packs").split("|")):
+        if p:
+            packs.append(p if p.startswith("pack::") else "pack::" + p)
+    page, size = P.page_size(24)
     conn = db.connect(_DB_PATH)
+    if packs:
+        known = {r[0] for r in conn.execute(
+            "SELECT id FROM assets WHERE substr(id, 1, ?) = ?",
+            (len(prefix), prefix))}
+        for p in packs:
+            if p not in known:
+                P.warn(f"packs: {p!r} is no animation pack (ids: /api/anim/tree)")
+        # none left: match nothing (no pack has the empty id), never all
+        packs = [p for p in packs if p in known] or [""]
     where = ("substr(a.id, 1, ?) = ? AND "
              "(lower(f.relative_path) LIKE '%.fbx' OR lower(f.relative_path) LIKE '%.bvh')")
     args: list = [len(prefix), prefix]
     if packs:
         where += " AND a.id IN (%s)" % ",".join("?" * len(packs))
         args += packs
-    rows = conn.execute(
+    rows = [dict(r) for r in conn.execute(
         "SELECT f.relative_path AS rel, f.file_size AS bytes, a.id AS pack "
         "FROM asset_files f JOIN assets a ON a.id = f.asset_id "
-        "WHERE " + where + " ORDER BY f.relative_path", args).fetchall()
+        "WHERE " + where + " ORDER BY f.relative_path", args)]
     conn.close()
 
-    qtokens = re.findall(r"[^\W_]+", q, re.UNICODE)
-    qstems: set = set()
-    for t in qtokens:
-        qstems |= _stems(t) | _synonyms(t)
-    if q and not qstems:
+    query = _query(q_raw, P)
+    if query.empty:
         # every token was dropped (single letters / punctuation) -- such a
-        # query must match nothing, never the whole library. The guard every
-        # other item endpoint has; the animation section lacked it.
-        return {"total": 0, "page": page, "size": size, "q": q, "clips": []}
-    related: set = set()
-    if qstems:
-        for cst in _cluster_stems():
-            if qstems & cst:
-                related |= cst
-        related -= qstems
-
-    items = []
+        # query must match nothing, never the whole library
+        return P.done({"total": 0, "exact": 0, "mode": "and", "page": page,
+                       "size": size, "q": q, "clips": []})
     for r in rows:
-        base = r["rel"].rsplit("/", 1)[-1]
-        stem = base.rsplit(".", 1)[0].lower()
-        folder = r["pack"][len(prefix):]
-        if qstems:
-            if any(s in stem for s in qstems):
-                tier = 1
-            elif any(s in stem for s in related):
-                tier = 2
-            elif any(s in folder for s in qstems):
-                tier = 3
-            else:
-                continue
-        else:
-            tier = 0
+        base = r["rel"].rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        r["folder"] = r["pack"][len(prefix):]
+        r["title"] = " ".join(
+            {"f": "female", "m": "male"}.get(t, t)
+            for t in re.split(r"[-_]+", base))
+        # the folder path between the section and the file carries meaning
+        # the file name does not ('UN05/Root' = UE5 skeleton, root motion)
+        path = r["rel"].rsplit("/", 1)[0] if "/" in r["rel"] else ""
+        r["_ctx"] = tm.searchable(tm.stems(path), tm.tokens(path))
+    name_of = lambda r: r["title"]                            # noqa: E731
+    matched, mode = _match_rows(rows, query, name_of, lambda r: r["_ctx"],
+                                glued=True)
+    exact = len(matched) if (query and mode == "and") else 0
+    if not query:
+        exact = len(matched)
+    if mode == "and":
+        matched.sort(key=lambda e: (e["tier"], -e["score"], e["r"]["folder"],
+                                    e["r"]["title"]))
+    if query:
+        # related motions from the same concept cluster, after the matches
+        related = _related(query, ANIM_CLUSTERS)
+        have = {id(e["r"]) for e in matched}
+        tail = [{"r": r, "tier": 3} for r in rows if id(r) not in have
+                and related & tm.name_forms(r["title"])[0]
+                and not tm.excluded(query, r["title"], r["_ctx"])]
+        tail.sort(key=lambda e: (e["r"]["folder"], e["r"]["title"]))
+        matched = matched + tail
+    items = []
+    lo = (page - 1) * size
+    for e in matched[lo:lo + size]:
+        r = e["r"]
         key = _preview_key(r["rel"])
         pv = (PREVIEW_DIR / (key + ".webm")).is_file()
         rate = None
@@ -1446,19 +2035,18 @@ def api_anim_clips(params: dict) -> dict:
                 rate = json.loads(meta.read_text(encoding="utf-8")).get("rate")
             except (OSError, ValueError):
                 rate = None
-        title_tokens = [t if t not in ("f", "m") else ("female" if t == "f" else "male")
-                        for t in re.split(r"[-_]+", base.rsplit(".", 1)[0])]
-        title = " ".join(title_tokens)
-        items.append({"rel": r["rel"], "pack": r["pack"], "folder": folder,
-                      "title": title,
-                      "name": title,   # alias: every other section uses name
-                      "bytes": r["bytes"], "tier": tier,
+        items.append({"rel": r["rel"], "pack": r["pack"], "folder": r["folder"],
+                      "title": r["title"],
+                      "name": r["title"],   # alias: every other section uses name
+                      "bytes": r["bytes"], "tier": e["tier"],
                       "preview": pv, "rate": rate, "key": key})
-    items.sort(key=lambda x: (x["tier"], x["folder"], x["title"]))
-    total = len(items)
-    lo = (page - 1) * size
-    return {"total": total, "page": page, "size": size, "q": q,
-            "clips": items[lo:lo + size]}
+    total = len(matched)
+    resp = {"total": total, "exact": exact,
+            "mode": "or-fallback" if (query and exact == 0 and total) else "and",
+            "page": page, "size": size, "q": q, "clips": items}
+    _suggest(resp, query, rows, name_of,
+             matched[0]["tier"] if matched else 0)
+    return P.done(resp)
 
 
 # ---------------------------------------------------------------------------
@@ -1902,7 +2490,7 @@ async function load(){
   const media=c.preview
    ?`<video src="/preview/${c.key}.webm?v=${PVV}" autoplay muted loop playsinline data-rate="${c.rate||''}"></video>`
    :`<div class="ph" data-rel="${esc(c.rel)}">&#9654;</div>`;
-  const badge=d.q&&c.tier===2?`<span class="badge">related</span>`:'';
+  const badge=d.q&&c.tier===3?`<span class="badge">related</span>`:'';
   return `<div class="card" data-rel="${esc(c.rel)}" data-pack="${esc(c.pack)}">${badge}
    <div class="media">${media}</div>
    <div class="cap" title="${esc(c.folder)} / ${esc(c.rel)}"><span class="t">${esc(c.title)}</span></div></div>`;}).join('');
@@ -2146,6 +2734,7 @@ a.tile:hover img{filter:grayscale(0) brightness(1);transform:scale(1.06)}
 </a>
 <div class="cut" style="left:25%"></div><div class="cut" style="left:50%"></div>
 <div class="cut" style="left:75%"></div>
+<a href="/tags" style="position:fixed;bottom:6px;right:66px;font-size:12px;letter-spacing:.04em;color:#8b93a1;text-decoration:none;z-index:9">pack tags</a>
 <a href="/registry" style="position:fixed;bottom:6px;right:10px;font-size:10px;letter-spacing:.04em;color:#333a44;text-decoration:none;z-index:9">registry</a>
 </body></html>"""
 
@@ -2392,7 +2981,7 @@ padding:10px 20px;display:none;gap:10px;align-items:center;flex-wrap:wrap}
 padding:2px 10px;margin-top:7px;cursor:pointer;font-size:12px}
 .btn3d:hover{background:#2b3b50}
 </style></head><body>
-<header><a href="/" style="color:#8b93a1;text-decoration:none;margin-right:2px">&larr; home</a><h1>AI Asset Registry</h1><a href="/animation" style="color:#7cc4ff;text-decoration:none">Animations</a>
+<header><a href="/" style="color:#8b93a1;text-decoration:none;margin-right:2px">&larr; home</a><h1>AI Asset Registry</h1><a href="/animation" style="color:#7cc4ff;text-decoration:none">Animations</a><a href="/tags" style="color:#7cc4ff;text-decoration:none">Pack tags</a>
 <input id="q" placeholder="search name / tags / path ..." size="34">
 <select id="domain"><option value="">all domains</option></select>
 <select id="style"><option value="">all styles</option></select>
@@ -2430,7 +3019,7 @@ async function load(){const p=new URLSearchParams({q:q.value,domain:domain.value
  <div class="body"><div class="name">${esc(a.name)}</div>
  <div class="chips">
  <span class="chip domain">${esc(a.domain)}</span><span class="chip">${esc(a.sub_category)}</span>
- <span class="chip style">${esc(a.style)}</span>${a.validation==='human_verified'?'<span class="chip human">human</span>':''}</div>
+ <span class="chip style">${esc(a.style)}</span>${a.styles.includes('Low Poly')?'<span class="chip style">Low Poly</span>':''}${a.owner_tagged?'<span class="chip human">yours</span>':''}</div>
  <div class="meta">${esc(a.vendor||'—')} · <a href="/pack?id=${encodeURIComponent(a.id)}">${a.files} files</a> · ${(a.bytes/1e9).toFixed(1)} GB · ${esc(a.formats.slice(0,4).join(', '))}</div>
  <div class="bar"><i style="width:${Math.round((a.confidence||0)*100)}%"></i></div>
  ${a.formats.some(f=>f==='fbx'||f==='bvh')?`<button class="btn3d">3D &gt; play</button>`:''}</div></div>
@@ -2553,6 +3142,13 @@ class Handler(BaseHTTPRequestHandler):
             super().handle_one_request()
         except (ConnectionResetError, BrokenPipeError, TimeoutError):
             self.close_connection = True
+
+    def _json_item(self, payload):
+        """One-record answers: a missing record is a 404 and a bad id a
+        400 -- they used to arrive as HTTP 200 with an error body, which
+        a caller checking only the status read as success."""
+        err = payload.get("error") if isinstance(payload, dict) else None
+        self._json(payload, {"not found": 404, "bad id": 400}.get(err, 200))
 
     def _json(self, payload, code=200):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -2687,6 +3283,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._html(AUDIO_PAGE.encode("utf-8"))
             elif url.path == "/registry":
                 self._html(PAGE.encode("utf-8"))
+            elif url.path == "/tags":
+                self._html(TAGS_PAGE.encode("utf-8"))
+            elif url.path == "/api/pack_tags":
+                self._json(api_pack_tags())
             elif url.path == "/pack":
                 self._html(PACK_PAGE.encode("utf-8"))
             elif url.path == "/animation":
@@ -2702,15 +3302,17 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/collection/items":
                 self._json(api_collection_items(params))
             elif url.path == "/api/collection/item":
-                self._json(api_collection_item(params))
+                self._json_item(api_collection_item(params))
             elif url.path == "/api/textures/tree":
                 self._json(api_textures_tree())
             elif url.path == "/api/textures/items":
                 self._json(api_textures_items(params))
             elif url.path == "/api/textures/item":
-                self._json(api_textures_item(params))
+                self._json_item(api_textures_item(params))
             elif url.path == "/api/meshes":
                 self._json(api_meshes(params))
+            elif url.path == "/api/meshes/item":
+                self._json_item(api_meshes_item(params))
             elif url.path == "/api/meshes/packs":
                 self._json(api_meshes_packs())
             elif url.path == "/api/meshes/themes":
@@ -2720,7 +3322,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/audio/items":
                 self._json(api_audio_items(params))
             elif url.path == "/api/audio/item":
-                self._json(api_audio_item(params))
+                self._json_item(api_audio_item(params))
             elif url.path.startswith("/audiofile"):
                 # audio bytes, jailed to Audio_Assets; Range supported so the
                 # in-page player can seek without downloading 25 MB wavs.
@@ -2972,9 +3574,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad host"}, 403)
         if not self._origin_ok():
             return self._json({"error": "cross-origin request rejected"}, 403)
-        """Bulk human re-tagging: {"ids": [...], "set": {domain|style} | "status"}.
-        Same semantics as the host-app extension: validation_status becomes
-        'human_verified' and confidence 1.0."""
+        """Bulk re-tagging: {"ids": [...], "set": {domain|style} | "status"}.
+        Domain and style are written to the pack tag file; a status marks
+        the pack 'human_verified' with confidence 1.0 in the registry."""
         params = parse_qs(urlparse(self.path).query)
         try:
             path = urlparse(self.path).path
@@ -3007,7 +3609,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": err}, 415)
                 pid = body.get("id") or ""
                 surl = (body.get("url") or "").strip()
-                if not re.fullmatch(r"pack::[\w .()&!',#%-]+", pid):
+                if not re.fullmatch(r"pack::[\w .()&!',#%/+-]+", pid):
                     return self._json({"error": "bad pack id"}, 400)
                 if surl and not (surl.startswith("http://") or surl.startswith("https://")) \
                         or len(surl) > 500:
@@ -3044,47 +3646,72 @@ class Handler(BaseHTTPRequestHandler):
                             or not target.is_file()):
                         return self._json(
                             {"error": "image not in this asset's folder"}, 400)
+                # the RESOLVED path: a relative string was stored as sent
+                stored = str(target) if image else None
                 conn.execute("UPDATE collection SET thumb_override=? WHERE id=?",
-                             (image or None, iid))
+                             (stored, iid))
                 conn.commit()
                 conn.close()
-                return self._json({"ok": True, "thumb": image or None})
+                return self._json({"ok": True, "thumb": stored})
             if path == "/api/collection/tag":
                 body, err = self._json_body()
                 if err:
                     return self._json({"error": err}, 415)
                 return self._json(api_collection_tag(params, body))
+            if path == "/api/pack_tags":
+                body, err = self._json_body()
+                if err:
+                    return self._json({"error": err}, 415)
+                answer, code = api_pack_tags_set(body)
+                return self._json(answer, code)
             if path != "/api/retag":
                 return self._json({"error": "not found"}, 404)
             body, err = self._json_body()
             if err:
                 return self._json({"error": err}, 415)
             ids = [i for i in body.get("ids", [])
-                   if isinstance(i, str) and re.fullmatch(r"pack::[\w .()&!',#%-]+", i)]
-            sets, params = [], []
+                   if isinstance(i, str) and re.fullmatch(r"pack::[\w .()&!',#%/+-]+", i)]
             payload = body.get("set") or {}
-            if payload.get("domain") in DOMAINS:
-                sets.append("domain=?")
-                params.append(payload["domain"])
-            if payload.get("style") in STYLES:
-                sets.append("style=?")
-                params.append(payload["style"])
+            dom = payload.get("domain") if payload.get("domain") in DOMAINS else None
+            sty = payload.get("style")
+            sty = (pack_tags.marker(sty) or (sty if sty in STYLES else None)
+                   if isinstance(sty, str) else None)
             status = body.get("status")
-            if status in ("validated_blender", "validated_unreal"):
-                sets.append("status=?")
-                params.append(status)
-            if not ids or not sets:
+            if status not in ("validated_blender", "validated_unreal"):
+                status = None
+            if not ids or not (dom or sty or status):
                 return self._json({"error": "nothing to do"}, 400)
-            conn = db.connect(_DB_PATH)
-            cur = conn.execute(
-                f"UPDATE assets SET {','.join(sets)}, "
-                f"validation_status='human_verified', confidence_score=1.0, "
-                f"updated_at=CURRENT_TIMESTAMP "
-                f"WHERE id IN ({','.join('?' * len(ids))})",
-                params + ids)
-            conn.commit()
-            updated = cur.rowcount
-            conn.close()
+            updated = 0
+            if dom or sty:
+                # domain and style are the owner's pack tags: they go to
+                # the tag file, which survives a registry rebuild
+                _sync_pack_tags()
+                rows = _tag_rows()
+                for i in ids:
+                    r = rows.get(i[len("pack::"):].lower())
+                    if r is None:
+                        continue
+                    keep = [s for s in r["styles"] if s not in _LOOKS]
+                    styles = (None if not sty else
+                              r["styles"] + ["Low Poly"] if sty == "Low Poly"
+                              else [sty] + keep if sty in _LOOKS else keep)
+                    try:
+                        pack_tags.update(r["folder"], styles=styles,
+                                         domain=dom)
+                    except pack_tags.TagFileBusy as exc:
+                        return self._json({"error": str(exc)}, 409)
+                    updated += 1
+            if status:
+                conn = db.connect(_DB_PATH)
+                cur = conn.execute(
+                    f"UPDATE assets SET status=?, "
+                    f"validation_status='human_verified', confidence_score=1.0, "
+                    f"updated_at=CURRENT_TIMESTAMP "
+                    f"WHERE id IN ({','.join('?' * len(ids))})",
+                    [status] + ids)
+                conn.commit()
+                updated = max(updated, cur.rowcount)
+                conn.close()
             self._json({"updated": updated})
         except Exception as exc:  # noqa: BLE001
             self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
@@ -3158,6 +3785,13 @@ def main(argv=None) -> int:
         print(f"meshes imported: {m_n} records", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"meshes import skipped: {exc}", flush=True)
+    try:
+        added = _sync_pack_tags()
+        if added:
+            print(f"pack tags: {added} new pack(s) listed in "
+                  f"{pack_tags.PATH} (tag them at /tags)", flush=True)
+    except Exception as exc:  # noqa: BLE001 -- a locked file must not stop the app
+        print(f"pack tags not updated: {exc}", flush=True)
     try:
         db.stamp_registry(_DB_PATH, config.LIBRARY_ROOT)   # this library's
     except Exception as exc:  # noqa: BLE001

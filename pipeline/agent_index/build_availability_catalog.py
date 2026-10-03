@@ -8,7 +8,7 @@ non-local assets as non-existent.
 
 Reads the human app's registry READ-ONLY. Writes only into _Agent_Files.
 """
-import sqlite3, os, re, io, json, collections, datetime
+import sqlite3, os, re, io, json, collections
 import sys
 from pathlib import Path
 
@@ -122,7 +122,6 @@ for pid, name, fmts, targets, vendor, style, domain, sub in cur.fetchall():
     reg_packs.append({"id": pid, "name": name, "formats": fmts, "targets": targets,
                       "vendor": vendor, "style": style, "domain": domain, "sub": sub})
 
-now = datetime.datetime.now().isoformat(timespec="seconds")
 records = []
 counts = collections.Counter()
 
@@ -149,85 +148,15 @@ for name, store, tg, traw, seller, price, purchased, imgs, folder, url, tags in 
                           else "OWNED BUT NOT LOCAL - re-download from product_url, then convert"),
     })
 
-# on-disk sections that are NOT part of the collection (already-local extras)
-local_only = [{"name": s, "availability": "local", "folders": len(fs),
-               "model_files": sum(f["model_files"] for f in fs)}
-              for s, fs in sections.items()
-              if sum(f["model_files"] for f in fs) > 0]
-
 refuse_near_empty(len(records), os.path.join(AGENT, "availability.jsonl"))
-
-json.dump({"schema": "pharos.agent.availability/v1", "generated": now, "root": LIB,
-           "note": ("availability is the key field: 'local' = usable now; "
-                    "'owned-not-downloaded' = owned with gallery + product URL, "
-                    "the agent may request it"),
-           "counts": dict(counts), "items": records, "local_sections": local_only},
-          io.open(os.path.join(AGENT, "availability.json"), "w", encoding="utf-8"),
-          indent=1, ensure_ascii=False)
 
 with io.open(os.path.join(AGENT, "availability.jsonl"), "w", encoding="utf-8") as fh:
     for r in records:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-# ---- readable index ------------------------------------------------------
-L = []
-A = L.append
-A("# Asset Availability - Agent Index")
-A("")
-A("> Machine-readable companions: **`availability.jsonl`** (one JSON per owned item) and")
-A("> **`availability.json`** (same data + counts + on-disk sections).")
-A("> Generated %s | Root: `%s`" % (now, LIB))
-A("")
-A("## Read this first")
-A("The library has TWO kinds of asset and an agent must never confuse them:")
-A("")
-A("| `availability` | Meaning | What an agent may do |")
-A("|---|---|---|")
-A("| `local` | present on disk now | use it directly |")
-A("| `owned-not-downloaded` | **owned, gallery + product URL only** | plan around it, and ASK THE HUMAN to download it |")
-A("")
-A("A pack that is `owned-not-downloaded` is **not** missing from the library. It is one")
-A("download away. The gallery images in `gallery_dir` are there so an agent can judge")
-A("what the pack contains before asking for it.")
-A("")
-A("## Totals")
-A("")
-A("| availability | items |")
-A("|---|---:|")
-for k, v in counts.most_common():
-    A("| `%s` | %d |" % (k, v))
-A("")
-A("## Owned but not downloaded (the extraction queue)")
-A("")
-A("| Item | Store | Type | Images | Product URL |")
-A("|---|---|---|---:|---|")
-for r in sorted(records, key=lambda x: (x["store"], x["name"])):
-    if r["availability"] != "owned-not-downloaded":
-        continue
-    A("| %s | %s | %s | %d | %s |" % (r["name"], r["store"], r["type_group"] or "",
-                                     r["gallery_images"] or 0, r["product_url"] or ""))
-A("")
-A("## Already on disk")
-A("")
-A("| Item | Store | Local folder | Model files |")
-A("|---|---|---|---:|")
-for r in sorted(records, key=lambda x: x["name"]):
-    if r["availability"] != "local":
-        continue
-    A("| %s | %s | `%s` | %d |" % (r["name"], r["store"], r["local_path"], r["local_model_files"]))
-A("")
-A("## On-disk sections not represented in the purchase collection")
-A("")
-A("| Section | Folders | Model files |")
-A("|---|---:|---:|")
-for r in sorted(local_only, key=lambda x: -x["model_files"]):
-    A("| %s | %d | %d |" % (r["name"], r["folders"], r["model_files"]))
-A("")
-io.open(os.path.join(AGENT, "AVAILABILITY_AGENT_INDEX.md"), "w", encoding="utf-8").write("\n".join(L))
-
 print("items:", len(records))
 print("counts:", dict(counts))
-print("wrote availability.json, availability.jsonl, AVAILABILITY_AGENT_INDEX.md")
+print("wrote availability.jsonl")
 print()
 print("=== owned-not-downloaded, by store ===")
 for s, n in collections.Counter(r["store"] for r in records if r["availability"] == "owned-not-downloaded").most_common():

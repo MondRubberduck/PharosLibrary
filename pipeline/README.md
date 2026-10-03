@@ -111,10 +111,10 @@ makes the scout report whether a specific pack was already removed.
 ### 4. `agent_index/` — regenerate the app's index files (pure Python)
 ```bash
 cd pipeline/agent_index
-python build_agent_index.py          # packs.json + models.jsonl + md
-python build_availability_catalog.py # owned vs on-disk availability
-python gen_index.py && python gen_md.py             # audio (folder root)
-python gen_tex_index.py && python gen_tex_md.py     # textures
+python build_agent_index.py          # models.jsonl
+python build_availability_catalog.py # availability.jsonl: owned vs on disk
+python gen_index.py                  # audio (section folder)
+python gen_tex_index.py              # textures (section folder)
 ```
 Audio/texture roots come from the config sections
 (`AGENT_AUDIO_ROOT` / `AGENT_TEX_ROOT` override). After any of these:

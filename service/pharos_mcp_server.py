@@ -10,11 +10,21 @@ Or add to any MCP client config:
 
 Tools exposed:
     pharos_stats()                — library overview
-    pharos_search_meshes()        — geometry search (dims, themes, budget)
-    pharos_search_textures()      — PBR texture sets
-    pharos_search_audio()         — sounds by keyword/category
-    pharos_search_collection()    — owned purchases (local + not-downloaded)
+    pharos_tree(section)          — the valid filter values of a section
     pharos_list_packs()           — exact pack names for filtering
+    pharos_search_meshes()        — geometry search (dims, themes, budget)
+    pharos_get_meshes(keys)       — recipe + materials of chosen meshes
+    pharos_search_textures()      — PBR texture sets
+    pharos_get_texture(id)        — one set's files and map roles
+    pharos_search_audio()         — sounds by keyword/category/length
+    pharos_search_animations()    — animation clips
+    pharos_search_collection()    — owned purchases (local + not-downloaded)
+
+Every search tool calls the SAME function as the HTTP API (browse.api_*):
+one search implementation, one answer. This server used to carry its own
+matcher (raw substring over the stored JSON), which disagreed with HTTP
+on most queries -- 'crates' found 0 here and 63 there, and the word
+'themes' matched every mesh because it is a key in the stored metadata.
 
 Reads the same SQLite registry as the HTTP server; safe to run alongside it.
 """
@@ -28,7 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # .../service
-from asset_service import config, db  # noqa: E402
+from asset_service import browse, config, db  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP
 
@@ -60,10 +70,25 @@ def _db() -> sqlite3.Connection:
     return conn
 
 
-def _tokens(query: str) -> list:
-    """Query words with 1-char tokens dropped (the HTTP API's guard): a
-    bare 'a' substring-matched every row. All dropped -> no match."""
-    return [t for t in query.lower().split() if len(t) >= 2]
+def _api(fn, **params) -> dict:
+    """Run one HTTP-API function against the configured registry."""
+    _db().close()                       # preflight: clear error, creates nothing
+    query = {}
+    for k, v in params.items():
+        if v is None or v == "" or v is False:
+            continue
+        query[k] = ([str(x) for x in v] if isinstance(v, (list, tuple))
+                    else ["1" if v is True else str(v)])
+    old = browse._DB_PATH
+    browse._DB_PATH = str(config.DB_PATH)
+    try:
+        return fn(query) if fn.__code__.co_argcount else fn()
+    finally:
+        browse._DB_PATH = old
+
+
+def _page(limit: int) -> int:
+    return min(100, max(1, int(limit or 20)))
 
 
 def _animation_clip_count(conn: sqlite3.Connection) -> int:
@@ -102,98 +127,103 @@ def pharos_stats() -> str:
 
 
 @mcp.tool()
+def pharos_tree(section: str) -> str:
+    """The valid filter values of one section, with counts -- look here
+    before filtering, the names are specific to this library.
+
+    Args:
+        section: 'meshes' (themes), 'textures' (groups/subs), 'audio'
+                 (categories/subs), 'animations' (folders, skeletons),
+                 'collection' (stores/groups/categories)
+    """
+    fn = {"meshes": browse.api_meshes_themes,
+          "textures": browse.api_textures_tree,
+          "audio": browse.api_audio_tree,
+          "animations": browse.api_anim_tree,
+          "collection": browse.api_collection_tree}.get(
+              (section or "").strip().lower())
+    if fn is None:
+        return json.dumps({"error": "unknown section", "sections": [
+            "meshes", "textures", "audio", "animations", "collection"]})
+    return json.dumps(_api(fn), ensure_ascii=False)
+
+
+@mcp.tool()
+def pharos_list_packs() -> str:
+    """List exact mesh pack names with counts, material-wiring health and,
+    where the library has one, the linked purchase record (its store
+    images show what the pack looks like). Use the names with pack=."""
+    return json.dumps(_api(browse.api_meshes_packs), ensure_ascii=False)
+
+
+@mcp.tool()
 def pharos_search_meshes(
     query: Optional[str] = None,
     pack: Optional[str] = None,
     theme: Optional[str] = None,
+    style: Optional[str] = None,
+    kind: Optional[str] = None,
     min_dim: Optional[float] = None,
     max_dim: Optional[float] = None,
     min_height: Optional[float] = None,
     max_height: Optional[float] = None,
     max_triangles: Optional[int] = None,
     with_textures: bool = False,
+    sort: Optional[str] = None,
     limit: int = 20,
+    page: int = 1,
 ) -> str:
     """Search 3D meshes with real-world dimensions in metres.
 
     Args:
-        query: name/pack/tag search -- every word (2+ chars) must appear
-               as a case-insensitive substring; no stemming or synonyms
-               (the HTTP /api/meshes search does stems + OR fallback)
-        pack: exact pack name (get names from pharos_list_packs)
-        theme: controlled vocabulary (building, door, prop, street, scifi,
-               medieval, fantasy, nature, wall, light, destruction, ...)
-        min_dim/max_dim: filter on largest bbox axis in METRES
+        query: name words; plurals and aliases are understood, '-word'
+               excludes. Every word must match; if no mesh matches all
+               words the answer falls back to any word and says so
+               (mode 'or-fallback', tier 3)
+        pack: pack name (pharos_list_packs)
+        theme: one of the library's themes (pharos_tree('meshes'))
+        style: the owner's pack tags: Photorealistic, Stylized, Low Poly
+               (a comma list needs all, e.g. 'Stylized,Low Poly'); packs
+               the owner has not tagged match no style
+        kind: e.g. StaticMesh, SkeletalMesh, blend-object
+        min_dim/max_dim: filter on the largest bbox axis in METRES
         min_height/max_height: filter on bbox Z (height; the registry is
                Z-up) in METRES
         max_triangles: budget filter
         with_textures: only meshes with texture links
-        limit: max results (1-100)
+        sort: relevance (default with a query), name, max_dim (largest
+              first), -max_dim (smallest first), triangles (fewest
+              first), -triangles (most first); unmeasured rows last
+        limit: results per page (1-100); page: 1-based
 
-    Returns JSON: name, pack, fbx_path (absolute), bbox_m, triangles,
-    material recipe (hero_textures), themes, tier.
+    Returns JSON {total, exact, mode, items, warnings?}. Items are SHORT:
+    key, name, pack, fbx (absolute path), bbox_m, height_m, triangles,
+    wired (a material recipe exists), themes, tier, and the owner's
+    `styles` / `pack_tags` when the pack is tagged. Fetch the recipe of
+    the meshes you pick with pharos_get_meshes(keys).
     """
-    conn = _db()
-    try:
-        where, args = [], []
-        if pack:
-            where.append("pack = ?")
-            args.append(pack)
-        if theme:
-            where.append("meta LIKE ?")
-            args.append(f'%"{theme}"%')
-        if min_dim is not None:
-            where.append("max_dim >= ?")
-            args.append(min_dim)
-        if max_dim is not None:
-            where.append("max_dim <= ?")
-            args.append(max_dim)
-        if min_height is not None:
-            where.append("bbox_z >= ?")
-            args.append(min_height)
-        if max_height is not None:
-            where.append("bbox_z <= ?")
-            args.append(max_height)
-        if max_triangles is not None:
-            where.append("triangles <= ?")
-            args.append(max_triangles)
-        if with_textures:
-            where.append("texture_count > 0")
-        w = (" WHERE " + " AND ".join(where)) if where else ""
-        rows = [dict(r) for r in conn.execute(
-            f"SELECT * FROM meshes{w} ORDER BY pack, name",
-            args)]
-        # text filter first, THEN limit (SQL LIMIT would sample the wrong
-        # alphabetical window before the query filter runs)
-        if query:
-            tokens = _tokens(query)
-            def hit(r):
-                nl = (r["name"] or "").lower() + " " + (r["pack"] or "").lower()
-                tags = (r.get("tags") or "") + (r.get("meta") or "")
-                return all(t in nl or t in tags.lower() for t in tokens)
-            rows = [r for r in rows if tokens and hit(r)]
-        # total is the TRUE match count; items are the limited window
-        total = len(rows)
-        rows = rows[:min(100, max(1, limit))]
-        out = []
-        for r in rows:
-            meta = json.loads(r.get("meta") or "{}")
-            recipe = json.loads(r.get("recipe") or "null") if r.get("recipe") else None
-            prim = recipe.get("primary") if recipe else None
-            out.append({
-                "name": r["name"], "pack": r["pack"], "source": r["source"],
-                "fbx_path": r["fbx"], "triangles": r["triangles"],
-                "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],
-                "max_dim_m": r["max_dim"],
-                "texture_count": r["texture_count"],
-                # `mask` is not a named material map (HTTP drops it too)
-                "hero_textures": ({k: v for k, v in prim.items()
-                                   if k != "mask"} if prim else prim),
-                "themes": meta.get("themes", []),
-            })
-        return json.dumps({"total": total, "items": out})
-    finally:
-        conn.close()
+    return json.dumps(_api(
+        browse.api_meshes, q=query, pack=pack, theme=theme, style=style,
+        kind=kind,
+        min_dim=min_dim, max_dim=max_dim, min_h=min_height,
+        max_h=max_height, max_tri=max_triangles, textures=with_textures,
+        sort=sort, size=_page(limit), page=page), ensure_ascii=False)
+
+
+@mcp.tool()
+def pharos_get_meshes(keys: list[str]) -> str:
+    """Full records for meshes you have CHOSEN: per-slot material recipe
+    (`recipe.slots[]`), hero_textures, material names, placement corners
+    (bbox_min/bbox_max), object_name for objects inside a .blend /
+    multi-object file. Ask for 5-10 at a time (large buildings one at a
+    time): an answer stops at about 20k tokens and lists the keys it had
+    no room for in `not_returned`.
+
+    Args:
+        keys: the `key` values from pharos_search_meshes results
+    """
+    return json.dumps(_api(browse.api_meshes_item, key=list(keys or [])),
+                      ensure_ascii=False)
 
 
 @mcp.tool()
@@ -202,54 +232,36 @@ def pharos_search_textures(
     group: Optional[str] = None,
     sub: Optional[str] = None,
     resolution: Optional[str] = None,
+    min_px: Optional[int] = None,
+    has: Optional[str] = None,
     limit: int = 20,
+    page: int = 1,
 ) -> str:
-    """Search PBR texture sets (albedo/normal/roughness maps).
+    """Search PBR texture sets.
 
     Args:
-        query: name search (e.g. 'brick', 'wet asphalt', 'marble')
-        group: '4K Textures Gumroad' or 'Misc'
-        sub: subcategory (4K_Physical_Walls, 4K_Physical_Wood, ...)
-        resolution: '4K', '2K', '1K', '512'
-        limit: max results
+        query: name words (e.g. 'brick', 'wet asphalt', 'marble')
+        group / sub: values from pharos_tree('textures')
+        resolution: '8K', '4K', '2K', '1K' -- MEASURED from the files
+        min_px: minimum pixel size of the larger side (e.g. 4096)
+        has: comma-separated map roles that must exist (e.g. 'height')
+        limit: results per page (1-100); page: 1-based
+
+    Items: id, name, res, px (measured), maps (roles present), tier.
+    File paths per role: pharos_get_texture(id).
     """
-    conn = _db()
-    try:
-        where, args = [], []
-        if group:
-            where.append("grp = ?")
-            args.append(group)
-        if sub:
-            where.append("sub = ?")
-            args.append(sub)
-        w = (" WHERE " + " AND ".join(where)) if where else ""
-        rows = [dict(r) for r in conn.execute(
-            f"SELECT * FROM textures{w} ORDER BY grp, sub, name",
-            args)]
-        if query:
-            tokens = _tokens(query)
-            def hit(r):
-                nl = (r["name"] or "").lower()
-                tags = (r.get("tags") or "") + (r.get("meta") or "")
-                return all(t in nl or t in tags.lower() for t in tokens)
-            rows = [r for r in rows if tokens and hit(r)]
-        # filter BEFORE the limit (the mesh tool documents this exact
-        # rule): truncating first made resolution filters return false
-        # "no 4K sets" answers on libraries over the limit. The meta blob
-        # is matched CASE-INSENSITIVELY: '"res": "4K"' must match "4k".
-        if resolution:
-            rows = [r for r in rows
-                    if resolution.lower() in (r.get("meta") or "").lower()]
-        total = len(rows)
-        rows = rows[:min(100, max(1, limit))]
-        out = [{
-            "name": r["name"], "group": r["grp"], "sub": r["sub"],
-            "file_count": r["file_count"],
-            "bytes": r["bytes"], "folder": r["folder"],
-        } for r in rows]
-        return json.dumps({"total": total, "items": out})
-    finally:
-        conn.close()
+    return json.dumps(_api(
+        browse.api_textures_items, q=query, group=group, sub=sub,
+        res=resolution, min_px=min_px, has=has, size=_page(limit),
+        page=page), ensure_ascii=False)
+
+
+@mcp.tool()
+def pharos_get_texture(id: int) -> str:
+    """One texture set in full: every file path, the map role of each
+    file (`maps`), measured pixel size, folder."""
+    return json.dumps(_api(browse.api_textures_item, id=id),
+                      ensure_ascii=False)
 
 
 @mcp.tool()
@@ -258,52 +270,45 @@ def pharos_search_audio(
     category: Optional[str] = None,
     sub: Optional[str] = None,
     min_duration: Optional[float] = None,
+    max_duration: Optional[float] = None,
     limit: int = 20,
+    page: int = 1,
 ) -> str:
     """Search audio files (SFX, ambience, music, foley).
 
     Args:
-        query: name search (e.g. 'rain', 'explosion', 'crowd')
-        category: Alarms, Ambiance, Animals, Explosions, Foley, Footsteps,
-                  Gunshots, Horror, Human, Impacts, Machines, Music, Nature,
-                  SciFi, Transitions, UI, Vehicles, Weapons, Weather
-        min_duration: minimum length in seconds (e.g. 30 for looping beds)
-        limit: max results
+        query: name words (e.g. 'rain', 'explosion', 'crowd')
+        category / sub: values from pharos_tree('audio')
+        min_duration / max_duration: length in seconds
+        limit: results per page (1-100); page: 1-based
+
+    Items: id, name, cat, sub, dur (seconds), path (absolute), tier.
     """
-    conn = _db()
-    try:
-        where, args = [], []
-        if category:
-            where.append("cat = ?")
-            args.append(category)
-        if sub:
-            where.append("sub = ?")
-            args.append(sub)
-        if min_duration is not None:
-            where.append("dur >= ?")
-            args.append(min_duration)
-        w = (" WHERE " + " AND ".join(where)) if where else ""
-        rows = [dict(r) for r in conn.execute(
-            f"SELECT * FROM audio{w} ORDER BY cat, name",
-            args)]
-        if query:
-            tokens = _tokens(query)
-            def hit(r):
-                nl = (r["name"] or "").lower()
-                tags = (r.get("tags") or "") + (r.get("meta") or "")
-                return all(t in nl or t in tags.lower() for t in tokens)
-            rows = [r for r in rows if tokens and hit(r)]
-        total = len(rows)
-        rows = rows[:min(100, max(1, limit))]
-        out = [{
-            "name": r["name"], "category": r["cat"], "sub": r["sub"],
-            "duration_s": r["dur"], "sample_rate": r["sr"],
-            "channels": r["ch"],
-            "path": str(config.AUDIO_ROOT / (r["rel"] or "")),
-        } for r in rows]
-        return json.dumps({"total": total, "items": out})
-    finally:
-        conn.close()
+    out = _api(browse.api_audio_items, q=query, cat=category, sub=sub,
+               min_dur=min_duration, max_dur=max_duration,
+               size=_page(limit), page=page)
+    for i in out.get("items") or []:
+        i["path"] = str(config.AUDIO_ROOT / (i.get("rel") or ""))
+    return json.dumps(out, ensure_ascii=False)
+
+
+@mcp.tool()
+def pharos_search_animations(
+    query: Optional[str] = None,
+    limit: int = 20,
+    page: int = 1,
+) -> str:
+    """Search animation clips (FBX/BVH) by title words; folder names
+    count too ('root', a pack name). pharos_tree('animations') lists the
+    folders and which skeleton each uses.
+
+    Items: title, rel (path under the library), path (absolute), tier.
+    Clips of a related motion follow the matches as tier 3.
+    """
+    out = _api(browse.api_anim_clips, q=query, size=_page(limit), page=page)
+    for c in out.get("clips") or []:
+        c["path"] = str(config.LIBRARY_ROOT / (c.get("rel") or ""))
+    return json.dumps(out, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -312,62 +317,21 @@ def pharos_search_collection(
     store: Optional[str] = None,
     availability: Optional[str] = None,
     limit: int = 20,
+    page: int = 1,
 ) -> str:
     """Search owned purchases (the vault). Shows what's on disk vs
     owned-but-not-downloaded.
 
     Args:
-        query: name search
-        store: FAB, CGTrader, Leartes, TurboSquid, KitBash3D
+        query: name words
+        store: a store name from pharos_tree('collection')
         availability: 'local' (on disk) or 'notdown' (owned, needs download)
-        limit: max results
+        limit: results per page (1-100); page: 1-based
     """
-    conn = _db()
-    try:
-        where, args = [], []
-        if store:
-            where.append("store = ?")
-            args.append(store)
-        if availability == "local":
-            where.append("availability = 'local'")
-        elif availability == "notdown":
-            where.append("availability != 'local'")
-        w = (" WHERE " + " AND ".join(where)) if where else ""
-        rows = [dict(r) for r in conn.execute(
-            f"SELECT * FROM collection{w} ORDER BY name",
-            args)]
-        if query:
-            tokens = _tokens(query)
-            def hit(r):
-                nl = (r["name"] or "").lower()
-                tags = (r.get("tags") or "") + (r.get("meta") or "")
-                return all(t in nl or t in tags.lower() for t in tokens)
-            rows = [r for r in rows if tokens and hit(r)]
-        total = len(rows)
-        rows = rows[:min(100, max(1, limit))]
-        out = [{
-            "name": r["name"], "store": r["store"],
-            "type": r["type_raw"], "seller": r["seller"],
-            "availability": r["availability"],
-            "asset_path": r["asset_path"], "product_url": r["url"],
-        } for r in rows]
-        return json.dumps({"total": total, "items": out})
-    finally:
-        conn.close()
-
-
-@mcp.tool()
-def pharos_list_packs() -> str:
-    """List exact pack names with mesh counts (wiring ratios: HTTP only).
-    Use this before filtering search_meshes by pack= (names must match)."""
-    conn = _db()
-    try:
-        rows = [dict(r) for r in conn.execute(
-            "SELECT pack, source, COUNT(*) AS n, MAX(max_dim) AS tallest "
-            "FROM meshes GROUP BY pack, source ORDER BY pack")]
-        return json.dumps({"packs": rows})
-    finally:
-        conn.close()
+    return json.dumps(_api(
+        browse.api_collection_items, q=query, store=store,
+        avail=availability, size=_page(limit), page=page),
+        ensure_ascii=False)
 
 
 if __name__ == "__main__":

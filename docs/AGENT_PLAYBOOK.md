@@ -71,8 +71,8 @@ the library does not cover a need, COVER IT, and say so.
 
 ### Texture priority list
 
-1. **Linked textures exist** (recipe `hero_textures`, disk-verified)
-   → USE them.
+1. **Linked textures exist** (the mesh is `wired`; its recipe comes
+   from `/api/meshes/item?key=`, disk-verified) → USE them.
 2. **Other fitting textures exist** (search the textures section by
    material keyword: brick/metal/wood/…) → USE the best set.
 3. **Nothing fits** → **GENERATE.** Procedural material nodes in
@@ -84,7 +84,9 @@ the library does not cover a need, COVER IT, and say so.
 - **Blender is not on PATH by default on Windows** — use the absolute
   path (`"C:\Program Files\Blender Foundation\Blender 5.x\blender.exe"`)
   or add it to PATH yourself.
-- Query first (`/api/meshes`, `/api/textures/items`, …), author a
+- Query first (`/api/meshes`, `/api/textures/items`, …): search answers
+  are short lists. For the meshes you CHOOSE, fetch the full records in
+  one call (`/api/meshes/item?key=<key>&key=<key>…`), then author a
   `pharos.scene/v1` manifest (Y-up rotations, per-slot recipes via
   `recipe.slots[]`, `textures[]` for ground planes), validate +
   `--budget` (heed the warnings), probe risky FBX files with

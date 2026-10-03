@@ -23,10 +23,8 @@ _DEFAULTS = {
     "sections": {
         "animation": "Animation",
         "textures": "Textures_Materials",
-        "textures_main": "Textures_Materials/4K_Textures_Gumroad",
         "audio": "Audio_Assets",
         "collection": "Collected Files",
-        "collected_galleries": "Collected Files",
     },
     "agent_files": "_Agent_Files",
     # external thumbnail cache dir NAMES mirrored into the thumb index
@@ -112,9 +110,7 @@ NETWORK = _CFG["network"]
 DASHBOARD = _CFG["dashboard"]
 
 # per-section absolute roots
-ANIM_ROOT = LIBRARY_ROOT / SECTIONS["animation"]
 TEX_ROOT = LIBRARY_ROOT / SECTIONS["textures"]
-TEX_MAIN = LIBRARY_ROOT / SECTIONS["textures_main"]
 AUDIO_ROOT = LIBRARY_ROOT / SECTIONS["audio"]
 COLLECTION_ROOT = LIBRARY_ROOT / SECTIONS["collection"]
 
@@ -128,8 +124,3 @@ COLLECTION_ROOT = LIBRARY_ROOT / SECTIONS["collection"]
 CSV_PATH = COLLECTION_ROOT / _CFG.get("collection_csv",
                                       "3D_Assets_Overview.csv")
 AVAILABILITY_JSONL = AGENT_FILES / "availability.jsonl"
-AUDIO_JSONL = AUDIO_ROOT / "library_files.jsonl"
-AUDIO_INDEX = AUDIO_ROOT / "library_index.json"
-MODELS_JSONL = AGENT_FILES / "models.jsonl"
-KB3D_JSONL = AGENT_FILES / "kb3d_models.jsonl"
-NATIVE_JSONL = AGENT_FILES / "native_models.jsonl"

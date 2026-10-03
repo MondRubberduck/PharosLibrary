@@ -98,5 +98,6 @@ governs setup.
 - PowerShell aliases `curl` — use `curl.exe`.
 - Blender commands always carry `--background --factory-startup`.
 - The suite is the contract: `tests/test_db.py`, `test_uasset_parser.py`,
-  `test_pack_verify.py`, `test_fresh_install.py` must stay green; a bug
+  `test_pack_verify.py`, `test_search.py`, `test_fresh_install.py` must
+  stay green; a bug
   fix without a regression check is not done.

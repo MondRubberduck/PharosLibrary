@@ -17,23 +17,34 @@ token cost.** Operating manual (setup + build doctrine):
 | Interface | How | Use for |
 |---|---|---|
 | HTTP JSON API | `GET http://127.0.0.1:8765/api/*` (localhost, no auth) | everything — search, details, file bytes, previews |
-| MCP server | `python -m service.pharos_mcp_server` (stdio, 6 tools) | agents with MCP support (Claude Desktop, Cursor, …) |
+| MCP server | `python -m service.pharos_mcp_server` (stdio, 10 tools) | agents with MCP support (Claude Desktop, Cursor, …) |
 | Web dashboard | `http://127.0.0.1:8765` in a browser | human verification of what the agent found |
 | CLI | `python pharos.py init/serve`, `scanner.py`, `indexer.py`, `scene_manifest.py` | onboarding, ingestion, validation, builds |
 | Agent index files | `<library_root>/_Agent_Files/*.md`, `*.jsonl` | offline reading when the server is down |
 
 ## 2. What the agent can ask
 
-- **Geometry**: `/api/meshes` — find meshes by free-text query AND'd over
-  name/tags/themes, by metre dimensions (`min_dim/max_dim/min_h/max_h`),
-  pack, source, theme, triangle budget (`max_tri`), texture presence.
-  Responses carry absolute FBX paths, real bounding boxes, triangle counts,
-  material recipes (`recipe`, `hero_textures`), a 3D preview URL, and
-  `dim_suspect` flags. `/api/meshes/packs` lists exact pack names first so
-  `pack=` filters never fail on a guessed name. `bbox_m` is [x, y, z]
-  metres, Z-up, and `height_m` = `bbox_m[2]` (scan rows keep their raw
-  file axes); mesh and texture `id`s are session handles, so persist
-  `fbx` / `rel` / `(pack, name)` instead.
+- **Geometry**: `/api/meshes` — find meshes by free-text query (every
+  word must match; plurals, aliases and `-word` exclusions understood;
+  best match first), by metre dimensions (`min_dim/max_dim/min_h/max_h`),
+  pack, source, kind, theme, triangle budget (`max_tri`), texture presence.
+  Answers are SHORT items (about 130 tokens each): stable `key`, absolute
+  file path, real bounding box, triangle count, themes, whether a material
+  recipe exists (`wired`). The full record of a chosen mesh — material
+  recipe (`recipe`, `hero_textures`), material names, placement corners,
+  3D preview URL — comes from `/api/meshes/item?key=` (or `detail=1`).
+  `/api/meshes/packs` lists the pack names, their wiring health and the
+  linked purchases (whose store images show what the pack looks like).
+  Full records are size-budgeted (about 20k tokens per answer; the rest
+  is listed in `not_returned`), and a key goes into a URL fully
+  percent-encoded (`#` → `%23`).
+  `bbox_m` is [x, y, z] metres, Z-up, and `height_m` = `bbox_m[2]` (scan
+  rows keep their raw file axes). Persist `key`: `id`s are session
+  handles and `(pack, name)` is not unique.
+- **Honest answers**: every list answer says how it matched (`mode`,
+  `exact`, per-item `tier`), which parameters it could not use
+  (`warnings`) and which library words are close to an unknown query word
+  (`did_you_mean`).
 - **Recipe contract**: `recipe.slots[].maps[]` serves every texture the
   material references, flagged instead of dropped: `source`
   (`override | default | unnamed`, best first), `placeholder: true` for
@@ -42,17 +53,22 @@ token cost.** Operating manual (setup + build doctrine):
   assume one) and `mask` (never an ORM). A slot with `resolved: false`
   (+ `unresolved_reason`) keeps the FBX's own material. `recipe.primary`
   and `hero_textures` are the builder's own pick: no placeholders, no
-  `default`-source emissive/opacity.
-- **Textures**: `/api/textures/items` — PBR sets by group/subcategory/query;
-  item detail lists every map file in the set.
-- **Audio**: `/api/audio/items` — sounds by category/subcategory/duration;
+  `default`-source emissive/opacity/height, and no `default`-source map
+  for a role the slot's own packed map supplies (roughness / metallic /
+  ao then come from `packed_channels`).
+- **Textures**: `/api/textures/items` — PBR sets by group/subcategory/query,
+  with the MEASURED pixel size (`px`, `res`; filters `res=`, `min_px=`)
+  and the map roles each set has (`has=height`); item detail lists every
+  file and its role (`maps`).
+- **Audio**: `/api/audio/items` — sounds by category/subcategory/duration
+  (`min_dur`, `max_dur`);
   in-browser playback via `/audiofile` (HTTP Range).
 - **Purchases**: `/api/collection/items` — owned products by store/type,
   with the three-state availability model (`local` = on disk,
   `owned-not-downloaded` = purchasable, never silently substituted).
 - **Animations**: `/api/anim/clips` — clip search across packs, played as
   rendered webm previews or live three.js viewer.
-- **Search semantics** (all four item endpoints): AND-first over stemmed
+- **Search semantics** (all five item endpoints): AND-first over stemmed
   tokens with word-boundary short-token matching, automatic ranked
   OR-fallback, per-item `tier` and response `mode`/`exact` so an agent can
   tell exact hits from adjacent ones. Queries whose tokens are all too
@@ -152,7 +168,7 @@ pipelines own.
 - Animation previews are rendered by a browser once per clip (the server
   only caches webm files); headless servers never render previews.
 - The `pipeline/` index writers refuse to overwrite a live index with a
-  near-empty one: `build_agent_index.py` (`packs.json` and `models.jsonl`),
+  near-empty one: `build_agent_index.py` (`models.jsonl`),
   `build_availability_catalog.py`, `build_kb3d_index.py`, `gen_index.py`,
   `gen_tex_index.py`, `promote_native.py` and `promote_blends.py` all stop
   with `FATAL: only N ... -- refusing to overwrite the live index` when a

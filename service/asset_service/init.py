@@ -351,11 +351,9 @@ def build_config(report: dict, registry_dir: Path) -> dict:
     # scanner from the config (the contract), not from re-detection
     cfg["scan_folders"] = [f for f in report["mesh_folders"]
                            if f not in csv_folders]
-    # textures_main: keep the default relative name; harmless if absent
     coll_csv = report["catalog_csvs"][0] if report["catalog_csvs"] else None
     if coll_csv:
         cfg["sections"]["collection"] = Path(coll_csv).parent.name
-        cfg["sections"]["collected_galleries"] = Path(coll_csv).parent.name
     # CSV filename: config.CSV_PATH reads `collection_csv` and defaults to
     # "3D_Assets_Overview.csv" (config.py:123). Record the detected name only
     # when it DIFFERS from that default -- so a config whose CSV carries the

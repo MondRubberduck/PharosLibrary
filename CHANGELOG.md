@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.10.0 (2026-10-03)
+A review of how an agent actually browses the library (live tests against a 12,280-model library, each finding re-checked by a second reviewer, then a second review of the changes) drove this release: search answers are now short, ordered by relevance and honest about what they did.
+
+**Breaking for callers of `/api/meshes`:** list items are short by default. The material recipe, material names and placement corners moved to `/api/meshes/item?key=` (or `detail=1`). One-record endpoints no longer repeat every field under `item` and answer 404 / 400 instead of HTTP 200 with an error body. `/api/meshes/packs` lists `purchases` (a list) instead of one guessed purchase. The generated agent docs describe the new shape; regenerate them with `python pharos.py docs`.
+
+**Search finds what is there**
+- **One matcher for everything.** Models, textures, sounds, animation clips, purchases and the MCP tools cut and compare words through one module (`textmatch.py`). The same helpers used to exist five times with different rules.
+- **Plurals, codes and CamelCase.** `benches` found nothing in a library with 38 benches. Both sides now fold plurals and -ing/-ed forms; a code such as `lod0`, `v2` or `9mm` stays one word; `PropFuseBox` is read as three words; a model is also found by its own object name (`SM_Wagon`).
+- **Glued words.** Adjacent query words are also tried glued (`street lamp` finds `Streetlamp`, `sci fi door` meets the theme `scifi`), and a pack name that glues two words is searchable by that word.
+- **Whole words.** `car` no longer returns cardboard and carpets. A word may start or end a longer word with three letters left over (`chair` in `Armchair`), never sit inside one (`round` is not `Ground`, `male` is not `female`); listed compounds reach their parts (`door` finds `Doorway`).
+- **Natural queries.** Connective words (`with`, `of`, `and` ...) are optional: `door with frame` needs `door` and `frame`.
+- **Aliases and exclusion.** `couch` finds sofas in every section (aliases used to work for animation only). `chair -office` excludes; it used to return only office chairs. Hyphenated exclusions (`-sci-fi`) and exclusion-only queries work.
+- **Best match first.** Model results were sorted by pack name. They are now ordered by match quality, and within one quality every pack contributes its best match first, so one pack cannot fill the first page.
+- **More to search by.** Material names, the vendor's folder names and the pack name are searchable context for a model (`rust` found 24 models by name; about 300 more carry a rust material). Scanned models get the folders between the scanned folder and the file as context.
+- **Animation search.** Every word must match, as in the other sections, with `mode` and `exact` in the answer; folder words count (`root climb`). It used to match any word as a substring and sort by name.
+- **Fallback ranking.** When no row matches every word, textures, sounds and purchases now rank the partial matches by word rarity, as documented; they were listed alphabetically.
+
+**Answers are short and say what they did**
+- **Short model items.** A page of 8 models was about 40 KB (one reached 569 KB) because every item carried its full recipe; it is about 4 KB now. `size` goes down to 1; the default page is 20.
+- **Full records on request, within a budget.** `/api/meshes/item?key=` returns the recipes of chosen models and stops at about 20k tokens; keys it had no room for come back in `not_returned`.
+- **A stable `key` per model:** the library-relative file path, plus `#object` inside multi-object files. A key cut at its `#` by an HTTP client gets the file's object keys as `candidates`.
+- **`warnings`.** An unknown parameter, an unreadable value or a filter value the library does not have is reported; the answer used to come back unfiltered or empty and look authoritative. Filter values ignore letter case; `avail=owned-not-downloaded` works. New filters: `kind`, `max_dur`, `res`, `min_px`, `has`, descending sorts (directions documented).
+- **`did_you_mean`.** A query word the section does not contain comes back with the closest words it does contain (`barel` → `barrel`).
+- **`packs`.** A model answer counts its matches per pack, and the pack list links each pack to the purchase records whose folder holds its files; their store images show what the pack looks like.
+- **Faster.** A model query no longer loads and decodes every recipe in the registry: about 0.3 s instead of 0.8 s on 12,280 models.
+
+**Facts are measured, not guessed**
+- **Texture resolution.** The label came from the folder name; 2,000 sets called "4K" hold 2048-pixel files. Pharos now reads the pixel size from the file header (`px`, `res`) and says which file is which map (`maps`, with glossiness kept apart from roughness). The thumbnail is a preview image when the set has one.
+- **Animation skeletons.** `/api/anim/tree` lists, per folder, the skeleton its clips use and the character files in the library whose bones match. It used to name one body for all clips, which shared no bone with a third of them.
+- **Themes.** Theme keywords matched letters inside words and inside pack names: most "vehicle" models were bushes and cardboard, and a pack with "house" in its name made every one of its models a building. Themes now match whole words; a pack name only contributes the setting it spells out. Sound themes no longer inherit every keyword of their category.
+- **Material pick.** A master material's default roughness no longer overrides the pack's own packed channel, and a default height map is never the pick. The per-slot `maps` list is unchanged.
+- **One row per file.** A file that a richer source covers (converted pack, Blender-measured model) is served with that row only; its scan row is parked and served again if the richer row goes away. Scanner rows of files nobody else covers survive as before.
+- **Purchases.** A thumbnail choice that cannot be an image path is dropped (one registry held a status word on every row); a choice whose drive is unplugged is kept. Two purchases sharing a folder no longer overwrite each other.
+- **Pack labels.** The sub-category follows the majority of a pack's files (whole words) instead of the first keyword hit; the pack folder's name breaks a tie. Pack tags keep the most frequent words instead of the alphabetically first twelve.
+- **Pack pages.** The pack page, bulk retag and store-URL setter rejected every pack below a section folder (most packs).
+
+**Your own pack tags**
+- **One list, one file.** Every pack has a row in `<agent_files>/pack_tags.csv`: Photorealistic or Stylized, Low Poly (combines with either), a domain and your own words. Tick them on the new dashboard page `/tags` (linked from home and from the registry page), or edit the file in a spreadsheet or text editor; comma, semicolon and tab files and marks like x, 1 or yes are read. The file lives in the library, so it survives a registry rebuild. New packs get a row at the next start; no row is ever removed. Labels you had set in the registry were copied in.
+- **Agents use them.** `/api/meshes?style=Low Poly` (or `Stylized,Low Poly`: all must match) filters models by their pack's tags, query words match the tags (`low poly tree`), and each model and pack in an answer carries `styles` and `pack_tags`. Models of untagged packs have no style; the classifier's guess stays on the pack card only.
+- The registry page's bulk retag writes domain and style to the same file.
+
+**Less work, less code**
+- The indexer no longer reads and hashes each pack's main file on every run (about 2.9 GB on the reference library); nothing read the result.
+- The per-pack texture list is no longer stored per model (13 MB of repeated paths; the recipe holds the real files).
+- Removed: the MCP server's own search code, an unreachable classifier tier, seven unused config constants and two unused config keys.
+- Index writers write only what something reads. Gone: `packs.json` and `MODELS_AGENT_INDEX.md` (`build_agent_index.py`), `availability.json` and `AVAILABILITY_AGENT_INDEX.md` (`build_availability_catalog.py`), the textures `material_sets.jsonl`, the section `AGENT_INDEX.md` guides (`gen_md.py` and `gen_tex_md.py` removed), the `.md.bak-previous` copies of the agent docs, and the registry indexes on `content_hash` / `sha256` (dropped on the next start). Leftover copies from older versions can be deleted.
+
+**MCP**
+- Every tool calls the function behind the matching HTTP endpoint, so both routes give the same answer. New tools: `pharos_tree`, `pharos_get_meshes`, `pharos_get_texture`, `pharos_search_animations`.
+
+**Tests and CI**
+- New suite `tests/test_search.py` (48 checks), run in CI as its own step; CI also runs Python 3.13.
+
 ## 0.9.0 (2026-09-23)
 Release candidate for the public launch. Two scene-building stress tests and a real "stranger machine" run (fresh clone, other Windows laptop, other Python and Blender, messy test library) drove every change. The main setup flow now runs end to end without a single manual workaround.
 

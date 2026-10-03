@@ -23,6 +23,7 @@ from pathlib import Path
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
+from asset_service import textmatch as tm
 
 CSV_PATH = config.CSV_PATH
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
@@ -55,20 +56,8 @@ CREATE INDEX IF NOT EXISTS idx_collection_store ON collection(store);
 
 
 def _tokens(text: str) -> list[str]:
-    """Lowercase word tokens from space/dash/underscore separated text,
-    camelCase aware, with common plural stemming for search recall."""
-    out = []
-    for w in re.findall(r"[A-Za-z0-9]+", text or ""):
-        parts = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", w).lower().split()
-        out.extend(parts)
-    stems = []
-    for w in out:
-        stems.append(w)
-        for suf, cut in (("ing", 3), ("ers", 3), ("er", 2), ("es", 2), ("s", 1)):
-            if w.endswith(suf) and len(w) > len(suf) + 2:
-                stems.append(w[:-cut])
-                break
-    return list(dict.fromkeys(stems))
+    """Searchable stems (the shared rules: textmatch.stems)."""
+    return tm.stems(text)
 
 
 # controlled theme vocabulary -- human-readable AND the algorithm's
@@ -109,22 +98,13 @@ STOPWORDS = {"the", "and", "with", "for", "vol", "pack", "set", "all", "in",
 
 def _words(text: str) -> list[str]:
     """Full lowercase words (human-readable) -- no stemming."""
-    out = []
-    for w in re.findall(r"[A-Za-z0-9]+", text or ""):
-        parts = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", w).lower().split()
-        out.extend(parts)
-    return list(dict.fromkeys(w for w in out if len(w) > 2 and w not in STOPWORDS))
+    return tm.words(text, frozenset(STOPWORDS))
 
 
 def _match_themes(text: str) -> list[str]:
-    """Theme hits: >=1 keyword of length>=5 or >=2 distinct keywords."""
-    low = " " + text.lower() + " "
-    hits = []
-    for theme, kws in THEMES.items():
-        found = [k for k in kws if k in low]
-        if len(found) >= 2 or (len(found) == 1 and len(found[0]) >= 5):
-            hits.append(theme)
-    return hits
+    """Theme hits ON WHOLE WORDS: one keyword of 5+ letters or two
+    distinct keywords (textmatch.match_themes)."""
+    return tm.match_themes(text, THEMES, strict=True)
 
 
 def parse_type(type_raw: str) -> tuple[str, str, str]:
@@ -218,18 +198,30 @@ def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(collection)")}
             if "thumb_override" in cols:
                 for row in conn.execute(
-                        "SELECT folder, thumb_override FROM collection "
+                        "SELECT folder, name, thumb_override FROM collection "
                         "WHERE thumb_override IS NOT NULL"):
-                    overrides[row["folder"]] = row["thumb_override"]
+                    # rows WITHOUT a folder must not share one entry: the
+                    # last such choice was handed to every folder-less row
+                    if row["folder"]:
+                        overrides[(row["folder"], row["name"])] = \
+                            row["thumb_override"]
         except sqlite3.Error:
             pass
 
-        # existing rows: by folder and by name (for merge lookups)
+        # existing rows: by (folder, name), by name, and by folder only
+        # where ONE row has that folder. Two purchases sharing a folder
+        # used to resolve to the same row, and every re-import overwrote
+        # the first with the second.
         existing: dict = {}
+        per_folder: dict = {}
         for row in conn.execute("SELECT * FROM collection"):
             if row["folder"]:
-                existing.setdefault("f:" + row["folder"], row)
-            existing.setdefault("n:" + row["name"], row)
+                existing.setdefault(("fn", row["folder"], row["name"]), row)
+                per_folder.setdefault(row["folder"], []).append(row)
+            existing.setdefault(("n", row["name"]), row)
+        for f, rws in per_folder.items():
+            if len(rws) == 1:
+                existing[("f", f)] = rws[0]
 
         avail = {}
         av_path = config.AVAILABILITY_JSONL
@@ -282,7 +274,9 @@ def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
             meta = json.dumps({"stems": stems, "themes": themes,
                                "facets": facets}, ensure_ascii=False)
 
-            old = existing.get("f:" + folder) or existing.get("n:" + name)
+            old = (existing.get(("fn", folder, name))
+                   or existing.get(("n", name))
+                   or existing.get(("f", folder)))
             # preserve human-added tags: union derived with whatever is in the DB
             old_tags = []
             if old is not None:
@@ -300,8 +294,18 @@ def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
                 or "owned-not-downloaded"
             asset_path = av.get("local_path") or \
                 (old["asset_path"] if old is not None else None)
-            thumb_override = overrides.get(folder) or \
+            thumb_override = overrides.get((folder, name)) or \
                 (old["thumb_override"] if old is not None else None)
+            # a human's thumbnail choice is an absolute IMAGE path. One
+            # registry carried a status word in this column on every row (a
+            # table copy that shifted columns) and this importer preserved
+            # it forever: such values are dropped. A choice whose file is
+            # merely unreachable now (an unplugged drive) is KEPT -- the
+            # server falls back to the first image while it is missing.
+            if thumb_override and not (
+                    Path(thumb_override).is_absolute()
+                    and Path(thumb_override).suffix.lower() in IMG_EXTS):
+                thumb_override = None
 
             if old is not None:
                 # UPDATE by id: catalog fields refresh, human/agent state
@@ -311,7 +315,8 @@ def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
                     " type_raw=?, type_group=?, type_cat=?, type_sub=?,"
                     " seller=?, purchased=?, price=?, url=?, folder=?,"
                     " image_count=?, first_image=?, tags=?, meta=?,"
-                    " availability=?, asset_path=? WHERE id=?",
+                    " availability=?, asset_path=?, thumb_override=?"
+                    " WHERE id=?",
                     (name, (r.get("Service") or "").strip(), store,
                      (r.get("Type") or "").strip(), group, cat, sub,
                      (r.get("Seller / Author") or "").strip(),
@@ -320,7 +325,8 @@ def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
                      (r.get("Product URL") or "").strip(),
                      folder, img_count, first_image,
                      json.dumps(tags, ensure_ascii=False),
-                     meta, availability, asset_path, old["id"]))
+                     meta, availability, asset_path, thumb_override,
+                     old["id"]))
             else:
                 conn.execute(
                     "INSERT INTO collection (name, service, store, type_raw, type_group,"
@@ -343,10 +349,9 @@ def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
 
         # preserve rows added by other agents that are NOT in the CSV
         # (e.g. crawler-added kit cards) -- refresh availability only
-        for key, row in list(existing.items()):
-            if not key.startswith("f:"):
-                continue
-            if row["folder"] in consumed_folders:
+        for f, rws in per_folder.items():
+            row = rws[0]
+            if f in consumed_folders:
                 continue
             av = avail.get(row["name"])
             if av:

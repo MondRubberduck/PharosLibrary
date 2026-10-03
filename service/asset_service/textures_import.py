@@ -10,6 +10,12 @@ Groups:
 
 Dual-audience tagging like the collection: `tags` human words + themes,
 `meta` = {stems, themes, facets} for the algorithm.
+
+`meta` also carries what the files themselves say (imgmeta.py): `px`
+[w, h] read from the colour map's header, `res` derived from it
+(`res_source` "measured"; "name" only when no header was readable) and
+`maps` {role: file}. Folder names are not evidence: a "..._4K" folder
+keeps its name when its maps are re-exported at 2048 px.
 """
 
 from __future__ import annotations
@@ -20,7 +26,8 @@ import sqlite3
 from pathlib import Path
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from asset_service import config
+from asset_service import config, imgmeta
+from asset_service import textmatch as tm
 
 TEX_ROOT = config.TEX_ROOT
 MAIN_NAME = "4K_Textures_Gumroad"
@@ -82,7 +89,16 @@ CHANNEL_TOKENS = {
     "reflection", "bump", "specular", "spec", "color", "colour", "col",
     "basecolor", "diffuse", "alpha", "opacity", "mask", "masked", "overlay",
     "mirror", "nrm", "occ", "s", "m", "b", "seamless", "raw", "toplayer",
+    # spellings that used to split one material into one-file fragment
+    # sets ("<name> 2k normaldx", "<name> preview")
+    "normaldx", "normalgl", "ambientocclusion", "emissive", "emission",
+    "gloss", "smoothness", "preview", "render", "thumbnail",
 }
+
+# measured larger side -> label. The floors sit below the nominal size so
+# 3840- and 4000-pixel maps still read as 4K.
+RES_FLOORS = ((7000, "8K"), (3500, "4K"), (1800, "2K"), (900, "1K"),
+              (450, "512"))
 
 TEX_THEMES = {
     "walls": ["wall", "brick", "plaster", "stucco", "facade", "concrete",
@@ -115,39 +131,6 @@ TEX_THEMES = {
 }
 
 
-def _words(text: str) -> list[str]:
-    out = []
-    for w in re.findall(r"[A-Za-z0-9]+", text or ""):
-        parts = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", w).lower().split()
-        out.extend(parts)
-    return list(dict.fromkeys(w for w in out if len(w) > 2))
-
-
-def _stems(text: str) -> list[str]:
-    out = []
-    for w in re.findall(r"[A-Za-z0-9]+", text or ""):
-        parts = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", w).lower().split()
-        out.extend(parts)
-    stems = []
-    for w in out:
-        stems.append(w)
-        for suf, cut in (("ing", 3), ("ers", 3), ("er", 2), ("es", 2), ("s", 1)):
-            if w.endswith(suf) and len(w) > len(suf) + 2:
-                stems.append(w[:-cut])
-                break
-    return list(dict.fromkeys(stems))
-
-
-def _match_themes(text: str) -> list[str]:
-    low = " " + text.lower() + " "
-    hits = []
-    for theme, kws in TEX_THEMES.items():
-        found = [k for k in kws if k in low]
-        if len(found) >= 2 or (len(found) == 1 and len(found[0]) >= 5):
-            hits.append(theme)
-    return hits
-
-
 def _family_base(stem: str) -> str:
     """Strip map-channel / resolution suffixes: 'Wall_X_2x2_1K_albedo' ->
     'wall_x' (family key for loose-file grouping)."""
@@ -160,8 +143,10 @@ def _family_base(stem: str) -> str:
             base = base[: m.start()]
             changed = True
             continue
-        m = re.search(r"[_ ]([a-z0-9]{1,12})$", base)
-        if m and (m.group(1) in CHANNEL_TOKENS or re.fullmatch(r"\d+", m.group(1))):
+        # 16 letters fit 'ambientocclusion'; counters stay at 12 digits
+        m = re.search(r"[_ ]([a-z0-9]{1,16})$", base)
+        if m and (m.group(1) in CHANNEL_TOKENS
+                  or re.fullmatch(r"\d{1,12}", m.group(1))):
             base = base[: m.start()]
             changed = True
     return base.strip("_ ") or stem.lower()
@@ -200,6 +185,67 @@ def _walk_leaves(d: Path, own: list | None = None) -> list:
     return leaves
 
 
+def _res_label(side: int) -> str:
+    for floor, label in RES_FLOORS:
+        if side >= floor:
+            return label
+    return str(side)
+
+
+def _facts(d: Path, sizes: dict, images: list) -> dict:
+    """What the file NAMES of one set say, without opening a file. `sizes`
+    is {file name: bytes} for the set's files in folder `d`, `images` its
+    displayable files in name order. Returns `maps` {role: path}, `thumb`
+    (the preview render; else the colour map; else the first image) and
+    `ref` (what to measure for the set's resolution: the colour map, else
+    the largest image that is not a preview)."""
+    # plain strings from here on: this runs over every file of the
+    # library at every server start, and pathlib properties cost more
+    # than the name analysis itself
+    def ext(name: str) -> str:
+        return name[name.rfind("."):].lower()
+    # first file per role = shortest name ('x_normal.jpg' before
+    # 'x_normal - Copy.jpg'); of a DirectX/OpenGL normal pair the GL one,
+    # because Blender and Unity both read GL normals
+    ordered = sorted(sizes, key=lambda n: (
+        n.rpartition(".")[0].lower().endswith("dx"), len(n), n.lower()))
+    parts = [(n,) + imgmeta.role_parts(d.name + "/" + n) for n in ordered]
+    anchors = {prefix for _, role, _, prefix in parts
+               if role in ("albedo", "normal")}
+    # the image named exactly like the front part its maps share
+    # ('oak_floor.jpg' beside 'oak_floor_diffuse.jpg') is the set's own
+    # picture, whatever its last word looks like
+    bases = {prefix.rstrip(" _-.") for prefix in anchors}
+    previews = {n for n, role, _, _ in parts
+                if role == "preview" or n.rpartition(".")[0].lower() in bases}
+    maps: dict = {}
+    for n, role, token, prefix in parts:
+        if (not role or n in previews or role in maps
+                or ext(n) not in FILE_EXT):
+            continue
+        # a one-letter suffix is a map only beside a colour or normal map
+        # of the same name: photo libraries end names in SIZE letters
+        # ('Gantry0042_M' = medium), which read as metallic/specular
+        if len(token) == 1 and prefix not in anchors:
+            continue
+        maps[role] = n
+    measurable = [n for n in ordered
+                  if n not in previews and ext(n) in imgmeta.SIZE_EXT]
+    largest = max(measurable, key=sizes.get, default=None)
+    ref = [n for n in dict.fromkeys((maps.get("albedo"), largest))
+           if n in measurable]
+    # without a preview the thumb is a full-size map (heavy, but the only
+    # picture there is): then the colour map, not whatever sorts first
+    # (in a set with an AO map that was the AO map)
+    shown = [i.name for i in images]
+    thumb = ([n for n in shown if n in previews]
+             or [n for n in shown if n == maps.get("albedo")] or shown)
+    folder = d.as_posix() + "/"
+    return {"maps": {role: folder + n for role, n in maps.items()},
+            "thumb": folder + thumb[0] if thumb else "",
+            "ref": [folder + n for n in ref]}
+
+
 def _record_from_dir(d: Path, grp: str, sub: str) -> dict | None:
     try:
         all_files = [f for f in d.iterdir()
@@ -210,21 +256,18 @@ def _record_from_dir(d: Path, grp: str, sub: str) -> dict | None:
         return None
     images = sorted((f for f in all_files if f.suffix.lower() in DISPLAY_EXT),
                     key=lambda p: p.name.lower())
+    sizes = {f.name: f.stat().st_size for f in all_files if f.is_file()}
     # a set without a preview image is still a set (empty thumb, like
     # loose families): HDR/EXR panoramas were silently dropped here
-    render = next((i for i in images
-                   if i.stem.lower().endswith("render")
-                   or i.stem.lower() == d.name.lower()), None)
-    thumb = (render or images[0]).as_posix() if images else ""
+    facts = _facts(d, sizes, images)
     return {"name": _pretty(d.name), "grp": grp, "sub": sub,
             "folder": d.as_posix(),
             "files": json.dumps([f.as_posix() for f in all_files]),
             "images": json.dumps([i.as_posix() for i in images]),
             "file_count": len(all_files),
-            "bytes": sum(f.stat().st_size for f in all_files if f.is_file()),
+            "bytes": sum(sizes.values()),
             "first_image": images[0].as_posix() if images else "",
-            "thumb": thumb,
-            "src_name": d.name}
+            "src_name": d.name, **facts}
 
 
 def _families(d: Path, grp: str, sub: str) -> list:
@@ -248,17 +291,17 @@ def _families(d: Path, grp: str, sub: str) -> list:
     out = []
     for base, fam in sorted(families.items()):
         displayable = sorted(fam["images"], key=lambda p: p.name.lower())
+        sizes = {f.name: f.stat().st_size for f in fam["files"]}
         out.append({
             "name": _pretty(base), "grp": grp,
             "sub": sub, "folder": d.as_posix(),
             "files": json.dumps([f.as_posix() for f in fam["files"]]),
             "images": json.dumps([i.as_posix() for i in displayable]),
             "file_count": len(fam["files"]),
-            "bytes": sum(f.stat().st_size for f in fam["files"]),
+            "bytes": sum(sizes.values()),
             "first_image": (displayable[0].as_posix()
                             if displayable else ""),
-            "thumb": (displayable[0].as_posix() if displayable else ""),
-            "src_name": base})
+            "src_name": base, **_facts(d, sizes, displayable)})
     return out
 
 
@@ -301,6 +344,21 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
                 seen.add(key)
                 unique_rows.append(r)
             scan_rows = unique_rows
+        # px measured by the previous run, keyed by what identifies an
+        # unchanged set. This importer runs at every server start, and
+        # the header read per set is the one cost a restart can skip.
+        # Only successes are kept: an unreadable file is tried again.
+        old_px: dict = {}
+        for name, folder, count, size, meta in conn.execute(
+                "SELECT name, folder, file_count, bytes, meta FROM textures "
+                "WHERE source IS NOT 'scan'"):
+            try:
+                m = json.loads(meta or "{}")
+            except (ValueError, TypeError):
+                continue
+            if (isinstance(m, dict) and m.get("res_source") == "measured"
+                    and isinstance(m.get("px"), list) and len(m["px"]) == 2):
+                old_px[(name, folder, count, size)] = m["px"]
         conn.execute("DELETE FROM textures WHERE source IS NOT 'scan'")
         conn.execute("DELETE FROM sqlite_sequence WHERE name='textures'")
 
@@ -316,15 +374,16 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
         except (OSError, ValueError):
             pass
 
-        RES_RE = re.compile(r"\b(8k|4k|2k|1k|512|1024|2048)\b", re.I)
-
         def _res(text: str) -> str:
-            toks = set(re.split(r"[^a-z0-9]+", (text or "").lower()))
-            m = toks & {"8k", "4k", "2k", "1k", "512", "1024", "2048"}
-            if not m:
-                return ""
-            v = m.pop()
-            return {"512": "512", "1024": "1K", "2048": "2K"}.get(v, v.upper())
+            # name-token label, used only when nothing could be measured.
+            # First token in reading order (the set name comes before its
+            # category): popping from a set made the label differ between
+            # runs when both carried one
+            for v in re.split(r"[^a-z0-9]+", (text or "").lower()):
+                if v in {"8k", "4k", "2k", "1k", "512", "1024", "2048"}:
+                    return {"512": "512", "1024": "1K",
+                            "2048": "2K"}.get(v, v.upper())
+            return ""
 
         records: list[dict] = []
         main = root / MAIN_NAME
@@ -355,9 +414,10 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
 
         for r in records:
             src = r.pop("src_name")
-            words = _words(r["name"])
-            themes = _match_themes(src + " " + r["sub"])
-            stems = list(dict.fromkeys(_stems(r["name"]) + _stems(r["sub"])))
+            words = tm.words(r["name"], tm.STOPWORDS)
+            themes = tm.match_themes(src + " " + r["sub"], TEX_THEMES,
+                                     strict=True)
+            stems = list(dict.fromkeys(tm.stems(r["name"]) + tm.stems(r["sub"])))
             # crawl-index enrichment: match my sub to index categories by token
             sub_norm = (r["sub"].lower()
                         .replace("4k_physical_", "").replace("_4k", "")
@@ -372,7 +432,7 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
             desc, kw = "", []
             if icat:
                 desc, kw = icat.get("desc") or icat.get("description") or "",                 icat.get("keywords") or []
-                stems = list(dict.fromkeys(stems + _stems(" ".join(kw))))
+                stems = list(dict.fromkeys(stems + tm.stems(" ".join(kw))))
                 themes = list(dict.fromkeys(
                     themes + [k for k in kw if k in
                               {t for cl in TEX_THEMES.values() for t in cl}]))
@@ -380,9 +440,21 @@ def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
                       "sub": re.sub(r"[^a-z0-9]+", "-", r["sub"].lower())}
             r["tags"] = json.dumps(list(dict.fromkeys(words + themes)),
                                    ensure_ascii=False)
+            # resolution = what the files ARE, not what the folder is
+            # called (folders keep "4K" after the maps were downscaled).
+            # One header read per set; a second only when the colour map
+            # is unreadable.
+            px = old_px.get((r["name"], r["folder"], r["file_count"],
+                             r["bytes"]))
+            for f in r.pop("ref"):
+                px = px or imgmeta.image_size(f)
             r["meta"] = json.dumps(
                 {"stems": stems, "themes": themes, "facets": facets,
-                 "res": _res(src + " " + r["sub"]), "desc": desc},
+                 "res": (_res_label(max(px)) if px
+                         else _res(src + " " + r["sub"])),
+                 "res_source": "measured" if px else "name",
+                 "px": list(px) if px else None,
+                 "maps": r.pop("maps"), "desc": desc},
                 ensure_ascii=False)
             r["source"] = "crawl"
             cols = ("name,grp,sub,folder,files,images,file_count,bytes,"

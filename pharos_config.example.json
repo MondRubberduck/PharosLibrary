@@ -5,10 +5,8 @@
   "sections": {
     "animation": "Animation",
     "textures": "Textures_Materials",
-    "textures_main": "Textures_Materials/4K_Textures_Gumroad",
     "audio": "Audio_Assets",
-    "collection": "Collected Files",
-    "collected_galleries": "Collected Files"
+    "collection": "Collected Files"
   },
   "agent_files": "_Agent_Files",
   "thumb_cache_dirs": [],

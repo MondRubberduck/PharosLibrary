@@ -268,9 +268,16 @@ def run_doctor(argv=None) -> int:
         has_mcp = _ilu.find_spec("mcp") is not None
     except Exception:
         has_mcp = False
+    # counted from the server source, so this line cannot go stale again
+    try:
+        n_tools = (Path(__file__).resolve().parents[1]
+                   / "pharos_mcp_server.py").read_text(
+                       encoding="utf-8").count("@mcp.tool()")
+    except OSError:
+        n_tools = 0
     checks.append(_check(
         "mcp", "found" if has_mcp else "absent",
-        "6 agent tools available" if has_mcp
+        f"{n_tools} agent tools available" if has_mcp
         else 'optional: pip install "mcp<2"'))
 
     # ---- verdict ----------------------------------------------------------
