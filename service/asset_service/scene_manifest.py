@@ -16,12 +16,27 @@ Schema (pharos.scene/v1; kiosk.scene/v1 accepted):
   "assets": [
     {
       "id": "hero_tower",             # unique within the scene
-      "fbx": "D:/path/to/tower.fbx",  # absolute path (from Pharos query)
+      "key": "Pack/Exports/FBX/SM_Tower.fbx",
+                                      # the `key` from a Pharos search: the
+                                      # file (and, after '#', the object
+                                      # inside a multi-object file) is
+                                      # looked up for you -- OR give:
+      "fbx": "D:/path/to/tower.fbx",  # absolute path of the model file:
+                                      # .fbx, .obj, .glb/.gltf or .blend
+      "object": "Tower_A",            # optional: the ONE object to take
+                                      # from a multi-object file (the
+                                      # search item's object_name); the
+                                      # rest of the file is dropped
       "position": [0.0, 0.0, 0.0],    # [x, y, z] in metres
       "rotation": [0.0, 0.0, 0.0],   # [rx, ry, rz] in radians
       "scale": 1.0,                   # uniform scale
       "snap_to_ground": true,         # place so bbox_min.y lands on ground_y
-      "materials": {                  # optional; omit for placeholder
+      "materials": "recipe",          # optional, with "key": the
+                                      # model's own per-slot recipe from
+                                      # the registry -- OR a recipe object
+                                      # ({"slots": [...]} as served by
+                                      # /api/meshes/item) -- OR hero maps:
+      "materials": {
         "albedo": "D:/path/to/ALB.png",
         "normal": "D:/path/to/NRM.png",
         "roughness": "D:/path/to/rough.png",
@@ -59,9 +74,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
+
+try:
+    from . import imgmeta
+except ImportError:         # run as a script, or imported inside Blender
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import imgmeta
+
+# the model files the builder can import (scene_builder._import_file)
+SUPPORTED = (".fbx", ".obj", ".glb", ".gltf", ".blend")
 
 
 # ---------------------------------------------------------------------------
@@ -103,9 +128,17 @@ def validate_manifest(data: dict) -> list[str]:
     seen_ids = set()
     for i, a in enumerate(assets):
         label = f"assets[{i}]"
-        if not a.get("fbx"):
-            errors.append(f"{label}: missing required field 'fbx'")
+        if not a.get("fbx") and not a.get("key"):
+            errors.append(f"{label}: needs 'key' (from a search) or 'fbx'")
             continue
+        if a.get("fbx") and Path(a["fbx"]).suffix.lower() not in SUPPORTED:
+            errors.append(f"{label}: cannot import "
+                          f"'{Path(a['fbx']).suffix}' files (supported: "
+                          f"{', '.join(SUPPORTED)})")
+        mats = a.get("materials")
+        if isinstance(mats, str) and (mats != "recipe" or not a.get("key")):
+            errors.append(f"{label}.materials: the only text value is "
+                          "\"recipe\", and it needs 'key'")
         aid = a.get("id") or f"unnamed_{i}"
         if aid in seen_ids:
             errors.append(f"{label}: duplicate id '{aid}'")
@@ -144,6 +177,245 @@ def validate_manifest(data: dict) -> list[str]:
     return errors
 
 
+def _registry_root() -> tuple:
+    """(registry db path, library root) from the Pharos config."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from asset_service import config
+    return (os.environ.get("PHAROS_DB") or str(config.DB_PATH),
+            config.LIBRARY_ROOT)
+
+
+def resolve_keys(data: dict, db_path: Optional[str] = None,
+                 root=None) -> list[str]:
+    """Turn every asset's search `key` into its file (`fbx`), the object
+    inside a multi-object file (`object`) and, for materials "recipe",
+    the registry's per-slot recipe. Changes `data` in place; returns
+    errors. An agent copies the key from the search answer instead of
+    building paths, and never pastes a recipe."""
+    # every asset with a key: a record copied from the API carries key
+    # AND fbx, and skipping those built the whole file for one object
+    assets = [a for a in data.get("assets") or []
+              if isinstance(a, dict) and a.get("key")]
+    if not assets:
+        return []
+    if db_path is None or root is None:
+        try:
+            d, r = _registry_root()
+        except Exception as exc:                         # noqa: BLE001
+            return [f"cannot resolve keys: no Pharos config ({exc})"]
+        db_path, root = db_path or d, root or r
+    if not Path(db_path).is_file():
+        return [f"cannot resolve keys: registry not found at {db_path}"]
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    errors = []
+    base = Path(root)
+    try:
+        for i, a in enumerate(data.get("assets") or []):
+            if a not in assets:
+                continue
+            key = a["key"].replace("\\", "/")
+            # the whole key as a file first (a file name may hold '#'),
+            # then '<file>#<object>' split at the LAST '#'; a bare file
+            # key may name its object in the `object` field
+            cands = [(key, a.get("object") or None)]
+            if "#" in key:
+                f, o = key.rsplit("#", 1)
+                cands.append((f, o))
+            in_file: list = []
+            row = None
+            for f, o in cands:
+                path = Path(f) if Path(f).is_absolute() or ":" in f[:3] \
+                    else base / f
+                rows = conn.execute(
+                    "SELECT id, name, object_name, recipe FROM meshes WHERE "
+                    "lower(replace(fbx, '\\', '/')) = ?",
+                    (path.as_posix().lower(),)).fetchall()
+                if not rows:
+                    continue
+                in_file = [r["object_name"] or r["name"] for r in rows]
+                if o is None and len(rows) == 1:
+                    row = rows[0]
+                elif o is not None:
+                    row = next((r for r in rows if o in (
+                        r["object_name"], r["name"])), None) or next(
+                        (r for r in rows if o.lower() in (
+                            (r["object_name"] or "").lower(),
+                            (r["name"] or "").lower())), None)
+                if row is not None:
+                    a["fbx"] = path.as_posix()
+                    if o is not None and not a.get("object"):
+                        a["object"] = row["object_name"] or o
+                    break
+            if row is None:
+                many = [len(conn.execute(
+                    "SELECT 1 FROM meshes WHERE "
+                    "lower(replace(fbx, '\\', '/')) = ?",
+                    (((Path(f) if Path(f).is_absolute() or ":" in f[:3]
+                       else base / f).as_posix().lower()),)).fetchall())
+                    for f, _ in cands]
+                wanted = a.get("object") or (
+                    key.rsplit("#", 1)[1] if "#" in key else None)
+                errors.append(
+                    f"assets[{i}]: object {wanted!r} is not in that file; "
+                    f"it holds: {', '.join(sorted(in_file)[:12])}"
+                    + (" ..." if len(in_file) > 12 else "")
+                    if wanted and in_file else
+                    f"assets[{i}]: key names a file with {max(many)} objects: "
+                    f"use the full key ('<file>#<object>') of the one you "
+                    f"want: {a['key']}" if max(many) > 1 else
+                    f"assets[{i}]: key not in the registry: {a['key']}")
+                continue
+            if a.get("materials") == "recipe":
+                try:
+                    rec = json.loads(row["recipe"] or "null") or {}
+                except ValueError:
+                    rec = {}
+                if rec.get("slots"):
+                    a["materials"] = {"slots": rec["slots"]}
+                else:
+                    a.pop("materials")       # no recipe: placeholder
+                    print(f"note: assets[{i}] ({a.get('id', '?')}): the "
+                          "registry has no material recipe for it; "
+                          "placeholder materials")
+    finally:
+        conn.close()
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# texture sets and whole-file imports (pure; the check AND the builder use these)
+# ---------------------------------------------------------------------------
+
+_TEX_EXT = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp")
+_TEX_ROLES = ("albedo", "normal", "roughness", "metallic")
+
+
+def texture_maps(tex: dict, db_path: Optional[str] = None) -> tuple:
+    """({role: file}, source) for one textures[] entry.
+
+    The builder used to guess roles from substrings of the file names: a
+    set named '<name>_Color' / '<name>_NormalDX' / '<name>_NormalGL' got
+    no colour map and the DirectX normal map. Now:
+      "registry"  the set is indexed: the maps the texture search serves
+                  (colour map found by the shared role reader, the OpenGL
+                  normal of a DX/GL pair -- Blender reads GL). A set that
+                  is one plain photo is that photo as the colour map. An
+                  indexed set is NEVER guessed from other files: a photo
+                  'Roof.jpg' once got its maps from three other sets
+                  with 'roof' in their names.
+      "names"     not indexed: the files whose name holds the set name,
+                  read by the same role reader, all from ONE set (the
+                  files that share a folder and a name prefix)
+      "folder"    the set name matches no file: the largest such set in
+                  the folder
+    """
+    folder = Path(tex.get("folder") or "")
+    setname = tex.get("set") or ""
+    try:
+        if db_path is None:
+            db_path = _registry_root()[0]
+        if setname and Path(db_path).is_file():
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT meta, first_image FROM textures WHERE "
+                    "lower(name) = ? AND "
+                    "rtrim(lower(replace(folder, '\\', '/')), '/') = ?",
+                    (setname.lower(),
+                     folder.as_posix().lower().rstrip("/"))).fetchall()
+            finally:
+                conn.close()
+            for meta, first in rows:
+                maps = (json.loads(meta or "{}") or {}).get("maps") or {}
+                found = {r: maps[r] for r in _TEX_ROLES
+                         if maps.get(r) and Path(maps[r]).is_file()}
+                if not maps and first and Path(first).is_file():
+                    found = {"albedo": first}       # one plain photo
+                return found, "registry"
+    except Exception:                    # noqa: BLE001 -- no registry: names
+        pass
+    if not folder.is_dir():
+        return {}, "names"
+    files = [p for p in sorted(folder.rglob("*"))
+             if p.is_file() and p.suffix.lower() in _TEX_EXT]
+    source = "names"
+    norm = lambda s: re.sub(r"[^a-z0-9]+", "", s.lower())       # noqa: E731
+    if setname:
+        # display names use spaces, file names underscores: compare on
+        # letters and digits. A name that matches no file means the folder
+        # IS the set (a silent skip would lose the ground plane).
+        matched = [p for p in files if norm(setname) in norm(p.stem)]
+        if matched:
+            files = matched
+        else:
+            source = "folder"
+    # one material = the files of one folder that share a name prefix.
+    # Taking each role from whichever file came first mixed several sets.
+    groups: dict = {}
+    for p in files:
+        role, _, prefix = imgmeta.role_parts(p.name)
+        if role in _TEX_ROLES:
+            groups.setdefault((str(p.parent), prefix), []).append((role, p))
+    if not groups:
+        return {}, source
+    want = norm(setname)
+    best = min(groups, key=lambda k: (
+        norm(k[1]) != want,                 # the set's own name first
+        "albedo" not in {r for r, _ in groups[k]},
+        -len({r for r, _ in groups[k]}),    # then the most complete set
+        len(k[1]), k))
+    # shortest name first; of a DirectX/OpenGL normal pair the GL one
+    is_dx = re.compile(r"normaldx$|(?:^|[ _.-])dx(?:[ _.-]|\d|$)")
+    found = {}
+    for role, p in sorted(groups[best], key=lambda rp: (
+            bool(is_dx.search(rp[1].stem.lower())), len(rp[1].name),
+            rp[1].name.lower())):
+        found.setdefault(role, str(p))
+    return found, source
+
+
+def whole_file_notes(data: dict, db_path: Optional[str] = None) -> list[str]:
+    """Warnings for assets that name a multi-object file WITHOUT an
+    `object`: the builder then imports every object in it (one kit file
+    holds hundreds, millions of triangles). Empty without a registry."""
+    assets = [(i, a) for i, a in enumerate(data.get("assets") or [])
+              if isinstance(a, dict) and a.get("fbx") and not a.get("object")]
+    if not assets:
+        return []
+    try:
+        if db_path is None:
+            db_path = _registry_root()[0]
+        if not Path(db_path).is_file():
+            return []
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+    except Exception:                                    # noqa: BLE001
+        return []
+    notes = []
+    try:
+        for i, a in assets:
+            n, tri = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(triangles), 0) FROM meshes "
+                "WHERE lower(replace(fbx, '\\', '/')) = ?",
+                (a["fbx"].replace("\\", "/").lower(),)).fetchone()
+            if n > 1:
+                notes.append(
+                    f"assets[{i}] ('{a.get('id', '?')}'): "
+                    f"{Path(a['fbx']).name} holds {n} objects "
+                    f"({tri:,} triangles) and ALL of them will be imported, "
+                    f"laid out as in the file (the file's origin goes to "
+                    f"`position`) -- to place one, give its search key "
+                    f"('<file>#<object>') or name it with \"object\"")
+    except Exception:                                    # noqa: BLE001
+        pass
+    finally:
+        conn.close()
+    return notes
+
+
 def check_paths(data: dict) -> list[str]:
     """Check that all referenced files exist on disk.
     Returns a list of missing-file errors."""
@@ -151,7 +423,7 @@ def check_paths(data: dict) -> list[str]:
     for i, a in enumerate(data.get("assets", [])):
         fbx = a.get("fbx", "")
         if fbx and not Path(fbx).is_file():
-            missing.append(f"assets[{i}] ('{a.get('id', '?')}'): FBX not found: {fbx}")
+            missing.append(f"assets[{i}] ('{a.get('id', '?')}'): file not found: {fbx}")
         mats = a.get("materials") or {}
         if isinstance(mats, dict) and isinstance(mats.get("slots"), list):
             # per-slot schema (recipe.slots[]): maps live under
@@ -274,14 +546,18 @@ def budget_check(data: dict, meshes_db: Optional[str] = None) -> dict:
             # manifests are authored with forward slashes, the registry may
             # store backslashes (or vice versa) -- normalise BOTH sides or
             # every lookup silently misses and the budget under-reports
-            row = conn.execute(
-                "SELECT triangles FROM meshes WHERE fbx = ?",
-                (os.path.normpath(fbx),)).fetchone()
-            if row is None:
-                row = conn.execute(
-                    "SELECT triangles FROM meshes WHERE"
-                    " REPLACE(fbx, '\\', '/') = ?",
-                    (fbx.replace("\\", "/"),)).fetchone()
+            rows = conn.execute(
+                "SELECT triangles, object_name, name FROM meshes WHERE"
+                " lower(REPLACE(fbx, '\\', '/')) = ?",
+                (fbx.replace("\\", "/").lower(),)).fetchall()
+            obj = a.get("object")
+            if obj:
+                # one object taken from a multi-object file
+                rows = [r for r in rows if obj in (r["object_name"],
+                                                   r["name"])]
+            # no object named: the builder imports the WHOLE file
+            row = ({"triangles": sum(r["triangles"] or 0 for r in rows)}
+                   if rows else None)
             if row:
                 tri = row["triangles"] or 0
             else:
@@ -315,7 +591,9 @@ def load_manifest(path: str | Path) -> tuple[Optional[dict], list[str]]:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         return None, [f"cannot read manifest: {exc}"]
-    errors = validate_manifest(data) + check_paths(data)
+    errors = validate_manifest(data)
+    errors += resolve_keys(data)
+    errors += check_paths(data)
     return data if not errors else None, errors
 
 
@@ -345,6 +623,20 @@ def main(argv=None) -> int:
     n_crowd = sum(c.get("count", 1) for c in data.get("crowd", []))
     print(f"  assets: {n_assets}")
     print(f"  crowd:  {n_crowd} instances")
+    for note in whole_file_notes(data, args.db):
+        print(f"  WARNING: {note}")
+    for t in data.get("textures") or []:
+        maps, source = texture_maps(t, args.db)
+        if not maps:
+            print(f"  WARNING: texture '{t.get('set', '?')}': no colour, "
+                  f"normal, roughness or metallic map found ({source}): "
+                  f"it will NOT be applied")
+            continue
+        print(f"  texture '{t.get('set', '?')}': "
+              f"{', '.join(sorted(maps))} ({source})")
+        if "albedo" not in maps:
+            print("  WARNING: this texture set has no colour map: the "
+                  "surface will be grey")
     if args.budget:
         if not args.db:
             import os

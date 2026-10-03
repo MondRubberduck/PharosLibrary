@@ -180,9 +180,11 @@ MESH_THEMES = {
     "water": ["water", "fountain", "pond", "river"],
     "interior": ["interior", "floor", "ceiling", "room", "basement",
                  "stairwell"],
-    "medieval": ["medieval", "castle", "keep", "fort", "tower", "rampart",
-                 "drawbridge", "market", "stall", "cart", "torch",
-                 "lantern", "banner", "hall", "guild"],
+    # period words only: 'lantern', 'cart', 'market', 'torch', 'tower'
+    # made every Japanese, Wild West and sci-fi lantern 'medieval', and a
+    # scene kept consistent with theme=medieval got them all. A medieval
+    # PACK still themes its models (PACK_NAME_THEMES / PACK_THEMES).
+    "medieval": ["medieval", "castle", "rampart", "drawbridge"],
     "fantasy": ["fantasy", "magic", "magical", "rune", "ritual", "shrine",
                 "temple", "statue", "gargoyle", "mythic", "arcane",
                 "crystal", "altar", "totem", "wizard", "dragon"],
@@ -595,7 +597,11 @@ def _record(e: dict, recipe: dict, bbox_min, bbox_max,
     themes = list(dict.fromkeys(
         tm.match_themes(pretty + " " + folder_text, MESH_THEMES)
         + tm.match_themes(pack, PACK_NAME_THEMES)
-        + PACK_THEMES.get(pack.lower(), [])))
+        + PACK_THEMES.get(pack.lower(), [])
+        # a kit below a generic section folder: the file's own folder is
+        # the pack the table knows
+        + PACK_THEMES.get(Path(str(e.get("fbx") or "").replace(
+            "\\", "/")).parent.name.lower(), [])))
     stems = tm.stems(pretty)
     ctx = [w for w in ctx if w not in stems]
     facets = {"pack": re.sub(r"[^a-z0-9]+", "-", pack.lower()),

@@ -1090,10 +1090,14 @@ def api_textures_items(params: dict) -> dict:
             entry["px"] = meta["px"]              # measured, not the folder name
         if meta.get("maps"):
             entry["maps"] = sorted(meta["maps"])  # roles; paths: /api/textures/item
+        # the set's folder: a scene manifest's textures[] needs it
+        entry["folder"] = _lib_rel(r["folder"] or "")
         items.append(entry)
     total = len(matched)
     resp = {"total": total, "exact": total if mode == "and" else 0,
-            "mode": mode, "page": page, "size": size, "q": q, "items": items}
+            "mode": mode, "page": page, "size": size, "q": q,
+            # a set's folder is root + "/" + folder
+            "root": CANONICAL_ROOTS[0].as_posix(), "items": items}
     if min_px:
         resp["unmeasured_excluded"] = unmeasured
     _suggest(resp, query, rows, name_of,
@@ -1238,7 +1242,9 @@ def api_audio_items(params: dict) -> dict:
              for e in matched[lo:lo + size]]
     total = len(matched)
     resp = {"total": total, "exact": total if mode == "and" else 0,
-            "mode": mode, "page": page, "size": size, "q": q, "items": items}
+            "mode": mode, "page": page, "size": size, "q": q,
+            # a sound's file is root + "/" + rel
+            "root": AUDIO_ROOT.as_posix(), "items": items}
     _suggest(resp, query, rows, name_of,
              matched[0]["tier"] if matched else 0)
     return P.done(resp)
@@ -1268,6 +1274,37 @@ _EMPTY_RECIPE = {"slots": [], "primary": {}, "resolved": False,
 # what matching and a list item need; the heavy JSON columns (recipe,
 # materials: ~40 MB on a 12k-mesh library) are read only for the rows that
 # are actually returned
+# 'SM_Crate_LOD1', 'Tree LOD2'; 'UCX_Wall', 'Rock_Collision'; 'Rock_col'
+_LOD_RE = re.compile(r"(?:^|[^a-z0-9])lod[ _-]?(\d{1,2})(?![0-9])", re.I)
+_COLLIDER_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:ucx|ubx|ucp|usp|collider|collision)(?:[^a-z0-9]|$)",
+    re.I)
+# a bare 'col' only as a separate word of the RAW name: the prettified
+# name splits camelCase, and a model named 'PaperCol' became a collider
+_COL_RE = re.compile(r"(?:^|[_.\s-])col(?:[_.\s-]|\d|$)", re.I)
+# an advertising billboard is a real 3D model; an impostor is a stand-in
+_CARD_RE = re.compile(r"impost[eo]r", re.I)
+
+
+def _mesh_flags(r: dict) -> None:
+    """Rows an agent rarely wants when it asks for the lowest-poly or the
+    biggest model: a lower LOD copy, a collision hull, a flat card (a
+    2-triangle billboard or decal, an impostor). Read from the names and
+    the box."""
+    text = f"{r.get('name') or ''} {r.get('object_name') or ''}"
+    raw = r.get("object_name") or Path(r.get("fbx") or "").stem
+    m = _LOD_RE.search(text)
+    r["_lod"] = int(m.group(1)) if m else 0
+    # the same model without its LOD word: a LOD1 is a lower copy only
+    # where its pack also holds the full one (_mesh_light_rows checks)
+    r["_base"] = _LOD_RE.sub(" ", r.get("name") or "").strip().lower()
+    r["_collider"] = bool(_COLLIDER_RE.search(text) or _COL_RE.search(raw))
+    box = (r.get("bbox_x"), r.get("bbox_y"), r.get("bbox_z"))
+    r["_card"] = bool(_CARD_RE.search(text)) or (
+        r.get("triangles") is not None and r["triangles"] <= 12
+        and None not in box and min(abs(b) for b in box) < 0.001)
+
+
 _MESH_LIGHT = ("id,name,pack,source,kind,fbx,on_disk,triangles,bbox_x,"
                "bbox_y,bbox_z,max_dim,texture_count,tags,meta")
 _MESH_HEAVY = ("id", "vertices", "submeshes", "materials", "recipe",
@@ -1314,6 +1351,15 @@ def _mesh_light_rows() -> list:
     look = pack_tags.Lookup(_tag_rows())
     for r in rows:
         r["_ptag"] = look(r["_file"])
+        _mesh_flags(r)
+    full = {(r["pack"], r["_base"]) for r in rows if not r["_lod"]}
+    for r in rows:
+        if r["_lod"] and (r["pack"], r["_base"]) not in full:
+            r["_lod"] = 0          # its only copy: it IS the model
+        # a flat quad is flagged `card` but only an impostor is ranked
+        # down: the same rule marks real 2-triangle floors and wall planes
+        r["_junk"] = bool(r["_lod"] or r["_collider"] or _CARD_RE.search(
+            f"{r.get('name') or ''} {r.get('object_name') or ''}"))
     return rows
 
 
@@ -1382,23 +1428,39 @@ def _mesh_keys(rows: list) -> None:
 
 
 def _mesh_item(r: dict, tier: int) -> dict:
-    """The SHORT list item (~400 bytes): what an agent needs to choose.
+    """The SHORT list item: what an agent needs to choose.
     The material recipe is 60-80% of a full item and only matters for the
     few meshes that get picked -- ask for it with detail=1 or
-    /api/meshes/item?key=..."""
+    /api/meshes/item?key=...
+
+    A third of the item used to repeat itself: `fbx` was `key` with the
+    library root in front, `max_dim_m` and `height_m` are read off
+    `bbox_m` (Z-up: z is the height), `id` changes at every import and
+    `on_disk` was 1 on every row. The answer carries `root` once; full
+    records carry `fbx` and `id`. About 370 bytes (~90 tokens)."""
     item = {
-        "key": r["key"], "id": r["id"], "name": r["name"], "pack": r["pack"],
-        "source": r["source"], "kind": r["kind"], "fbx": r["fbx"],
-        "on_disk": r["on_disk"],
-        "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],
-        "max_dim_m": r["max_dim"],
-        "height_m": r["bbox_z"],          # the registry is Z-up
+        "key": r["key"], "name": r["name"], "pack": r["pack"],
+        "source": r["source"], "kind": r["kind"],
+        "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],   # Z-up
         "triangles": r["triangles"],
         "texture_count": r["texture_count"],
         "wired": bool(r.get("wired")),    # a resolved material recipe exists
         "themes": r["meta"].get("themes") or [],
         "tier": tier,
     }
+    if r["_file"] and r["_file"] == (r["fbx"] or "").replace("\\", "/"):
+        # outside every library root (a scanned outside folder): the key is
+        # already the absolute path, so root + key does not apply
+        item["fbx"] = r["_file"]
+    if not r["on_disk"]:
+        # the index lists the file, but it was not there when indexed
+        item["missing_file"] = True
+    if r.get("_lod"):
+        item["lod"] = r["_lod"]           # a lower-detail copy (LOD0 = full)
+    if r.get("_collider"):
+        item["collider"] = True           # a collision hull, not a model
+    if r.get("_card"):
+        item["card"] = True               # flat: billboard, decal, floor quad
     if r.get("container"):
         # the file holds several objects: this one's exact name is needed
         # to import it (names above are prettified)
@@ -1416,17 +1478,18 @@ def _mesh_item(r: dict, tier: int) -> dict:
 
 def _mesh_full(r: dict, tier: int, heavy: dict) -> dict:
     """The full item: short item + recipe, material names, placement
-    corners and the pre-0.10 aliases (fbx_path, max_dim, view_url)."""
+    corners, the absolute `fbx`, the registry `id` and `view_url`."""
     h = heavy or {}
     item = _mesh_item(r, tier)
     mats = h.get("materials")
+    fbx = (r["fbx"] or "").replace("\\", "/")     # one spelling, not three
     item.update({
-        "fbx_path": r["fbx"], "max_dim": r["max_dim"],
+        "id": r["id"], "fbx": fbx,
         "vertices": h.get("vertices"), "submeshes": h.get("submeshes"),
         "materials": mats if isinstance(mats, list) else [],
         "object_name": r.get("object_name") or None,
         "format": Path(r["fbx"] or "").suffix.lower().lstrip("."),
-        "view_url": "/viewer?file=" + url_quote(r["fbx"] or ""),
+        "view_url": "/viewer?file=" + url_quote(fbx),
         **_mesh_extras({**r, **h}),
     })
     return item
@@ -1479,15 +1542,20 @@ def _spread_packs(entries: list) -> None:
     pack came before exact ones, and for 'wall' 44 of the first 50 came
     from one pack out of 945 matches. Within a tier every pack now
     contributes its best match first, then its second best, and so on."""
-    entries.sort(key=lambda e: (e["tier"], -e["score"], len(e["r"]["name"] or ""),
+    entries.sort(key=lambda e: (e["tier"], e["r"].get("_junk", False),
+                                -e["score"], len(e["r"]["name"] or ""),
                                 (e["r"]["name"] or "").lower(),
                                 e["r"]["pack"] or ""))
+    # lower LODs, collision hulls and flat cards are dealt out after
+    # every real model of the tier, not as a pack's first turn
     seen: dict = {}
     for e in entries:
-        k = (e["tier"], e["r"]["pack"])
+        junk = e["r"].get("_junk", False)
+        k = (e["tier"], junk, e["r"]["pack"])
         e["turn"] = seen.get(k, 0)
         seen[k] = e["turn"] + 1
-    entries.sort(key=lambda e: (e["tier"], e["turn"]))     # stable
+    entries.sort(key=lambda e: (e["tier"], e["r"].get("_junk", False),
+                                e["turn"]))                 # stable
 
 
 def api_meshes(params: dict) -> dict:
@@ -1534,7 +1602,8 @@ def api_meshes(params: dict) -> dict:
     if query.empty:
         # every token was dropped -- match nothing, never the whole library
         return P.done({"total": 0, "exact": 0, "mode": "and", "page": page,
-                       "size": size, "q": q, "items": []})
+                       "size": size, "q": q,
+                       "root": CANONICAL_ROOTS[0].as_posix(), "items": []})
 
     # a dimension/height/triangle filter is a MEASUREMENT query: rows
     # without that measurement must be EXCLUDED, never silently passed
@@ -1557,40 +1626,54 @@ def api_meshes(params: dict) -> dict:
         themes = {P.pick("theme", t, have) for t in theme.split(",")
                   if t.strip()}
 
+    def words_match(r) -> bool:
+        """Every query word matches (and no '-word' excludes) -- for rows a
+        filter removed before the words were checked."""
+        meta, pt = r["meta"], r.get("_ptag")
+        name = r.get("_mname") or r["name"] or ""
+        ctx = tm.searchable(r["tags"], meta.get("stems"), meta.get("themes"))
+        extra = tm.searchable(meta.get("ctx"), pt["words"] if pt else ())
+        if tm.excluded(query, name, ctx, extra):
+            return False
+        return not query or all(tm.hits(query, name, ctx, extra))
+
     matched = []        # every query word matches
     partial = []        # only some do: served as OR fallback
+    filtered = []       # removed by a filter: told about when nothing is left
+    unknown = []        # a measurement filter cannot judge them (unmeasured)
     for r in rows:
-        if pack and (r["pack"] or "").lower() != pack_l:
-            continue
-        if source and (r["source"] or "").lower() != source_l:
-            continue
-        if kind and (r["kind"] or "").lower() != kind_l:
-            continue
         meta = r["meta"]
-        if themes and not themes & set(meta.get("themes") or []):
-            continue
         pt = r.get("_ptag")
-        if want_styles and not (pt and all(s in pt["styles"]
-                                           for s in want_styles)):
-            continue
+        out = bool(
+            (pack and (r["pack"] or "").lower() != pack_l)
+            or (source and (r["source"] or "").lower() != source_l)
+            or (kind and (r["kind"] or "").lower() != kind_l)
+            or (themes and not themes & set(meta.get("themes") or []))
+            or (want_styles and not (pt and all(s in pt["styles"]
+                                                for s in want_styles))))
         ptw = pt["words"] if pt else ()
-        if dim_filter or h_filter:
+        if not out and only_tex and not r["texture_count"]:
+            out = True
+        if not out and tri_filter and r["triangles"] is not None \
+                and r["triangles"] > max_tri:
+            out = True
+        unmeasured_row = False
+        if not out and (dim_filter or h_filter):
             if not r["max_dim"]:
-                unmeasured += 1
-                continue
-            if r["max_dim"] and not (min_dim <= r["max_dim"] <= max_dim):
-                continue
+                unmeasured_row = True
+            elif not (min_dim <= r["max_dim"] <= max_dim):
+                out = True
             # height is Z; a measured zero height fails min_h (a bbox_y
             # guard here once let zero-height rows pass every filter)
-            if h_filter and not (min_h <= (r["bbox_z"] or 0) <= max_h):
-                continue
-        if tri_filter:
+            elif h_filter and not (min_h <= (r["bbox_z"] or 0) <= max_h):
+                out = True
+        if not out and not unmeasured_row and tri_filter:
             if r["triangles"] is None:        # unknown, never 0
-                unmeasured += 1
-                continue
-            if r["triangles"] > max_tri:
-                continue
-        if only_tex and not r["texture_count"]:
+                unmeasured_row = True
+            elif r["triangles"] > max_tri:
+                out = True
+        if out or unmeasured_row:
+            (filtered if out else unknown).append(r)
             continue
         name = r.get("_mname") or r["name"] or ""
         if not query:
@@ -1613,7 +1696,24 @@ def api_meshes(params: dict) -> dict:
             partial.append({"r": r, "tier": 3, "score": sum(hits),
                             "_hits": hits})
 
+    # the unmeasured rows that MATCH: counting every unmeasured row of the
+    # library reported hidden rows that had nothing to do with the query
+    unmeasured = sum(1 for r in unknown if words_match(r))
+
     mode = "and"
+    if query and not matched and filtered:
+        # the words match, the filters removed it: a silent switch to the
+        # partial matches below once put sci-fi chairs into a medieval room
+        n_out = sum(1 for r in filtered if words_match(r))
+        if n_out:
+            used = ", ".join(
+                f"{k}={v[0]}" for k, v in params.items()
+                if k in _MESH_FILTERS and v and v[0]
+                and v[0].strip().lower() not in ("0", "false", "no", "off"))
+            P.warn(f"{n_out} model(s) match every query word but not your "
+                   f"filters ({used}); "
+                   + ("the items below match only SOME words"
+                      if partial else "nothing passes them"))
     if query and not matched and partial:
         # AND found nothing: the query was a list, not a phrase ("lamp sign
         # hydrant"). Serve rows that hit SOME word, ranked by word rarity.
@@ -1622,15 +1722,20 @@ def api_meshes(params: dict) -> dict:
         mode = "or-fallback"
 
     # max_dim = largest first (the 0.x meaning), -max_dim = smallest first;
-    # triangles = fewest first, -triangles = most first. Unmeasured rows
-    # (size 0 / triangles NULL) always come last.
+    # triangles = fewest first, -triangles = most first. A sort orders the
+    # matches WITHIN each relevance tier (sorted by triangles alone, eleven
+    # logs and loaves came before the first cart), lower LODs, collision
+    # hulls and flat cards after real models; unmeasured rows come last.
     if sort in ("max_dim", "-max_dim"):
         sign = -1 if sort == "max_dim" else 1
-        matched.sort(key=lambda e: (not e["r"]["max_dim"],
+        matched.sort(key=lambda e: (e["tier"], not e["r"]["max_dim"],
+                                    e["r"]["_junk"],
                                     sign * (e["r"]["max_dim"] or 0)))
     elif sort in ("triangles", "-triangles"):
         sign = 1 if sort == "triangles" else -1
-        matched.sort(key=lambda e: (e["r"]["triangles"] is None,
+        matched.sort(key=lambda e: (e["tier"],
+                                    e["r"]["triangles"] is None,
+                                    e["r"]["_junk"],
                                     sign * (e["r"]["triangles"] or 0)))
     elif sort == "name" or not query:
         matched.sort(key=lambda e: (e["r"]["pack"] or "",
@@ -1650,9 +1755,17 @@ def api_meshes(params: dict) -> dict:
     else:
         items = [_mesh_item(e["r"], e["tier"]) for e in window]
     resp = {"total": total, "exact": exact, "mode": mode,
-            "page": page, "size": size, "q": q, "items": items}
+            "page": page, "size": size, "q": q,
+            # a model's file is root + "/" + key (a container key minus
+            # its last '#object'; a key outside the library is absolute)
+            "root": CANONICAL_ROOTS[0].as_posix(), "items": items}
     if not_returned:
         resp["not_returned"] = not_returned
+    if query and page == 1 and not pack:
+        # one pack asked for: purchases elsewhere are not the question
+        owned = _owned_not_downloaded(q_raw, want_styles)
+        if owned is not None:
+            resp["owned_not_downloaded"] = owned
     if query and total > len(items):
         # where the matches are: narrow with pack= instead of paging
         by_pack: dict = {}
@@ -1670,6 +1783,50 @@ def api_meshes(params: dict) -> dict:
     return P.done(resp)
 
 
+# purchase groups that are not 3D models an agent can place, or whose
+# store listing is gone
+_NOT_REQUESTABLE = ("tool", "print", "listing removed")
+
+
+def _owned_not_downloaded(q_raw: str, styles=()):
+    """Purchases the owner has but has not downloaded that match every
+    query word and the search's style. Model search lists files on disk
+    only, so this is where an agent learns that a match is one download
+    away and can ask the owner for it instead of settling or modelling.
+    `total: 0` means "checked, none"; None (no block) means the purchase
+    list could not be read. Model themes and size filters do not apply:
+    they are model facts a purchase does not have yet (most theme names,
+    e.g. 'structure' or 'prop', are no words of any purchase)."""
+    words = [q_raw]
+    if "Stylized" in styles:
+        words.append("stylized")
+    if "Low Poly" in styles:
+        words.append("low poly")
+    if "Photorealistic" in styles:
+        words.append("-stylized -low-poly")
+    q_all = " ".join(w for w in words if w)
+    try:
+        c = api_collection_items({"q": [q_all], "avail": ["notdown"],
+                                  "size": ["500"]})
+    except Exception:  # noqa: BLE001 -- no purchase list must not break a model search
+        return None
+    if c.get("mode") != "and":
+        return {"total": 0}
+    hits = [i for i in c.get("items") or []
+            if not any(w in (i.get("group") or "").lower()
+                       for w in _NOT_REQUESTABLE)]
+    if not hits:
+        return {"total": 0}
+    return {"total": len(hits),
+            "items": [{"id": i["id"], "name": i["name"], "store": i["store"],
+                       "group": i["group"], "image_count": i["image_count"],
+                       "url": i["url"]} for i in hits[:3]],
+            "more": "/api/collection/items?avail=notdown&q=" + url_quote(q_all)}
+
+
+_MESH_FILTERS = ("pack", "source", "kind", "theme", "themes", "style",
+                 "styles", "min_dim", "max_dim", "min_h", "max_h", "max_tri",
+                 "textures")
 _FULL_BUDGET = 80_000      # bytes of full records per answer (~20k tokens)
 _FULL_MAX_KEYS = 50
 
@@ -1846,7 +2003,7 @@ def api_meshes_packs() -> dict:
                             for d in dirs):
                 # the image files themselves: /api/collection/item?id=
                 hits.append({"id": b["id"], "name": b["name"],
-                             "images": b["image_count"]})
+                             "image_count": b["image_count"]})
         if hits:
             m["purchases"] = hits
     return {"packs": sorted(merged.values(), key=lambda m: m["pack"] or "")}
@@ -1993,7 +2150,8 @@ def api_anim_clips(params: dict) -> dict:
         # every token was dropped (single letters / punctuation) -- such a
         # query must match nothing, never the whole library
         return P.done({"total": 0, "exact": 0, "mode": "and", "page": page,
-                       "size": size, "q": q, "clips": []})
+                       "size": size, "q": q,
+                       "root": CANONICAL_ROOTS[0].as_posix(), "clips": []})
     for r in rows:
         base = r["rel"].rsplit("/", 1)[-1].rsplit(".", 1)[0]
         r["folder"] = r["pack"][len(prefix):]
@@ -2043,7 +2201,19 @@ def api_anim_clips(params: dict) -> dict:
     total = len(matched)
     resp = {"total": total, "exact": exact,
             "mode": "or-fallback" if (query and exact == 0 and total) else "and",
-            "page": page, "size": size, "q": q, "clips": items}
+            "page": page, "size": size, "q": q,
+            # a clip's file is root + "/" + rel
+            "root": CANONICAL_ROOTS[0].as_posix(), "clips": items}
+    if items:
+        # the character files a clip can play on, per folder on this page
+        # (the same skeleton match /api/anim/tree lists): finding a body
+        # used to take a second call and a guess
+        skel = _skeletons()
+        resp["bodies"] = {               # keyed like each clip's `pack`
+            pk: [{"family": rec["family"], "subfolders": rec["subfolders"],
+                  "bodies": rec["bodies"]} for rec in skel[pk]]
+            for pk in dict.fromkeys(it["pack"] for it in items)
+            if skel.get(pk)}
     _suggest(resp, query, rows, name_of,
              matched[0]["tier"] if matched else 0)
     return P.done(resp)

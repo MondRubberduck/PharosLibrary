@@ -374,7 +374,7 @@ def main() -> int:
         _c0.close()
         mf = browse.api_meshes({"min_dim": ["0.9"], "max_dim": ["1.1"]})
         check("B1: dims filter returns only measured hits",
-              all(0.9 <= (i["max_dim_m"] or 0) <= 1.1 for i in mf["items"])
+              all(0.9 <= max(i["bbox_m"]) <= 1.1 for i in mf["items"])
               and any(i["name"] == "plate" for i in mf["items"])
               and not any(i["name"] == "ghost" for i in mf["items"]),
               f"items={[i['name'] for i in mf['items']]} "
@@ -410,14 +410,14 @@ def main() -> int:
               bool(fb_items) and mf_all.get("mode") == "or-fallback",
               f"mode={mf_all.get('mode')} items={len(fb_items)}")
         if fb_items and mf_all.get("mode") == "or-fallback":
-            check("B8: OR-fallback items keep key/fbx/height_m",
-                  all(i.get("key") and i.get("fbx") and "height_m" in i
+            check("B8: OR-fallback items keep key/bbox_m",
+                  all(i.get("key") and len(i.get("bbox_m") or []) == 3
                       for i in fb_items),
                   str([i.get("key") for i in fb_items][:2]))
             fb_full = browse.api_meshes({"q": ["plate lid"],
                                          "detail": ["1"]})["items"]
-            check("B8: detail=1 fallback items keep fbx_path/view_url/recipe",
-                  all(i.get("fbx_path") and i.get("view_url")
+            check("B8: detail=1 fallback items keep fbx/view_url/recipe",
+                  all(i.get("fbx") and i.get("view_url")
                       and "recipe" in i for i in fb_full),
                   str([sorted(i)[:6] for i in fb_full][:1]))
 
@@ -444,9 +444,9 @@ def main() -> int:
         # 1.4: the registry is Z-up -- height is bbox Z
         h1 = browse.api_meshes({"q": ["fixturepole"], "min_h": ["5"]})
         check("1.4: min_h filters on Z (standing 20 m pole found)",
-              h1["total"] == 1 and h1["items"][0]["height_m"] == 20.0,
+              h1["total"] == 1 and h1["items"][0]["bbox_m"][2] == 20.0,
               f"total={h1['total']} "
-              f"h={[i['height_m'] for i in h1['items']]}")
+              f"h={[i['bbox_m'][2] for i in h1['items']]}")
         h2 = browse.api_meshes({"q": ["fixtureflat"], "min_h": ["0.1"]})
         h2_all = browse.api_meshes({"q": ["fixtureflat"]})["total"]
         check("1.4: zero-height row excluded by min_h=0.1",
@@ -635,7 +635,7 @@ def main() -> int:
         check("crawler + scan rows stable across double rebuild",
               m4["total"] == 5, f"total={m4['total']}")
         _crate = [i["source"] for i in m4["items"]
-                  if i["fbx"].replace("\\", "/").endswith("MyModels/crate.obj")]
+                  if i["key"].endswith("MyModels/crate.obj")]
         check("one row per file: the richer source replaces the scan row",
               _crate == ["leartes"], str(_crate))
         srcs = {i["source"] for i in m4["items"]}

@@ -59,14 +59,14 @@ follow <the Pharos folder>/docs/AGENT_PLAYBOOK.md, phase 2.
 
 Your coding agent gets **facts** in one short answer: real-world size, triangle count, material and texture maps, duration and ownership. Without Pharos it would have to walk the folders and open files, and most of these facts are in no readable file at all.
 
-Measured on a real library of 81,063 files (12,280 models, 2,449 texture sets, 4,737 sounds, 1,313 animation clips). Tokens are roughly bytes ÷ 4.
+Measured on a real library of 81,677 files (12,280 models, 2,438 texture sets, 4,737 sounds, 1,930 animation clips). Tokens are roughly bytes ÷ 4.
 
 | Your agent asks for… | Pharos answers with | Without Pharos, the agent has to… |
 |---|---|---|
-| a brick-wall texture set with all its maps | 10 matching sets, every map path: **~870 tokens** | find them in the folder tree. Even just the 727 file names containing "brick" are ~25,000 tokens. |
-| a thunder or rain sound, 5–30 seconds | 10 sounds with durations: **~590 tokens** | read 194 candidate names (~3,900 tokens), then open each file to learn its length |
-| wooden crates under 1.2 m | 10 crates with height, triangle count and material recipe: **~11,500 tokens** | open or parse every candidate model. Heights and triangle counts are written in no text file. |
-| a street pole at least 4 m tall | 10 poles with the same facts: **~35,000 tokens** (big multi-material meshes) | the same, for 129 candidates |
+| a brick-wall texture set with all its maps | 10 matching sets with measured pixel size and the maps each has: **~1,200 tokens**; every file and its role for the set you pick: ~1,750 more | find them in the folder tree. Even just the 727 file names containing "brick" are ~25,000 tokens, and a folder name like "4K" is no proof of the pixel size. |
+| a thunder or rain sound, 5–30 seconds | 10 sounds with durations: **~480 tokens** | read 194 candidate names (~3,900 tokens), then open each file to learn its length |
+| crates under 1.2 m | 10 crates with size and triangle count: **~1,050 tokens**; the material recipe of the one you pick: ~650 more | read 59 candidate file names (~1,600 tokens), then open and measure every one: sizes and triangle counts are written in no text file |
+| a street pole at least 4 m tall | 10 poles with the same facts: **~1,050 tokens**; one recipe: ~1,850 more | the same, for 209 candidates |
 
 For comparison, one plain listing of every file path in that library is about **2.4 million tokens**. Unreal packs can't be read at all without the Unreal Editor. Pharos converts them once, with your permission.
 

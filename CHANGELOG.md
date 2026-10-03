@@ -18,7 +18,8 @@ A review of how an agent actually browses the library (live tests against a 12,2
 - **Fallback ranking.** When no row matches every word, textures, sounds and purchases now rank the partial matches by word rarity, as documented; they were listed alphabetically.
 
 **Answers are short and say what they did**
-- **Short model items.** A page of 8 models was about 40 KB (one reached 569 KB) because every item carried its full recipe; it is about 4 KB now. `size` goes down to 1; the default page is 20.
+- **Short model items.** A page of 8 models was about 40 KB (one reached 569 KB) because every item carried its full recipe. A short item now holds what an agent needs to choose and nothing it can derive: the absolute `fbx` path (the answer's `root` plus the item's `key`), `max_dim_m` and `height_m` (read off `bbox_m`), the per-import `id` and `on_disk` (1 on every row) are gone from list items; full records keep `fbx` and `id`. `size` goes down to 1; the default page is 20.
+- **Owned, not downloaded.** Model search lists files on disk only, so an agent never learned that a purchase it could ask for matched. Page 1 of a search with query words now names the owner's matching not-downloaded purchases under `owned_not_downloaded` (following the search's style, with the product URL; `total: 0` means checked, none; tools, 3D-print models and removed listings are left out). In `/api/meshes/packs`, a linked purchase's image count is now `image_count`, as everywhere else. A model whose file was missing at indexing carries `missing_file`; one outside the library carries its `fbx`. Full records drop the `fbx_path` and `max_dim` copies.
 - **Full records on request, within a budget.** `/api/meshes/item?key=` returns the recipes of chosen models and stops at about 20k tokens; keys it had no room for come back in `not_returned`.
 - **A stable `key` per model:** the library-relative file path, plus `#object` inside multi-object files. A key cut at its `#` by an HTTP client gets the file's object keys as `candidates`.
 - **`warnings`.** An unknown parameter, an unreadable value or a filter value the library does not have is reported; the answer used to come back unfiltered or empty and look authoritative. Filter values ignore letter case; `avail=owned-not-downloaded` works. New filters: `kind`, `max_dur`, `res`, `min_px`, `has`, descending sorts (directions documented).
@@ -35,6 +36,28 @@ A review of how an agent actually browses the library (live tests against a 12,2
 - **Purchases.** A thumbnail choice that cannot be an image path is dropped (one registry held a status word on every row); a choice whose drive is unplugged is kept. Two purchases sharing a folder no longer overwrite each other.
 - **Pack labels.** The sub-category follows the majority of a pack's files (whole words) instead of the first keyword hit; the pack folder's name breaks a tie. Pack tags keep the most frequent words instead of the alphabetically first twelve.
 - **Pack pages.** The pack page, bulk retag and store-URL setter rejected every pack below a section folder (most packs).
+
+**Building scenes from search results**
+- **Keys in the scene file.** An asset can name the `key` from a search instead of a path; the validator and the builder look up the file and, for a `#object` key, the one object. `"materials": "recipe"` wires the model's own per-slot recipe from the registry, so nothing is pasted.
+- **One object of a multi-object file.** 2,950 models (24%) sit inside 123 files that hold many objects (one kit file holds 719). The builder imported the whole file and moved its first object; it now keeps only the asked-for object. A file without an object named moves as one piece.
+- **Placement no longer overwrites the import.** Every asset gets an empty as root, and position, rotation and scale go on it. Written onto the imported object they replaced the importer's own rotation: files whose up-axis conversion is an object rotation were built lying on their side.
+- **Crowd clips play in Blender 4.4+.** The walk clip was attached without an action slot, so the body stood still.
+- A build that had to skip an asset says `BUILD INCOMPLETE` and exits non-zero.
+- **Texture sets get their colour map.** The builder guessed map roles from substrings of the file names: sets named `<name>_Color` / `<name>_NormalDX` / `<name>_NormalGL` were built grey, with the DirectX normal map. It now wires the maps the registry serves for the set (the OpenGL normal of a pair; a set that is one photo is its colour map), and reads the names of unindexed sets with the importer's role reader, all maps from one set. The check prints the maps it found and warns when there is no colour map.
+- **Whole-file warning.** A multi-object file given without an object is still imported whole, but the check and the builder now say how many objects and triangles that is.
+- **More file types.** The builder imports `.obj`, `.glb`/`.gltf` and objects of `.blend` files besides `.fbx` (1,175 searchable models could not be built). OBJ models are baked upright and centred on their own geometry; the validator rejects files it cannot import.
+- **Per-object budget.** `--budget` counts the one object taken from a file, or the whole file when no object is named.
+- **`SCENE_BUILD.md`**, generated beside the agent docs: the scene-file format, how search results go in, the check and build commands.
+
+**Search answers that steer less wrong**
+- When models match every query word but the filters (size, style, pack ...) remove them all, `warnings` says how many; the partial matches then shown no longer look like the answer.
+- `sort=triangles` / `max_dim` order within each relevance tier: "lowest-poly cart" listed logs and stumps that only matched through a material before the first cart. Lower-LOD copies (only where the pack also holds the full model), collision hulls and flat pieces are marked `lod` / `collider` / `card`; LOD copies, colliders and impostors come after real models, also in the default order.
+- `-lod1` excluded every LOD row, LOD0 included; a code word now stays whole in an exclusion.
+- `unmeasured_excluded` counts only the hidden rows that match the query (it counted the whole library).
+- `stall` also finds booths, tents and market stands; `cobblestone` also finds paving (one-way: `tent` does not find stalls).
+- Object words no longer make a model `medieval`: `lantern`, `cart`, `market`, `tower` and others gave that theme to every lantern in the library. The theme now comes from the period words and from medieval packs.
+- Sound, texture and clip answers carry the `root` their paths start from; texture items their `folder`; clip answers the `bodies` each folder's clips play on.
+- AGENT_START_HERE lists what to read when (it said "read the files listed here IN THIS ORDER" without a list) and prints the real repo path.
 
 **Your own pack tags**
 - **One list, one file.** Every pack has a row in `<agent_files>/pack_tags.csv`: Photorealistic or Stylized, Low Poly (combines with either), a domain and your own words. Tick them on the new dashboard page `/tags` (linked from home and from the registry page), or edit the file in a spreadsheet or text editor; comma, semicolon and tab files and marks like x, 1 or yes are read. The file lives in the library, so it survives a registry rebuild. New packs get a row at the next start; no row is ever removed. Labels you had set in the registry were copied in.

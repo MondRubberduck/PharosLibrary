@@ -51,6 +51,15 @@ SYNONYMS = {
     "plant": ["vegetation", "foliage", "flora"],
 }
 
+# ONE-WAY aliases: the key reaches the words, the words never reach the
+# key or each other. A market stall is sold as a booth, tent or 'Market
+# Stand'; cobblestone paving is named after its stones. Two-way, 'tent'
+# found candle stands and 'cobblestone' a kettle 'setting down'.
+NARROWER = {
+    "stall": ["booth", "tent", "kiosk", "marketstand"],
+    "cobblestone": ["cobble", "paving", "pavingstones", "flagstone"],
+}
+
 
 # connective words that are no tags
 STOPWORDS = frozenset(("the", "and", "with", "for", "from", "into"))
@@ -205,6 +214,10 @@ def synonyms(word: str) -> frozenset:
         if mine & group:
             for g in group:
                 out |= variants(g)
+    for base, words in NARROWER.items():
+        if base in mine:
+            for g in words:
+                out |= variants(g)
     return frozenset(out - mine)
 
 
@@ -262,12 +275,23 @@ class Query:
         for m in re.finditer(r"(?<=\s)-([^\W_][\w-]*)", text, re.UNICODE):
             # '-sci-fi' excludes the glued word and the phrase, never turns
             # its second half into a required word
-            parts = [t for t in tokens(m.group(1)) if len(t) >= 2]
+            # a code word stays whole: '-lod1' cut to 'lod' removed every
+            # LOD row, LOD0 included
+            parts = []
+            term = re.sub(r"(?i)\b(lod)[_-](\d{1,2})\b", r"\1\2", m.group(1))
+            for piece in _pieces(term):
+                code = _code(piece)
+                parts += ([(code, True)] if code else
+                          [(t, False) for t in tokens(piece) if len(t) >= 2])
             if not parts:
                 continue
-            alts = [[variants("".join(parts))]]
-            if len(parts) > 1:
-                alts.append([variants(p) for p in parts])
+            if len(parts) == 1:
+                alts = [[frozenset((parts[0][0],)) if parts[0][1]
+                         else variants(parts[0][0])]]
+            else:
+                alts = [[variants("".join(p for p, _ in parts))],
+                        [frozenset((p,)) if c else variants(p)
+                         for p, c in parts]]
             self.exclude.append(alts)
         text = re.sub(r"(?<=\s)-[^\W_][\w-]*", " ", text, flags=re.UNICODE)
         seen = set()
@@ -357,6 +381,9 @@ def name_forms(name: str) -> tuple:
     for a, b in zip(toks, toks[1:]):
         if a.isalpha() and b.isalpha() and (len(a) > 1 or len(b) > 1):
             forms.add(a + b)
+        elif a == "lod" and b.isdigit() and len(b) <= 2:
+            forms |= {a + b, a + str(int(b))}      # 'lod 1', 'LOD_01'
+
     return (frozenset(forms), tuple(t for t in toks if len(t) > 5),
             frozenset(parts - forms))
 

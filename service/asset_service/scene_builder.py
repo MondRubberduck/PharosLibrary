@@ -7,7 +7,9 @@ Or from Blender's Python console:
     exec(open("scene_builder.py").read()); build("manifest.json")
 
 Reads a validated scene manifest (pharos.scene/v1) and:
-  1. Imports each FBX at scale 1.0 (metres, Y-up — enforced, not guessed)
+  1. Imports each model file at scale 1.0 (metres, Y-up — enforced, not
+     guessed): .fbx, .obj, .glb/.gltf, or the named objects of a .blend.
+     From a multi-object file it keeps only the asset's `object`.
   2. Ground-snaps assets when snap_to_ground is true (uses bbox_min)
   3. Rebuilds materials from hero_textures with packed-channel support
      (Separate RGB → AO/Roughness/Metallic for ORM/RMA maps)
@@ -36,13 +38,19 @@ def build(manifest_path: str, save_path: str = None):
     # validate BEFORE building: agents author manifests, and a bad one
     # used to fail half-way through with objects already in the scene
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from scene_manifest import validate_manifest, check_paths
-    problems = validate_manifest(manifest) + check_paths(manifest)
+    from scene_manifest import validate_manifest, check_paths, resolve_keys
+    problems = validate_manifest(manifest)
+    problems += resolve_keys(manifest)       # search keys -> files/objects
+    problems += check_paths(manifest)
     if problems:
         print("MANIFEST INVALID -- nothing was built:")
         for p in problems[:25]:
             print(f"  - {p}")
         sys.exit(2)
+    from scene_manifest import whole_file_notes
+    for note in whole_file_notes(manifest):
+        print(f"WARNING: {note}")
+    _SKIPPED.clear()
     scene_name = manifest.get("scene", "Pharos Scene")
     ground_y = manifest.get("ground_y", 0.0)
 
@@ -106,54 +114,152 @@ def build(manifest_path: str, save_path: str = None):
     print(f"\nSaved: {save_path}")
     print(f"Objects in scene: {len(bpy.data.objects)}")
     sys.stdout.flush()
+    if _SKIPPED:
+        # a scene missing an asset must not look like a finished build
+        skipped = list(_SKIPPED)
+        _SKIPPED.clear()
+        print(f"BUILD INCOMPLETE: {len(skipped)} asset(s) skipped: "
+              f"{', '.join(skipped)} (see ERROR lines above)")
+        sys.stdout.flush()
+        sys.exit(3)
     return save_path
 
 
+_SKIPPED = []       # asset ids the build could not place
+
+
+def _scene_objects():
+    return set(bpy.context.scene.objects)
+
+
+def _import_file(path, obj_name=None):
+    """Import one model file; returns the objects it added to the scene.
+    Every importer turns its file's Y-up into Blender's Z-up itself."""
+    suffix = Path(path).suffix.lower()
+    before = _scene_objects()
+    if suffix == ".fbx":
+        bpy.ops.import_scene.fbx(
+            filepath=path,
+            global_scale=1.0,
+            use_manual_orientation=False,  # FBX already Y-up from exports
+        )
+    elif suffix == ".obj":
+        bpy.ops.wm.obj_import(filepath=path)
+        # this importer turns Y-up into Z-up with an object ROTATION, and
+        # placement replaces rotations: bake it into the mesh first, or the
+        # model lies on its side (a 0.10 m flat box stood 0.41 m tall)
+        for o in bpy.context.scene.objects:
+            if o not in before and o.type == 'MESH' and o.parent is None:
+                o.data.transform(o.rotation_euler.to_matrix().to_4x4())
+                o.rotation_euler = (0.0, 0.0, 0.0)
+                # an OBJ object has no pivot: its vertices sit where the
+                # file's layout put them. Give it one at the centre of its
+                # footprint, on its base, or the placement keeps that
+                # layout offset
+                vs = [v.co for v in o.data.vertices]
+                if vs:
+                    c = Vector([(min(v[k] for v in vs) + max(v[k] for v in vs))
+                                / 2 for k in range(2)]
+                               + [min(v[2] for v in vs)])
+                    o.data.transform(mathutils.Matrix.Translation(-c))
+                    o.location = o.location + c
+    elif suffix in (".glb", ".gltf"):
+        bpy.ops.import_scene.gltf(filepath=path)
+    elif suffix == ".blend":
+        # load only the named object (a kit file holds hundreds: one
+        # barrel must not pull in 700 objects), or every object
+        with bpy.data.libraries.load(path, link=False) as (src, dst):
+            names = ([obj_name] if obj_name and obj_name in src.objects
+                     else ([] if obj_name else list(src.objects)))
+            dst.objects = names
+        for o in dst.objects:
+            if o is not None and o.type not in ("CAMERA", "LIGHT"):
+                bpy.context.scene.collection.objects.link(o)
+    else:
+        print(f"    WARNING: cannot import {suffix} files: {path}")
+    return [o for o in bpy.context.scene.objects if o not in before]
+
+
+def _pick_object(objects, name):
+    """The imported object called `name`: exactly (earlier holders of the
+    name are parked during the import), else the only object there is,
+    else ignoring case, else with a '.001' Blender appended."""
+    if len(objects) == 1:
+        return objects[0]
+    for test in (lambda o: o.name == name,
+                 lambda o: o.name.lower() == name.lower(),
+                 lambda o: re.sub(r"\.\d{3}$", "", o.name) == name):
+        hit = next((o for o in objects if test(o)), None)
+        if hit is not None:
+            return hit
+    return None
+
+
 def _import_asset(asset, ground_y, index, roots_by_id=None):
-    """Import one FBX, position it, optionally rebuild its material."""
+    """Import one model file, keep the asset's object of a multi-object
+    file, position it, optionally rebuild its material."""
     fbx = asset["fbx"]
     aid = asset.get("id", f"asset_{index}")
-    print(f"  [{index + 1}] {aid}: {Path(fbx).name}")
+    obj_name = asset.get("object")
+    print(f"  [{index + 1}] {aid}: {Path(fbx).name}"
+          + (f" -> {obj_name}" if obj_name else ""))
 
-    # import at scale 1.0, Y-up (Pharos convention)
-    bpy.ops.import_scene.fbx(
-        filepath=fbx,
-        global_scale=1.0,
-        use_manual_orientation=False,  # FBX already Y-up from exports
-    )
-    imported = bpy.context.selected_objects
-    if not imported:
-        print(f"    WARNING: no objects imported from {fbx}")
+    parked = []
+    if obj_name:
+        # an earlier asset may hold this name. Blender would rename the
+        # incoming object ('X.001' arrives as 'X.002') and the pick below
+        # would miss it: park the old holders until the pick is done
+        for o in list(bpy.data.objects):
+            if o.name == obj_name:
+                o.name = f"__pharos_parked_{index}_{len(parked)}"
+                parked.append(o)
+    imported = _import_file(fbx, obj_name)
+    target = _pick_object(imported, obj_name) if obj_name else None
+    for o in parked:
+        o.name = obj_name       # Blender gives it the next free '.NNN'
+    if not imported or (obj_name and target is None):
+        print(f"    ERROR: {aid} skipped: "
+              + (f"object {obj_name!r} not found in {Path(fbx).name}"
+                 + (f" (it holds e.g. {sorted(o.name for o in imported)[:8]})"
+                    if imported else "")
+                 if obj_name else f"no objects imported from {fbx}"))
+        _SKIPPED.append(aid)
+        for o in imported:
+            bpy.data.objects.remove(o, do_unlink=True)
         return
 
-    # find the root of the imported hierarchy: the object with no parent
-    # among the imported set. For KitBash assemblies this is the EMPTY;
-    # for simple meshes it is the mesh itself.
-    parent_set = {obj.name for obj in imported}
-    root = None
-    for obj in imported:
-        if obj.parent is None or obj.parent.name not in parent_set:
-            root = obj
-            break
-    if root is None:
-        root = imported[0]
+    if obj_name:
+        # a multi-object file: the asset is ONE object (and its children).
+        # Importing the whole file and moving its first object once put a
+        # whole office into the scene for one chair.
+        keep = {target, *target.children_recursive}
+        if target.parent is not None:
+            bpy.context.view_layer.update()
+            world = target.matrix_world.copy()
+            target.parent = None
+            target.matrix_world = world
+        drop = [o for o in imported if o not in keep]
+        imported = [o for o in imported if o in keep]
+        for o in drop:          # a removed object must not be touched again
+            bpy.data.objects.remove(o, do_unlink=True)
 
-    # record the original world-space centre, then zero the root so we
-    # can position from a clean origin
-    bpy.context.view_layer.update()
-    world_centre = Vector((0, 0, 0))
-    mesh_count = 0
-    for obj in imported:
-        if obj.type == 'MESH':
-            for corner in obj.bound_box:
-                wc = obj.matrix_world @ mathutils.Vector(corner)
-                world_centre += wc
-                mesh_count += 1
-    if mesh_count:
-        world_centre /= mesh_count
-
-    # zero out the root's location so the assembly starts at origin
-    root.location = (0, 0, 0)
+    # every asset gets its own empty as root; position, rotation and scale
+    # go on that empty. Written onto the imported object itself they
+    # REPLACED what the importer had put there: a file whose up-axis
+    # conversion is an object rotation was built lying on its side, and a
+    # glTF object (quaternion rotation mode) ignored its rotation.
+    loose = [o for o in imported
+             if o.parent is None or o.parent not in imported]
+    if len(loose) == 1:
+        # one model: its pivot goes to the asset position (a part picked
+        # from a kit file does not keep its place in the kit's layout).
+        # Several loose parts keep their distances and move as one.
+        loose[0].location = (0.0, 0.0, 0.0)
+    root = bpy.data.objects.new(f"{aid}_root", None)
+    bpy.context.scene.collection.objects.link(root)
+    for o in loose:
+        o.parent = root            # root sits at the origin: no jump
+    imported.append(root)
     bpy.context.view_layer.update()
 
     # position: the manifest is Y-up ([x, y=height, z]); Blender is Z-up.
@@ -216,6 +322,8 @@ def _import_asset(asset, ground_y, index, roots_by_id=None):
 
     # rebuild material if recipe provided
     mats = asset.get("materials")
+    if not isinstance(mats, dict):
+        mats = None             # "recipe" is resolved before the build
     if mats:
         if mats.get("slots"):
             # per-slot recipes (API recipe.slots[]): one material per slot
@@ -474,41 +582,23 @@ def _apply_texture_sets(manifest, ground_y, roots_by_id):
         if not folder.is_dir():
             print(f"    WARNING: texture folder missing: {folder}")
             continue
-        files = [p for p in sorted(folder.rglob("*"))
-                 if p.is_file() and p.suffix.lower()
-                 in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp")]
-        if setname:
-            # display names use spaces, filenames use underscores --
-            # compare on alphanumerics only. If the NAME matches no
-            # filename (display name is the folder name, files are named
-            # differently -- e.g. a "1k" subfolder row), fall back to ALL
-            # maps in the folder: the folder IS the set the user pointed
-            # at, and a silent skip would lose the ground plane.
-            norm = lambda s: re.sub(r"[^a-z0-9]+", "", s.lower())
-            key = norm(setname)
-            matched = [p for p in files if key in norm(p.stem)]
-            if matched:
-                files = matched
-            else:
-                print(f"    note: set name {setname!r} matches no "
-                      f"filename in {folder} -- using all maps in the "
-                      f"folder")
-        recipe = {}
-        for p in files:
-            n = p.name.lower()
-            if "albedo" in n or "basecolor" in n or "base_color" in n or \
-                    "diffuse" in n or "_alb" in n or "_d." in n:
-                recipe.setdefault("albedo", str(p))
-            elif "normal" in n or "_nrm" in n or "_n." in n:
-                recipe.setdefault("normal", str(p))
-            elif "roughness" in n or "_rgh" in n or "_r." in n:
-                recipe.setdefault("roughness", str(p))
-            elif "metallic" in n or "_met" in n or "_m." in n:
-                recipe.setdefault("metallic", str(p))
+        # which file is which map: the registry's answer for an indexed
+        # set, else read from the file names (scene_manifest.texture_maps;
+        # the substring guess that lived here missed '<name>_Color' and
+        # took the DirectX normal map)
+        from scene_manifest import texture_maps
+        recipe, source = texture_maps(tex)
+        if source == "folder":
+            print(f"    note: set name {setname!r} matches no "
+                  f"filename in {folder} -- using all maps in the "
+                  f"folder")
         if not recipe:
             print(f"    WARNING: no map channels recognised in {folder} "
                   f"(set {setname!r})")
             continue
+        if "albedo" not in recipe:
+            print(f"    WARNING: set {setname!r} has no colour map "
+                  f"(found: {sorted(recipe)}): the surface stays grey")
         applied = []
         if wants_ground:
             size = float(tex.get("size", 20.0))
@@ -562,7 +652,8 @@ def _build_crowd(group, ground_y):
     if not body_objs:
         print(f"    WARNING: body import failed: {body_fbx}")
         return
-    body_root = body_objs[0]
+    # the hierarchy root: instances duplicate everything below it
+    body_root = next((o for o in body_objs if o.parent is None), body_objs[0])
 
     # import the animation, take its action, then DELETE the animation
     # import's own objects -- otherwise a ghost armature stays parked at
@@ -651,9 +742,16 @@ def _build_crowd(group, ground_y):
             if arm:
                 if not arm.animation_data:
                     arm.animation_data_create()
-                arm.animation_data.action = (
+                ad = arm.animation_data
+                ad.action = (
                     action if anim_offset == 0
                     else _offset_action(action, int(anim_offset * i * 24)))
+                # Blender 4.4+: an action only plays through a slot. With
+                # none assigned the clip was attached and the body stood
+                # still in every frame.
+                if (getattr(ad, "action_slot", 0) is None
+                        and getattr(ad, "action_suitable_slots", None)):
+                    ad.action_slot = ad.action_suitable_slots[0]
 
     bpy.ops.object.select_all(action='DESELECT')
 

@@ -156,7 +156,160 @@ def check_texture_set_fallback(tmp: Path) -> None:
         f"control: matching set used {sorted(_images(ctl_plane))}"
 
 
-CHECKS = [check_rotation_conjugation, check_texture_set_fallback]
+def _layout_scene() -> None:
+    """Objects laid out like a kit file: a tall 'Chair' off the origin, a
+    flat 'Desk', a 'Lamp', a 'Pole' that LIES (an object rotation, as the
+    up-axis conversion of some files is) and a 'Crate.001' (a name that
+    already carries Blender's copy suffix)."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    for name, size, loc, rot in (
+            ("Chair", (0.5, 0.5, 1.0), (3, 2, 0.5), 0.0),
+            ("Desk", (2.0, 1.0, 0.1), (-2, 1, 1), 0.0),
+            ("Lamp", (0.3, 0.3, 1.5), (0, -3, 1), 0.0),
+            ("Pole", (0.2, 0.2, 2.0), (5, 5, 1), math.radians(90.0)),
+            ("Crate.001", (0.4, 0.4, 0.4), (-5, -5, 0.2), 0.0)):
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=loc)
+        o = bpy.context.active_object
+        o.name = name
+        o.scale = size
+        bpy.ops.object.transform_apply(location=False, rotation=False,
+                                       scale=True)
+        o.rotation_euler = (rot, 0.0, 0.0)
+
+
+def _world_box(obj):
+    pts = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+    lo = Vector([min(p[k] for p in pts) for k in range(3)])
+    hi = Vector([max(p[k] for p in pts) for k in range(3)])
+    return lo, hi
+
+
+def _at(objs, x, y, tol=0.01):
+    """The objects whose footprint centre is (x, y) in Blender's frame."""
+    out = []
+    for o in objs:
+        lo, hi = _world_box(o)
+        if abs((lo.x + hi.x) / 2 - x) < tol and abs((lo.y + hi.y) / 2 - y) < tol:
+            out.append(o)
+    return out
+
+
+def _size(o):
+    lo, hi = _world_box(o)
+    return tuple(round(v, 3) for v in (hi - lo))
+
+
+def check_one_object_of_a_multi_object_file(tmp: Path) -> None:
+    """A search key 'file#Chair' must place the chair ALONE: the builder
+    imported the whole file and moved its first object (one chair brought
+    a whole office). For every format the builder reads (.fbx, .obj, .glb,
+    objects of a .blend):
+      - the picked object arrives alone, at its position, in its size;
+      - the rotation the importer gave it survives placement (writing the
+        manifest rotation onto the object laid such models on their side);
+      - a glTF object takes the manifest rotation (quaternion mode ignored
+        it);
+      - the same key used twice gives two objects, also for a name that
+        ends in '.001' (the second one was skipped);
+      - a file without an object named moves as one piece."""
+    _layout_scene()
+    files = {"fbx": tmp / "kit.fbx", "obj": tmp / "kit.obj",
+             "glb": tmp / "kit.glb", "blend": tmp / "kit_src.blend"}
+    bpy.ops.export_scene.fbx(filepath=str(files["fbx"]))
+    bpy.ops.wm.obj_export(filepath=str(files["obj"]))
+    bpy.ops.export_scene.gltf(filepath=str(files["glb"]), export_format='GLB')
+    bpy.ops.wm.save_as_mainfile(filepath=str(files["blend"]), copy=True)
+    assets = []
+    for i, (fmt, path) in enumerate(files.items()):
+        assets.append({"id": f"chair_{fmt}", "fbx": str(path),
+                       "object": "Chair", "position": [i * 5.0, 0.0, 0.0]})
+        assets.append({"id": f"pole_{fmt}", "fbx": str(path),
+                       "object": "Pole", "position": [i * 5.0, 0.0, 10.0]})
+    for k, fmt in enumerate(("blend", "blend", "obj", "obj")):
+        assets.append({"id": f"crate_{k}", "fbx": str(files[fmt]),
+                       "object": "Crate.001",
+                       "position": [30.0 + 2 * k, 0.0, 0.0]})
+    assets.append({"id": "desk_turned", "fbx": str(files["glb"]),
+                   "object": "Desk", "position": [40.0, 0.0, 0.0],
+                   "rotation": [0.0, math.radians(90.0), 0.0]})
+    assets.append({"id": "whole", "fbx": str(files["fbx"]),
+                   "position": [0.0, 0.0, 20.0]})
+    _build_and_reopen(tmp, "multi", {"schema": "pharos.scene/v1",
+                                     "scene": "multi", "assets": assets})
+    meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+    # manifest [x, height, z] -> Blender (x, -z, height)
+    for i, fmt in enumerate(files):
+        hit = _at(meshes, i * 5.0, 0.0)
+        assert len(hit) == 1, f"{fmt}: objects at the chair spot: {hit}"
+        assert _size(hit[0]) == (0.5, 0.5, 1.0), \
+            f"{fmt}: chair is {_size(hit[0])}, want (0.5, 0.5, 1.0) upright"
+        hit = _at(meshes, i * 5.0, -10.0)
+        assert len(hit) == 1, f"{fmt}: objects at the pole spot: {hit}"
+        assert _size(hit[0]) == (0.2, 2.0, 0.2), \
+            f"{fmt}: pole is {_size(hit[0])}: the rotation it has in its " \
+            f"file was overwritten (want (0.2, 2.0, 0.2), lying)"
+    for k in range(4):
+        hit = _at(meshes, 30.0 + 2 * k, 0.0)
+        assert len(hit) == 1 and _size(hit[0]) == (0.4, 0.4, 0.4), \
+            f"crate copy {k} (same key used twice) missing: {hit}"
+    hit = _at(meshes, 40.0, 0.0)
+    assert len(hit) == 1 and _size(hit[0]) == (1.0, 2.0, 0.1), \
+        f"glb desk ignored its 90 degree turn: {[_size(o) for o in hit]}"
+    # nothing nobody asked for: 4 chairs + 4 poles + 4 crates + 1 desk
+    # + the 5 objects of the whole file
+    assert len(meshes) == 18, \
+        f"{len(meshes)} meshes, want 18: {sorted(o.name for o in meshes)}"
+    # the whole file moved as one: its parts keep their distances
+    desk, lamp = _at(meshes, -2.0, -19.0), _at(meshes, 0.0, -23.0)
+    assert len(desk) == 1 and len(lamp) == 1, \
+        f"the parts of the whole file drifted: desk {desk} lamp {lamp}"
+    assert desk[0].parent is not None and desk[0].parent == lamp[0].parent, \
+        "loose parts of one file got no common root"
+
+
+def check_crowd_clip_plays(tmp: Path) -> None:
+    """A crowd body got its clip attached but, in Blender 4.4+, no action
+    slot: the 'walking' character stood still in every frame."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.object.armature_add()
+    arm = bpy.context.active_object
+    arm.name = "FX_Rig"
+    bpy.ops.mesh.primitive_cube_add(size=0.2)
+    cube = bpy.context.active_object
+    cube.parent = arm
+    cube.parent_type = 'BONE'
+    cube.parent_bone = arm.data.bones[0].name
+    body, clip = tmp / "body.fbx", tmp / "clip.fbx"
+    bpy.ops.export_scene.fbx(filepath=str(body), bake_anim=False)
+    bone = arm.pose.bones[0]
+    bone.rotation_mode = 'XYZ'
+    bone.keyframe_insert("rotation_euler", frame=1)
+    bone.rotation_euler = (1.2, 0.0, 0.0)
+    bone.keyframe_insert("rotation_euler", frame=20)
+    bpy.ops.export_scene.fbx(filepath=str(clip), bake_anim=True)
+    _build_and_reopen(tmp, "crowd", {
+        "schema": "pharos.scene/v1", "scene": "crowd", "assets": [],
+        "crowd": [{"body_fbx": str(body), "animation_fbx": str(clip),
+                   "position": [0.0, 0.0, 0.0], "count": 1}]})
+    rigs = [o for o in bpy.context.scene.objects if o.type == 'ARMATURE']
+    assert len(rigs) == 1, f"armatures: {[o.name for o in rigs]}"
+    rig = rigs[0]
+    assert rig.animation_data and rig.animation_data.action, "no clip attached"
+    scene = bpy.context.scene
+    poses = []
+    for frame in (1, 20):
+        scene.frame_set(frame)
+        bpy.context.view_layer.update()
+        poses.append(rig.pose.bones[0].matrix.copy())
+    moved = max(abs(poses[0][r][c] - poses[1][r][c])
+                for r in range(4) for c in range(4))
+    assert moved > 0.1, \
+        f"the clip is attached but the bone does not move (max change " \
+        f"{moved:.4f}): no action slot assigned"
+
+
+CHECKS = [check_rotation_conjugation, check_texture_set_fallback,
+          check_one_object_of_a_multi_object_file, check_crowd_clip_plays]
 
 
 def main() -> None:

@@ -28,9 +28,9 @@ token cost.** Operating manual (setup + build doctrine):
   word must match; plurals, aliases and `-word` exclusions understood;
   best match first), by metre dimensions (`min_dim/max_dim/min_h/max_h`),
   pack, source, kind, theme, triangle budget (`max_tri`), texture presence.
-  Answers are SHORT items (about 130 tokens each): stable `key`, absolute
-  file path, real bounding box, triangle count, themes, whether a material
-  recipe exists (`wired`). The full record of a chosen mesh — material
+  Answers are SHORT items (about 90 tokens each): stable `key` (the
+  library-relative file path), real bounding box, triangle count, themes,
+  whether a material recipe exists (`wired`). The full record of a chosen mesh — material
   recipe (`recipe`, `hero_textures`), material names, placement corners,
   3D preview URL — comes from `/api/meshes/item?key=` (or `detail=1`).
   `/api/meshes/packs` lists the pack names, their wiring health and the
@@ -38,9 +38,17 @@ token cost.** Operating manual (setup + build doctrine):
   Full records are size-budgeted (about 20k tokens per answer; the rest
   is listed in `not_returned`), and a key goes into a URL fully
   percent-encoded (`#` → `%23`).
-  `bbox_m` is [x, y, z] metres, Z-up, and `height_m` = `bbox_m[2]` (scan
-  rows keep their raw file axes). Persist `key`: `id`s are session
-  handles and `(pack, name)` is not unique.
+  `bbox_m` is [x, y, z] metres, Z-up, so the height is `bbox_m[2]` (scan
+  rows keep their raw file axes). A model's file is the answer's `root`
+  plus its `key` (for a `container` item, minus the key's last
+  `#object` part); a model outside the library carries its absolute
+  `fbx`, and full records always do. Persist
+  `key`: `id`s are session handles and `(pack, name)` is not unique.
+  The models in an answer were on disk when indexed (`missing_file`
+  marks one that was not); a search with query words also names the
+  owner's matching purchases that are NOT downloaded
+  (`owned_not_downloaded`, following the search's style), so an agent
+  can ask for them.
 - **Honest answers**: every list answer says how it matched (`mode`,
   `exact`, per-item `tier`), which parameters it could not use
   (`warnings`) and which library words are close to an unknown query word
@@ -65,7 +73,8 @@ token cost.** Operating manual (setup + build doctrine):
   in-browser playback via `/audiofile` (HTTP Range).
 - **Purchases**: `/api/collection/items` — owned products by store/type,
   with the three-state availability model (`local` = on disk,
-  `owned-not-downloaded` = purchasable, never silently substituted).
+  `owned-not-downloaded` = bought but not downloaded, never silently
+  substituted).
 - **Animations**: `/api/anim/clips` — clip search across packs, played as
   rendered webm previews or live three.js viewer.
 - **Search semantics** (all five item endpoints): AND-first over stemmed
@@ -106,15 +115,23 @@ token cost.** Operating manual (setup + build doctrine):
 
 ## 5. Scene building (agent-authored scenes)
 
-- `scene_manifest.py` — `pharos.scene/v1` JSON: assets (path, position,
+The generated `SCENE_BUILD.md` beside the agent docs is the agent's
+guide: scene-file format, how search results go in, the commands.
+
+- `scene_manifest.py` — `pharos.scene/v1` JSON: assets (a search `key`
+  — resolved to the file and, for `#object` keys, the one object — or a
+  path; `"materials": "recipe"` pulls the registry's per-slot recipe),
+  position,
   Y-up `rotation` [pitch, yaw, roll] — the builder converts to Blender's
   Z-up), scale, per-slot material recipes, texture sets (applied as
   ground planes), audio beds, crowd block; validator + on-disk path
   checker + triangle budget report (`--budget` warns loudly on any
   registry lookup miss — a mis-costed scene must never look confident).
-- `scene_builder.py` — headless Blender builder: imports FBX at manifest
-  scale (metres), converts Y-up rotations to Blender Z-up, positions the
-  true hierarchy root, ground-snaps via world-space bbox corners on +Z,
+- `scene_builder.py` — headless Blender builder: imports `.fbx`, `.obj`,
+  `.glb`/`.gltf` and objects of `.blend` files at manifest scale
+  (metres), keeps only the asset's object of a multi-object file,
+  converts Y-up rotations to Blender Z-up, positions the true hierarchy
+  root (loose parts get one common root), ground-snaps via world-space bbox corners on +Z,
   rebuilds Principled BSDF materials from recipes incl. packed ORM
   channel separation, **emissive (additive emission) and opacity (alpha
   blend)**, **per-slot wiring** from `recipe.slots[]` (multi-slot KitBash

@@ -189,7 +189,7 @@ def test_search_items_are_short_and_recipe_comes_on_request():
             full = browse.api_meshes({"q": ["crate"], "detail": ["1"]})["items"][0]
             assert full["recipe"]["resolved"] and \
                 full["hero_textures"] == {"albedo": "x/crate_alb.png"} and \
-                full["materials"] == ["M_Wood"] and full["fbx_path"], full
+                full["materials"] == ["M_Wood"] and full["fbx"], full
             fn = getattr(browse, "api_meshes_item", None)
             assert fn is not None, "no /api/meshes/item"
             got = fn({"key": [item["key"], "nope/missing.fbx"]})
@@ -482,7 +482,7 @@ def test_pack_list_links_the_purchase_with_its_store_images():
             pack = browse.api_meshes_packs()["packs"][0]
         finally:
             browse._DB_PATH = old
-    assert [p.get("images") for p in pack.get("purchases") or []] == [7], pack
+    assert [p.get("image_count") for p in pack.get("purchases") or []] == [7], pack
 
 
 def _drive(path, method="GET", body=b""):
@@ -2379,6 +2379,382 @@ def test_tag_page_and_retag_write_the_tag_file_not_the_registry():
             _with_registry([], run)
         finally:
             pack_tags.PATH = old
+
+
+def test_short_items_repeat_nothing_and_name_owned_purchases():
+    """A third of a search answer repeated itself (fbx = root + key,
+    max_dim_m / height_m = bbox_m, on_disk = 1 on every row), while the
+    one signal the owner meant on_disk to be -- "I own this, ask me" --
+    never reached a model search: a not-downloaded purchase has no model
+    rows, so an agent searching models saw files on disk only."""
+    import sqlite3
+    from asset_service import collection_import, config
+    lib = config.LIBRARY_ROOT.as_posix()
+    rows = [("Bench", "Park", {"fbx": f"{lib}/Park/Bench.fbx", "dim": 2}),
+            ("Crate", "Elsewhere", {"fbx": "E:/Elsewhere/Crate.fbx"})]
+
+    def run(browse):
+        conn = sqlite3.connect(browse._DB_PATH)
+        conn.executescript(collection_import.COLLECTION_DDL)
+        for name, avail, tags in (
+                ("Medieval Market Benches", "owned-not-downloaded", '["bench"]'),
+                ("Park Benches Local", "local", '["bench"]'),
+                ("Desert Rocks", "owned-not-downloaded", '["rock"]'),
+                ("Bench Tool", "owned-not-downloaded", '["bench"]')):
+            conn.execute(
+                "INSERT INTO collection (name, folder, store, image_count,"
+                " availability, tags, url, type_group) VALUES (?, 'x', 'FAB',"
+                " 4, ?, ?, 'https://example.invalid/p', ?)",
+                (name, avail, tags, "Tool" if "Tool" in name else "3D Model"))
+        conn.commit()
+        conn.close()
+        r = browse.api_meshes({"q": ["bench"]})
+        item = r["items"][0]
+        for gone in ("fbx", "max_dim_m", "height_m", "id", "on_disk"):
+            assert gone not in item, (gone, item)
+        assert r["root"] + "/" + item["key"] == f"{lib}/Park/Bench.fbx", (r["root"], item)
+        assert item["bbox_m"] == [2, 2, 2], item
+        own = r.get("owned_not_downloaded") or {}
+        assert [i["name"] for i in own.get("items", [])] == [
+            "Medieval Market Benches"], own
+        assert own["total"] == 1 and "avail=notdown" in own["more"], own
+        assert own["items"][0]["url"] and own["items"][0]["image_count"] == 4, own
+        assert "owned_not_downloaded" not in browse.api_meshes(
+            {"q": ["bench"], "page": ["2"]}), "repeated on every page"
+        # checked, none -- not silence
+        assert browse.api_meshes({"q": ["lamp"]})["owned_not_downloaded"] == {"total": 0}
+        # the search's style applies to the purchases too
+        assert browse.api_meshes({"q": ["bench"], "style": ["Stylized"]})[
+            "owned_not_downloaded"] == {"total": 0}
+        assert "owned_not_downloaded" not in browse.api_meshes(
+            {"q": ["bench"], "pack": ["Park"]}), "one pack asked for"
+        # a model theme is no purchase word: it must not empty the list
+        assert browse.api_meshes({"q": ["bench"], "theme": ["prop"]})[
+            "owned_not_downloaded"]["total"] == 1
+        full = browse.api_meshes_item({"key": [item["key"]]})["items"][0]
+        assert full["fbx"] == f"{lib}/Park/Bench.fbx" and full["id"], full
+        assert "fbx_path" not in full and "max_dim" not in full, full
+        # a file outside the library: root + key would be wrong
+        out = browse.api_meshes({"q": ["crate"]})["items"][0]
+        assert out["fbx"] == "E:/Elsewhere/Crate.fbx" == out["key"], out
+
+    _with_registry(rows, run)
+
+
+def test_filters_that_remove_every_exact_match_say_so():
+    """'medieval chair' with max_h=1 removed the one exact chair and fell
+    back to partial matches -- sci-fi chairs -- without a word. The answer
+    now says how many models match every word but not the filters."""
+    rows = [("Medieval Chair", "Old", {"dim": 1.4}),
+            ("Office Chair", "Modern", {"dim": 0.9})]
+
+    def run(browse):
+        r = browse.api_meshes({"q": ["medieval chair"], "max_h": ["1"]})
+        assert r["mode"] == "or-fallback", r
+        w = " ".join(r.get("warnings") or [])
+        assert "1 model(s) match every query word" in w and "max_h=1" in w, r
+        assert "warnings" not in browse.api_meshes({"q": ["medieval chair"]})
+    _with_registry(rows, run)
+
+
+def test_sorts_keep_relevance_and_put_copies_last():
+    """sort=triangles ordered by triangles alone: logs and loaves that
+    only matched 'cart' through a material came before the first cart,
+    and lower LODs, collision hulls and flat cards won 'lowest poly'."""
+    ctx_cart = '{"stems":[],"themes":[],"facets":{},"ctx":["cart"]}'
+    rows = [("Cart", "P", {"tris": 500}),
+            ("Cart LOD1", "P", {"tris": 100}),
+            ("UCX Cart", "P", {"tris": 12}),
+            ("Cart Impostor", "P", {"tris": 8}),
+            ("Log", "P", {"tris": 10, "meta": ctx_cart})]
+
+    def run(browse):
+        r = browse.api_meshes({"q": ["cart"], "sort": ["triangles"]})
+        assert _names(r)[0] == "Cart" and _names(r)[-1] == "Log", _names(r)
+        by = {i["name"]: i for i in r["items"]}
+        assert by["Cart LOD1"]["lod"] == 1 and by["UCX Cart"]["collider"]
+        assert by["Cart Impostor"]["card"] and "lod" not in by["Cart"], by
+        # a real billboard prop is no card, a pack's only copy no lower LOD,
+        # and 'Col' inside a camelCase word no collider
+        other = {i["name"]: i for i in browse.api_meshes(
+            {"q": ["billboard stall papercol"], "size": ["50"]})["items"]}
+        assert set(other) == {"Billboard Large", "Stall LOD1", "PaperCol A"}, other
+        assert not any(k in i for i in other.values()
+                       for k in ("card", "lod", "collider")), other
+        # a flat 2-triangle quad is flagged, but it may be a real floor:
+        # it is not ranked behind the heavier floors
+        floors = browse.api_meshes({"q": ["floor"], "sort": ["triangles"]})
+        assert _names(floors) == ["Floor Quad", "Floor Heavy"], _names(floors)
+        assert floors["items"][0]["card"] is True, floors["items"][0]
+    _with_registry(rows + [("Billboard Large", "Q", {"tris": 4000}),
+                           ("Stall LOD1", "Q"),
+                           ("PaperCol A", "Q", {"object_name": "PaperCol_A"}),
+                           ("Floor Quad", "Q", {"tris": 2, "dim": 0}),
+                           ("Floor Heavy", "Q", {"tris": 900})],
+                   run)
+
+
+def test_excluding_one_lod_keeps_the_others():
+    """'-lod1' was cut to 'lod' and removed every LOD row, LOD0 included:
+    the only way to drop lower LODs returned nothing."""
+    tags = '["crate", "lod"]'
+    rows = [("Crate01 LOD0", "W", {"tags": tags}),
+            ("Crate01 LOD1", "W", {"tags": tags})]
+
+    def run(browse):
+        assert _names(browse.api_meshes({"q": ["crate -lod1"]})) == [
+            "Crate01 LOD0"]
+    _with_registry(rows, run)
+
+
+def test_unmeasured_count_is_about_the_matches():
+    """unmeasured_excluded counted every unmeasured row of the library,
+    so a filtered 'bench' search reported hidden rows that were lamps."""
+    rows = [("Bench", "P", {"dim": 1}), ("Lamp", "P", {"dim": 0})]
+
+    def run(browse):
+        r = browse.api_meshes({"q": ["bench"], "max_dim": ["2"]})
+        assert r["unmeasured_excluded"] == 0 and _names(r) == ["Bench"], r
+        r = browse.api_meshes({"q": ["lamp"], "max_dim": ["2"]})
+        assert r["unmeasured_excluded"] == 1, r
+    _with_registry(rows, run)
+
+
+def test_scene_words_reach_their_names():
+    """A market stall is sold as a booth or tent; cobblestone paving is
+    named after its stones. One way only: as a two-way group, 'tent'
+    found candle stands and 'cobblestone' a sound 'setting down'."""
+    from asset_service import textmatch as tm
+    rows = [("Market Tent", "P"), ("Old Paving", "P"), ("Candle Stand", "P"),
+            ("Market Stall", "P"), ("Kettle Setting Down", "P")]
+
+    def run(browse):
+        assert _names(browse.api_meshes({"q": ["stall"]})) == [
+            "Market Stall", "Market Tent"]
+        assert _names(browse.api_meshes({"q": ["cobblestone"]})) == [
+            "Old Paving"]
+        assert _names(browse.api_meshes({"q": ["tent"]})) == ["Market Tent"]
+    _with_registry(rows, run)
+    assert not tm.synonyms("tent") & {"stall", "kiosk", "booth"}
+
+
+def test_object_words_do_not_make_a_model_medieval():
+    """'lantern', 'cart', 'market', 'tower' gave the theme 'medieval' to
+    every lantern of the library, so theme=medieval filtered nothing. The
+    theme comes from period words and from a medieval pack."""
+    from asset_service import meshes_import
+
+    def themes(name, pack):
+        rec = meshes_import._record(
+            {"name": name, "pack": pack, "bbox_m": [1, 1, 1]},
+            dict(meshes_import.EMPTY_RECIPE), None, None)
+        return set(json.loads(rec["meta"])["themes"])
+
+    assert "medieval" not in themes("SM_Lantern_01", "FX_NeonCity")
+    assert "medieval" not in themes("SM_Shopping_Cart", "FX_Mall")
+    assert "medieval" in themes("SM_Lantern_01", "FX_MedievalTown")
+    assert "medieval" in themes("SM_Castle_Wall", "FX_Any")
+    # a kit below a generic section folder: the table knows the kit by the
+    # folder its file sits in, the pack name is the section's
+    meshes_import.PACK_THEMES["fx_oldtown"] = ["medieval"]
+    try:
+        rec = meshes_import._record(
+            {"name": "SM_Tower_A", "pack": "FX_Kits", "bbox_m": [1, 1, 1],
+             "fbx": "x:/FX_Kits/FX_OldTown/all.fbx"},
+            dict(meshes_import.EMPTY_RECIPE), None, None)
+        assert "medieval" in json.loads(rec["meta"])["themes"], rec["meta"]
+    finally:
+        del meshes_import.PACK_THEMES["fx_oldtown"]
+
+
+def test_sound_texture_and_clip_answers_name_their_files():
+    """Mesh answers had a root; sounds, texture sets and clips did not, so
+    writing a scene file took extra calls and path guesses. Each answer
+    now gives the folder its paths start from, texture items their folder
+    and clip answers the bodies each folder's clips play on."""
+    from asset_service import browse
+    r = _with_registry([], lambda b: b.api_audio_items({}),
+                       audio=[("rain", "Weather", 10)])
+    assert r["root"] == browse.AUDIO_ROOT.as_posix() and r["items"][0]["rel"], r
+    r = _with_registry([], lambda b: b.api_anim_clips({}),
+                       clips=["Animation/Moves/walk.fbx"])
+    assert r["root"] == browse.CANONICAL_ROOTS[0].as_posix(), r
+    assert isinstance(r.get("bodies"), dict), r
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "Textures_Materials"
+        _tf_library(root)
+        dbp = Path(tmp) / "reg.sqlite"
+        _tf_import(dbp, root)
+        old = browse._DB_PATH
+        browse._DB_PATH = str(dbp)
+        try:
+            t = browse.api_textures_items({})
+        finally:
+            browse._DB_PATH = old
+    item = t["items"][0]
+    assert t["root"] and item.get("folder"), (t["root"], item)
+    assert (t["root"] + "/" + item["folder"]).replace("\\", "/").lower() \
+        .startswith(t["root"].lower()), item
+
+
+def test_scene_file_takes_search_keys():
+    """A scene file needed absolute paths copied out of full records and
+    pasted recipes; a key with '#object' could not name the object. The
+    validator now resolves keys to the file and the object, pulls the
+    registry recipe for "materials": "recipe", rejects files the builder
+    cannot import, and budgets one object -- not its whole file."""
+    import sqlite3
+    sys.path.insert(0, str(REPO / "service" / "asset_service"))
+    import scene_manifest as sm
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "Lib"
+        (root / "Kit").mkdir(parents=True)
+        (root / "Pack").mkdir()
+        for f in ("Kit/room.fbx", "Pack/bench.fbx"):
+            (root / f).write_bytes(b"x")
+        recipe = json.dumps({"slots": [{"slot": "M_Wood", "maps": []}],
+                             "primary": {}, "resolved": True})
+        rows = [("Chair", "Kit", {"fbx": str(root / "Kit" / "room.fbx"),
+                                  "object_name": "chair", "tris": 100}),
+                ("Desk", "Kit", {"fbx": str(root / "Kit" / "room.fbx"),
+                                 "object_name": "desk", "tris": 900}),
+                ("Bench", "Pack", {"fbx": str(root / "Pack" / "bench.fbx"),
+                                   "recipe": recipe, "tris": 50})]
+        dbp = _search_registry(tmp, rows)
+        data = {"assets": [
+            {"id": "c", "key": "Kit/room.fbx#chair"},
+            {"id": "b", "key": "Pack/bench.fbx", "materials": "recipe"},
+            {"id": "x", "key": "Pack/nothing.fbx"}]}
+        errs = sm.resolve_keys(data, dbp, root)
+        c, b = data["assets"][0], data["assets"][1]
+        assert c["fbx"].endswith("Kit/room.fbx") and c["object"] == "chair", c
+        assert b["materials"] == {"slots": [{"slot": "M_Wood", "maps": []}]}, b
+        assert len(errs) == 1 and "Pack/nothing.fbx" in errs[0], errs
+        # a record copied from the API carries key AND fbx: the object of
+        # the key still counts (the whole file was built for one chair)
+        both = {"assets": [{"id": "d", "key": "Kit/room.fbx#desk",
+                            "fbx": str(root / "Kit" / "room.fbx")}]}
+        assert sm.resolve_keys(both, dbp, root) == [], both
+        assert both["assets"][0]["object"] == "desk", both
+        # a multi-object file without '#object' is refused, with the reason
+        bare = sm.resolve_keys({"assets": [{"id": "k", "key": "Kit/room.fbx"}]},
+                               dbp, root)
+        assert len(bare) == 1 and "2 objects" in bare[0], bare
+        # a wrong object is named as the problem, with the names there are
+        wrong = sm.resolve_keys(
+            {"assets": [{"id": "k", "key": "Kit/room.fbx#sofa"}]}, dbp, root)
+        assert len(wrong) == 1 and "'sofa'" in wrong[0]             and "chair, desk" in wrong[0], wrong
+        split = {"assets": [{"id": "k", "key": "Kit/room.fbx",
+                             "object": "desk"}]}
+        assert sm.resolve_keys(split, dbp, root) == [], split
+        # ... and by PATH it is still imported whole, but not silently
+        fbx = str(root / "Kit" / "room.fbx")
+        notes = sm.whole_file_notes({"assets": [{"id": "w", "fbx": fbx}]}, dbp)
+        assert len(notes) == 1 and "2 objects" in notes[0]             and "1,000 triangles" in notes[0], notes
+        assert sm.whole_file_notes({"assets": [
+            {"id": "c", "fbx": fbx, "object": "chair"},
+            {"id": "b", "fbx": str(root / "Pack" / "bench.fbx")}]}, dbp) == []
+
+        assert sm.check_paths({"assets": [c, b]}) == []
+        budget = sm.budget_check({"assets": [c]}, dbp)
+        assert budget["total_triangles"] == 100, budget
+        whole = sm.budget_check({"assets": [{"fbx": c["fbx"]}]}, dbp)
+        assert whole["total_triangles"] == 1000, whole
+        bad = sm.validate_manifest({"assets": [
+            {"id": "m", "fbx": str(root / "a.max")},
+            {"id": "r", "fbx": str(root / "Pack" / "bench.fbx"),
+             "materials": "recipe"}]})
+        assert any("'.max'" in e for e in bad), bad
+        assert any("needs 'key'" in e for e in bad), bad
+
+
+def test_texture_sets_get_their_colour_map():
+    """The builder guessed map roles from substrings of file names: a set
+    named '<name>_Color' / '<name>_NormalDX' / '<name>_NormalGL' was built
+    grey with the DirectX normal map. One reader now decides, the same
+    one the texture search uses, and an indexed set takes the maps the
+    registry serves."""
+    sys.path.insert(0, str(REPO / "service" / "asset_service"))
+    import scene_manifest as sm
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "Textures_Materials"
+        loose = root / "Loose"
+        loose.mkdir(parents=True)
+        names = ["FX_Paving_4K_Color.png", "FX_Paving_4K_NormalDX.png",
+                 "FX_Paving_4K_NormalGL.png", "FX_Paving_4K_Roughness.png",
+                 "FX_Paving_4K_Displacement.png",
+                 "FX_Other_4K_Color.png", "FX_Other_4K_NormalGL.png"]
+        for n in names:
+            (loose / n).write_bytes(_tf_png(8, 8))
+        none = str(Path(tmp) / "no_registry.sqlite")
+        entry = {"set": "FX Paving", "folder": str(loose)}
+        maps, source = sm.texture_maps(entry, none)
+        got = {r: Path(f).name for r, f in maps.items()}
+        assert source == "names" and got == {
+            "albedo": "FX_Paving_4K_Color.png",
+            "normal": "FX_Paving_4K_NormalGL.png",
+            "roughness": "FX_Paving_4K_Roughness.png"}, (source, got)
+        # a name that matches no file: every map of the folder, said so
+        maps, source = sm.texture_maps(
+            {"set": "Display Name", "folder": str(loose)}, none)
+        assert source == "folder" and "albedo" in maps, (source, maps)
+        # an indexed set: the registry's maps
+        own = root / "FX_Paving_4K"          # a set in its own folder
+        own.mkdir()
+        for n in names[:5]:
+            (own / n).write_bytes(_tf_png(8, 8))
+        dbp = Path(tmp) / "reg.sqlite"
+        rows = _tf_import(dbp, root)
+        row = next(r for r in rows if r["folder"].endswith("FX_Paving_4K"))
+        maps, source = sm.texture_maps(
+            {"set": row["name"], "folder": row["folder"]}, str(dbp))
+        assert source == "registry", (source, row["name"], row["folder"])
+        assert Path(maps["normal"]).name == "FX_Paving_4K_NormalGL.png"             and Path(maps["albedo"]).name == "FX_Paving_4K_Color.png", maps
+        # an unindexed name that several sets share: every map from ONE of
+        # them (a 'Roof' was assembled from three different roof sets)
+        for sub, files in (("red_roof", ["red_roof_diffuse.png"]),
+                           ("green_roof", ["Green_Roofing_NRM.png",
+                                           "Green_Roofing_rough.png"])):
+            (loose / sub).mkdir()
+            for n in files:
+                (loose / sub / n).write_bytes(_tf_png(8, 8))
+        maps, _ = sm.texture_maps({"set": "Roof", "folder": str(loose)}, none)
+        assert len({Path(f).parent for f in maps.values()}) == 1, maps
+        assert Path(maps["albedo"]).name == "red_roof_diffuse.png", maps
+        # an indexed set that is one plain photo: that photo is its colour
+        # map, and nothing is guessed from other files
+        import sqlite3
+        photo = root / "FX_Roof.png"
+        photo.write_bytes(_tf_png(8, 8))
+        conn = sqlite3.connect(str(dbp))
+        conn.execute(
+            "INSERT INTO textures (name, grp, sub, folder, files, images,"
+            " file_count, bytes, first_image, thumb, tags, meta, source)"
+            " VALUES ('FX Roof', 'g', 's', ?, '[]', '[]', 1, 1, ?, ?, '[]',"
+            " '{}', 'crawl')", (root.as_posix(), photo.as_posix(),
+                                photo.as_posix()))
+        conn.commit()
+        conn.close()
+        maps, source = sm.texture_maps(
+            {"set": "FX Roof", "folder": str(root)}, str(dbp))
+        assert source == "registry" and maps == {"albedo": photo.as_posix()},             (source, maps)
+
+
+def test_agent_start_page_lists_what_to_read_when():
+    """START_HERE said 'read the files listed here IN THIS ORDER' and had
+    no list; read literally it pulled in six files, setup guides among
+    them, and it wrote '<repo>' where it knew the path. Scene building
+    sent agents into a 13 KB capabilities file and the code; it now has
+    its own short guide."""
+    from asset_service import agent_docs
+    start = agent_docs.START_TEMPLATE
+    assert "IN THIS ORDER" not in start and "<repo>" not in start
+    assert "SCENE_BUILD.md" in start and "Read it when" in start
+    scene = agent_docs.SCENE_TEMPLATE.format(
+        generated="g", repo="R", base="B", py="P", blender="BL")
+    for need in ('"key"', '"materials": "recipe"', "scene_manifest.py",
+                 "--factory-startup", "bodies", ".obj"):
+        assert need in scene, need
 
 
 if __name__ == "__main__":

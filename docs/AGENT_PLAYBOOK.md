@@ -57,9 +57,12 @@ the library does not cover a need, COVER IT, and say so.
 
 ### Asset priority list (in order, never skip a tier silently)
 
-1. **On disk** (availability `local`, `on_disk: 1`) → USE it. Verify
-   the path exists, check `dim_suspect`, mind the triangle budget.
-2. **On demand** (availability `owned-not-downloaded`) → ASK the user.
+1. **On disk** (a model in a search answer, unless it says
+   `missing_file`; purchases with availability `local`) → USE it.
+   Verify the file exists, check `dim_suspect`, mind the triangle
+   budget.
+2. **On demand** (`owned_not_downloaded` in a model search answer;
+   purchases with availability `owned-not-downloaded`) → ASK the user.
    Present a requisition list with product URLs. Never download
    silently, never substitute silently. If the user declines, fall
    through to tier 3.
@@ -85,10 +88,10 @@ the library does not cover a need, COVER IT, and say so.
   path (`"C:\Program Files\Blender Foundation\Blender 5.x\blender.exe"`)
   or add it to PATH yourself.
 - Query first (`/api/meshes`, `/api/textures/items`, …): search answers
-  are short lists. For the meshes you CHOOSE, fetch the full records in
-  one call (`/api/meshes/item?key=<key>&key=<key>…`), then author a
-  `pharos.scene/v1` manifest (Y-up rotations, per-slot recipes via
-  `recipe.slots[]`, `textures[]` for ground planes), validate +
+  are short lists. Author a `pharos.scene/v1` manifest with the `key`s
+  of the meshes you CHOOSE (`"materials": "recipe"` wires each model's
+  own textures; `SCENE_BUILD.md` beside the agent docs has the format),
+  Y-up rotations, `textures[]` for ground planes, then validate +
   `--budget` (heed the warnings), probe risky FBX files with
   `verify_importable.py`, then build headless and VERIFY the .blend
   by reopening it (object count, min-Z, material nodes).

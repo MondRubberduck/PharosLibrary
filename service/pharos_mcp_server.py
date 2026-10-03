@@ -193,13 +193,25 @@ def pharos_search_meshes(
         with_textures: only meshes with texture links
         sort: relevance (default with a query), name, max_dim (largest
               first), -max_dim (smallest first), triangles (fewest
-              first), -triangles (most first); unmeasured rows last
+              first), -triangles (most first); a sort orders within each
+              relevance tier, lower LODs / collision hulls / flat cards
+              after real models, unmeasured rows last
         limit: results per page (1-100); page: 1-based
 
-    Returns JSON {total, exact, mode, items, warnings?}. Items are SHORT:
-    key, name, pack, fbx (absolute path), bbox_m, height_m, triangles,
-    wired (a material recipe exists), themes, tier, and the owner's
-    `styles` / `pack_tags` when the pack is tagged. Fetch the recipe of
+    Returns JSON {total, exact, mode, root, items, warnings?,
+    owned_not_downloaded?}. Items are SHORT: key, name, pack, bbox_m
+    (metres, Z-up), triangles, wired (a material recipe exists), themes,
+    tier, and the owner's `styles` / `pack_tags` when the pack is tagged;
+    `lod` / `collider` / `card` mark lower-LOD copies, collision hulls and
+    flat pieces (billboards, decals, plain floor or wall quads). When models match every word but the filters remove
+    them all, `warnings` says how many.
+    A mesh's file is root + '/' + key (for a container item drop the
+    last '#object' part; an item outside the library carries its own
+    absolute `fbx`). `owned_not_downloaded` (page 1, with a query) lists
+    purchases the owner has bought but NOT downloaded that match the
+    query and style (themes and sizes do not apply): offer them as a
+    requisition before settling. The full list: pharos_search_collection
+    with availability="notdown" and the q shown in its `more` link. Fetch the recipe of
     the meshes you pick with pharos_get_meshes(keys).
     """
     return json.dumps(_api(
