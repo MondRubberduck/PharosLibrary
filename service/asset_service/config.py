@@ -8,6 +8,7 @@ and edit it. Change the JSON, restart, done.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -85,8 +86,10 @@ def load() -> dict:
 
 
 def save(cfg: dict) -> None:
-    _CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False),
-                            encoding="utf-8")
+    """Whole file or nothing: written beside, then swapped in."""
+    tmp = _CONFIG_FILE.with_name(_CONFIG_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, _CONFIG_FILE)
 
 
 def is_configured() -> bool:

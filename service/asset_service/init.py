@@ -456,6 +456,18 @@ def run_init(argv=None) -> int:
         return 0
 
     cfg = build_config(report, registry_dir)
+    # the library map (the survey's tree, the owner's decisions) is the
+    # contract; the config mirrors its picks for the importers
+    from . import library_map
+    map_path = root / (cfg.get("agent_files") or "_Agent_Files") / library_map.FILE
+    res = library_map.refresh(root, path=map_path)
+    if "error" not in res:
+        rows = library_map.load(map_path)
+        library_map.apply_to_config(rows, cfg, root, library_map.weights_of(res))
+        print(f"\nlibrary map: {len(rows)} folder(s) surveyed in {res['seconds']} s "
+              f"-> {map_path}")
+        for line in library_map.summary(rows):
+            print(f"  {line}")
     config.save(cfg)
     print(f"\nconfig written: {cfg_file}")
     # init only writes the config; a registry another library left in that
@@ -492,8 +504,8 @@ def run_init(argv=None) -> int:
     not_indexed = [u for u in report["unknown"] if u not in covered]
     if not_indexed:
         print(f"  NOT INDEXED (matched no section): {', '.join(not_indexed)}")
-        print("    -> point a section at them in pharos_config.json, "
-              "or scan them with scanner.py")
+        print('    -> fix their row: python pharos.py map set "<folder>" kind=<kind> '
+              "include=yes  (or include=no to leave them out)")
     if picks.get("animation"):
         print(f"  animation     : run indexer.py to index the clip packs ->"
               f" \"{sys.executable}\" \"{_REPO / 'service' / 'asset_service' / 'indexer.py'}\""
@@ -521,8 +533,7 @@ def run_init(argv=None) -> int:
           "decision questions to your user)")
     print(f'  start the server: "{py}" "{_REPO / "pharos.py"}" serve'
           "   (or python service/asset_service/browse.py)")
-    print("  agent setup flow: docs/STARTING_PROMPT.md + "
-          "docs/AGENT_SETUP_BRIEF.md")
+    print("  agent setup flow: docs/STARTING_PROMPT.md + docs/AGENT_SETUP.md")
     if report["mesh_folders"]:
         print(f'  index model folders: "{py}" '
               f"\"{_REPO / 'service' / 'asset_service' / 'scanner.py'}\" "

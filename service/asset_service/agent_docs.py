@@ -75,7 +75,7 @@ was measured against the live registry at that moment.
 | `AGENT_API.md` (this folder) | you need a parameter or answer field this page does not show |
 | `SCENE_BUILD.md` (this folder) | you build a Blender scene: scene-file format, how search results go in, the build command |
 | `{repo}/docs/AGENT_PLAYBOOK.md` | you run a whole project: phases, priority lists, the report |
-| `{repo}/docs/AGENT_SETUP_BRIEF.md` | ONLY when setting the library up (not for searching or building) |
+| `{repo}/docs/AGENT_SETUP.md` | ONLY when setting the library up (not for searching or building) |
 
 ## Step 1 — probe the local API (fastest path, prefer it)
 
@@ -120,6 +120,15 @@ rather than `pack=` — one pack rarely holds every object you need.
 
 {unmeasured_note}
 
+## The library map (what each top-level folder is)
+
+{library_map_lines}
+
+The full map (every folder, the owner's decisions and tags) is
+`library_map.csv` beside this file; `pharos.py map show` prints it. A
+decision marked PENDING means the owner has not said yet whether that
+content may be converted or extracted: ask, do not assume.
+
 A zero section means EITHER the library has no such content OR setup
 never indexed it — the count alone cannot tell them apart. Run
 `"{py}" "{repo}/pharos.py" doctor` (it names every not-indexed section
@@ -131,9 +140,9 @@ with the command that fills it) before concluding anything is absent.
 Phase 1 = setup + crawl + INTERVIEW your user (are these all the
 folders? crawl UE? purchase CSV? what to do with .blend files?) until
 the server banner says INGESTION COMPLETE and the user confirmed. If
-setup was never finished, `{repo}/docs/AGENT_SETUP_BRIEF.md` is the
-decision matrix and `{repo}/docs/STARTING_PROMPT.md` the paste-ready
-flow. Phase 2 = build, following the priority lists:
+setup was never finished, `{repo}/docs/AGENT_SETUP.md` is the
+contract (the library map holds the decisions) and
+`{repo}/docs/STARTING_PROMPT.md` the paste-ready flow. Phase 2 = build, following the priority lists:
 
 1. Asset on disk → use it. 2. On demand (owned-not-downloaded) → ask
 the user with a requisition list, never substitute silently. 3. Not in
@@ -207,7 +216,7 @@ the configured roots — outside paths return 404/403.
 | `/api/stats` | — | `stats` (legacy packs) + `sections` (live totals) |
 
 Styles and `pack_tags` are the owner's own labels per pack (kept in
-`pack_tags.csv` beside this file). A pack the owner has not tagged has no
+`library_map.csv` beside this file). A pack the owner has not tagged has no
 style: never read a missing style as "not photorealistic". Your query
 words also match these tags (`q=low poly tree`).
 
@@ -492,6 +501,12 @@ def generate(db_path: str | None = None, repo_hint: str | None = None) -> list[P
         "(scan-only/unparseable sources): size filters exclude them, and "
         "the API response's `unmeasured_excluded` field says how many "
         "the active filter hides.") if c.get("unmeasured") else ""
+    try:
+        from . import library_map
+        lines = library_map.summary(library_map.load()) or ["(no map yet: run pharos.py ingest)"]
+    except Exception:                                     # noqa: BLE001
+        lines = ["(map unreadable)"]
+    c["library_map_lines"] = "\n".join(f"- {ln}" for ln in lines)
     start = START_TEMPLATE.format(
         library_root=config.LIBRARY_ROOT, generated=stamp, repo=repo,
         base=base, py=py, **c)

@@ -3,8 +3,15 @@ hand the decision-y chains to the user as questions.
 
     python pharos.py ingest [--dry-run]
 
+The LIBRARY MAP (<library>/_Agent_Files/library_map.csv) says what each
+folder is and what the owner decided; ingest surveys the library first so
+new folders get a row, then runs only what the map allows. A decision the
+owner has not made is printed ONCE as a question with the command that
+answers it (pharos.py map set <folder> action=...); an answered one is
+never asked again.
+
 What runs AUTOMATICALLY (no engine, no consent needed):
-    scanner.py   on every detected model folder AND on the audio section
+    scanner.py   on every included 3d-assets folder AND on the audio section
                  (when no crawl index exists yet)
     indexer.py   on the library root (animation clip packs)
     agent index  build_agent_index.py / build_kb3d_index.py when a converted
@@ -36,8 +43,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config
-from .init import _not_indexed_dirs, detect
+from . import config, library_map
 
 REPO = str(Path(__file__).resolve().parents[2])
 
@@ -105,80 +111,78 @@ def run_ingest(argv=None) -> int:
 
     print(f"pharos ingest -- library: {root}"
           f"{'  (DRY RUN)' if dry else ''}")
-    report = detect(root)
-    picks = report["sections"]
-    # the CONFIG names the sections (init weighed the candidates; the user
-    # may have edited them); detection only fills a key that points nowhere
+    # ---- THE MAP IS THE CONTRACT -----------------------------------------
+    # survey the library (1-2 s), give new folders a row, then mirror the
+    # map's picks into pharos_config.json (sections, scan folders, manifest
+    # roots, skip dirs): the importers still read the config
+    res = library_map.refresh(root)
+    if "error" in res:
+        print(f"  survey failed: {res['error']}")
+        return 2
+    rows = library_map.load()
+    if res.get("map_added") or res.get("map_filled"):
+        print(f"  library map: {res.get('map_added', 0)} folder(s) added, "
+              f"{res.get('map_filled', 0)} filled in -> {library_map.PATH}")
+    library_map.apply_to_config(rows, cfg, root, library_map.weights_of(res))
+    if not dry:
+        raw_cfg = json.loads(config._CONFIG_FILE.read_text(encoding="utf-8-sig"))
+        for key in ("sections", "scan_folders", "manifest_roots", "kitbash_root",
+                    "indexer_skip_dirs", "collection_csv"):
+            if key in cfg:
+                raw_cfg[key] = cfg[key]
+            else:
+                raw_cfg.pop(key, None)
+        config.save(raw_cfg)
+        config.MANIFEST_ROOTS[:] = [Path(r).resolve() for r in cfg["manifest_roots"]]
     sec = cfg.get("sections") or {}
+    # the importers below run in THIS process: their roots follow the map's
+    # picks, not the config the process started with
+    dflt = config._DEFAULTS["sections"]
+    config.TEX_ROOT = root / (sec.get("textures") or dflt["textures"])
+    config.AUDIO_ROOT = root / (sec.get("audio") or dflt["audio"])
+    config.COLLECTION_ROOT = root / (sec.get("collection") or dflt["collection"])
+    config.CSV_PATH = config.COLLECTION_ROOT / cfg.get("collection_csv",
+                                                       config.CSV_PATH.name)
 
     def _section(kind: str) -> str:
         name = (sec.get(kind) or "").strip()
-        if name and (root / name).is_dir():
-            return name
-        return (picks.get(kind) or [""])[0]
+        return name if name and (root / name).is_dir() else ""
     print(f"  sections: animation={_section('animation') or '-'} | "
           f"textures={_section('textures') or '-'} | "
-          f"audio={_section('audio') or '-'}")
-
-    # ---- THE CONFIG IS THE CONTRACT ---------------------------------------
-    # scan folders come from pharos_config.json (written by init); a fresh
-    # detection only fills the gap for configs that predate the key. When
-    # both exist and disagree, that is DRIFT: report it, prefer the config
-    # (the user may have hand-curated it), never silently re-detect.
-    cfg_scan = [f for f in (cfg.get("scan_folders") or [])
-                if (root / f).is_dir()]
-    det_scan = [f for f in report["mesh_folders"] if (root / f).is_dir()]
-    scan_folders = cfg_scan or det_scan
-    if cfg_scan and sorted(cfg_scan) != sorted(det_scan):
-        print(f"  config/detect drift on model folders "
-              f"(config wins): {', '.join(cfg_scan)} | "
-              f"detector now says: {', '.join(det_scan) or '-'}")
-    elif not cfg_scan and det_scan:
-        print(f"  note: config has no scan_folders key; using the "
-              f"detector's picks (re-run init --force to pin them)")
+          f"audio={_section('audio') or '-'} | "
+          f"purchases={_section('collection') or '-'}")
+    scan_folders = [f for f in cfg.get("scan_folders") or [] if (root / f).is_dir()]
     if scan_folders:
         print(f"  model folders     : {', '.join(scan_folders)}")
-    if report.get("manifest_roots"):
-        print(f"  manifest packs    : "
-              f"{len(report.get('manifest_packs_found', []))} "
-              f"under {', '.join(report['manifest_roots'])}")
-    # converted packs JOIN the config (additive: nothing is ever removed).
-    # meshes_import reads recipes only under manifest_roots and chain 2
-    # needs kitbash_root: a pack converted after init was ignored until the
-    # user hand-edited pharos_config.json (laptop run)
-    # a non-list value (hand-typed string) is ignored, as config.load() does
-    have_roots = cfg.get("manifest_roots")
-    have_roots = have_roots if isinstance(have_roots, list) else []
-    add_roots = [r for r in report.get("manifest_roots") or []
-                 if not any(db.path_under(r, have) for have in have_roots)]
-    add_kit = ("" if (cfg.get("kitbash_root") or "").strip()
-               else report.get("kitbash_root") or "")
-    if add_roots or add_kit:
-        cfg["manifest_roots"] = have_roots + add_roots
-        if add_kit:
-            cfg["kitbash_root"] = add_kit
-        # applied in-process too: meshes_import shares this list object
-        config.MANIFEST_ROOTS.extend(Path(r).resolve() for r in add_roots)
-        verb = "would add (dry-run, not written):" if dry else "added"
-        if not dry:
-            raw = json.loads(config._CONFIG_FILE.read_text(encoding="utf-8-sig"))
-            raw_roots = raw.get("manifest_roots")
-            raw["manifest_roots"] = ((raw_roots if isinstance(raw_roots, list)
-                                      else []) + add_roots)
-            if add_kit:
-                raw["kitbash_root"] = add_kit
-            config.save(raw)
-        for r in add_roots:
-            print(f"  config: {verb} manifest_roots entry {r}")
-        if add_kit:
-            print(f"  config: {verb} kitbash_root {add_kit}")
-        print("    (detected converted packs/kits; pharos_config.json only "
-              "gains entries here, it never loses any)")
-    if report.get("blend_folders"):
-        print(f"  blend folders     : {', '.join(report['blend_folders'])}"
-              f"  (decision needed -- NOT scanned)")
-    if report.get("root_files"):
-        n = sum(report["root_files"].values())
+    # what the map knows about engine content (the old detector's report)
+    report: dict = {"ue_manifests": [], "kit_manifests": [], "raw_ue_packs": [],
+                    "manifest_packs_found": [], "blend_folders": [],
+                    "kitbash_root": cfg.get("kitbash_root") or ""}
+    for r in rows.values():
+        if not library_map.included(r, rows):
+            continue
+        if r["kind"] == "unreal" and r["state"] == "converted":
+            m = root / r["folder"] / "Exports" / "manifest.json"
+            if m.is_file():
+                report["ue_manifests"].append(str(m))
+                report["manifest_packs_found"].append(r["folder"].rsplit("/", 1)[-1])
+        elif r["kind"] == "unreal" and r["state"] in ("raw", "project"):
+            report["raw_ue_packs"].append(r["folder"])
+        elif r["kind"] == "blender" and r["state"] == "kit-exported":
+            m = root / r["folder"] / "Exports" / "kit_manifest.json"
+            if m.is_file():
+                report["kit_manifests"].append(str(m))
+        elif r["kind"] == "blender" and r["state"] in ("kit", "files"):
+            report["blend_folders"].append(r["folder"])
+    if report["manifest_packs_found"]:
+        print(f"  converted pack folder(s): {len(report['manifest_packs_found'])} "
+              f"(recipes import automatically; the scanner skips them)")
+    if report["blend_folders"]:
+        print(f"  blend folders     : {', '.join(report['blend_folders'][:8])}"
+              f"{' ...' if len(report['blend_folders']) > 8 else ''}"
+              f"  (not scanned; decision: extract or leave)")
+    if res.get("root_files"):
+        n = sum(res["root_files"].values())
         print(f"  !! {n} asset file(s) DIRECTLY in the library root are "
               f"invisible to every section -- move them into a subfolder")
 
@@ -247,9 +251,9 @@ def run_ingest(argv=None) -> int:
         # one missing/moved source (e.g. no purchase CSV yet) must skip
         # THAT importer, never kill the chain -- browse.py guards the same
         # calls at server startup; ingest must match it
-        for name, fn in (("collection", collection_import.import_collection),
-                         ("textures", textures_import.import_textures),
-                         ("audio", audio_import.import_audio),
+        for name, fn in (("collection", lambda d: collection_import.import_collection(d, config.CSV_PATH)),
+                         ("textures", lambda d: textures_import.import_textures(d, config.TEX_ROOT)),
+                         ("audio", lambda d: audio_import.import_audio(d, config.AUDIO_ROOT)),
                          ("meshes", meshes_import.import_meshes)):
             try:
                 n = fn(config.DB_PATH)
@@ -270,55 +274,67 @@ def run_ingest(argv=None) -> int:
             print(f"  docs skipped: {exc}", flush=True)
 
     # ---- decisions: agent relays these to the user ------------------------
+    # only what the map does not know yet; an answer is written with
+    # `pharos.py map set` and never asked again
+    rows = library_map.load()
+    pend = library_map.pending(rows)
     print("\n" + "-" * 24 + " ASK YOUR USER " + "-" * 24)
-    print("  (setup is not complete until these are answered; every 'yes'")
-    print("   needs the engine named next to it -- see pipeline/README.md)")
     qs = []
+    if not pend:
+        print("  nothing pending: every decision is in the library map")
+    else:
+        print("  (setup is not complete until these are answered; every 'yes'")
+        print("   needs the engine named next to it -- see pipeline/README.md)")
     qs.append("1. Are these ALL your asset folders? (other drives / "
-              "external disks?) detected so far:")
-    qs.append(f"   {root}")
-    # raw (unconverted) packs are the question; converted packs are done
-    raw = report.get("raw_ue_packs") or []
+              "external disks?) surveyed so far:")
+    qs.append(f"   {root}  ({res.get('files', 0):,} files; map: {library_map.PATH})")
+    raw = [r for r in pend if r["kind"] == "unreal"]
     done = report.get("manifest_packs_found") or []
     if raw:
         qs.append(f"2. {len(raw)} Unreal pack(s) with raw .uasset content "
-                  f"and NO conversion yet: {', '.join(raw)} -- convert them "
-                  f"with chain 1? It extracts FBX + textures + material "
-                  f"recipes; needs UE 5.x + the pipeline/conversion "
+                  f"and NO conversion yet: {', '.join(r['folder'] for r in raw)} -- "
+                  f"convert them with chain 1? It extracts FBX + textures + "
+                  f"material recipes; needs UE 5.x + the pipeline/conversion "
                   f"sandbox; slow: roughly 1-30 min of engine time per pack")
-    elif report.get("uasset_total") and not done:
-        qs.append(f"2. {report['uasset_total']} RAW .uasset/.umap files "
-                  f"detected in {', '.join(report.get('uasset_folders', []))} "
-                  f"-- convert them with chain 1? (needs UE 5.x)")
-    else:
-        qs.append("2. Any Unreal .uasset packs to convert? (none detected; "
-                  "chain 1 needs UE 5.x)")
+        for r in raw:
+            qs.append(f'   answer: pharos.py map set "{r["folder"]}" action=export'
+                      f'   (or action=leave)')
     if done:
         qs.append(f"   already converted, nothing to do: {len(done)} "
                   f"pack(s) -- their recipes import automatically")
-    if report.get("kitbash_root") or report.get("blend_folders"):
-        qs.append("3. Export KitBash3D kits to per-assembly FBX and/or "
-                  "enumerate .blend containers? (needs Blender; chains 2+3; "
-                  f"blend folders: {', '.join(report.get('blend_folders', [])) or 'none'})")
-    else:
-        qs.append("3. Any .blend kits/containers to index, or leave them "
-                  "as-is? (none detected; chains 2+3 need Blender)")
-    qs.append("4. Is there a purchase CSV for the collection? (ground "
-              "truth for owned vs on-disk)")
-    qs.append("5. Build richer audio/texture indexes (categories, keywords "
-              "from file and folder names; pure Python, minutes; chain 4 "
-              "writes index files into those folders) -- or keep the "
-              "scanner-only metadata?")
-    # blend folders and raw UE packs already have their own question
-    asked = set(report.get("blend_folders") or []) | {
-        p.split("/")[0] for p in raw}
-    stray = [d for d in _not_indexed_dirs(root, cfg, config.DB_PATH)
-             if d not in asked]
+    blend = [r for r in pend if r["kind"] == "blender"]
+    if blend:
+        qs.append(f"3. {len(blend)} Blender folder(s): extract their objects to "
+                  f"FBX + manifest (needs Blender; chains 2+3) or leave them as "
+                  f"they are? {', '.join(r['folder'] for r in blend[:8])}"
+                  f"{' ...' if len(blend) > 8 else ''}")
+        for r in blend[:8]:
+            qs.append(f'   answer: pharos.py map set "{r["folder"]}" action=extract'
+                      f'   (or action=leave)')
+    unity = [r for r in pend if r["kind"] == "unity"]
+    if unity:
+        qs.append(f"4. {len(unity)} Unity project(s)/package(s): index the files "
+                  f"under Assets/ (no prefab graph yet) or leave them? "
+                  f"{', '.join(r['folder'] for r in unity)}")
+        for r in unity:
+            qs.append(f'   answer: pharos.py map set "{r["folder"]}" action=index-files'
+                      f'   (or action=leave)')
+    anim = [r for r in pend if r["kind"] == "animation"]
+    if anim:
+        qs.append(f"5. Record browser previews for the animation folder(s) "
+                  f"{', '.join(r['folder'] for r in anim)}? (a browser tab, "
+                  f"minutes; optional)")
+        for r in anim:
+            qs.append(f'   answer: pharos.py map set "{r["folder"]}" action=previews'
+                      f'   (or action=no-previews)')
+    stray = [r["folder"] for r in rows.values()
+             if "/" not in r["folder"] and r["folder"] != "." and r["include"]
+             and r["kind"] in ("other", "")]
     if stray:
-        qs.append(f"6. These top-level folders match no section and hold no "
-                  f"indexed assets: {', '.join(stray)} -- what are they? "
-                  f"(scan them with scanner.py, point a section at them in "
-                  f"pharos_config.json, or leave them out)")
+        qs.append(f"6. These top-level folders match no section (nothing "
+                  f"Pharos recognises): {', '.join(stray)} -- what are they? "
+                  f'(pharos.py map set "<folder>" kind=<kind>, or include=no '
+                  f"to leave them out)")
     for q in qs:
         print("  " + q)
     print("-" * 66)
@@ -326,8 +342,8 @@ def run_ingest(argv=None) -> int:
     print(f'  verify setup   : "{sys.executable}" "{REPO}/pharos.py" doctor')
     print(f'  start serving  : "{sys.executable}" "{REPO}/pharos.py" '
           f"serve --no-open")
-    print("  build prompts  : docs/STARTING_PROMPT.md + "
-          "docs/AGENT_SETUP_BRIEF.md")
+    print(f'  review the map : http://{(cfg.get("network") or {}).get("host", "127.0.0.1")}:'
+          f'{(cfg.get("network") or {}).get("port", 8765)}/tags  (after serve)')
     # ---- exit codes are the agent's signal (no prose parsing) ----------
     if dry:
         return 0

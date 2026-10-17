@@ -1,7 +1,7 @@
 <!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pack tags</title><style>
-:root{--bg:#14161a;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1;--ok:#7dff9b;--bad:#ff8a8a}
+<title>Library map</title><style>
+:root{--bg:#14161a;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1;--ok:#7dff9b;--bad:#ff8a8a;--warn:#ffd479}
 *{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui;background:var(--bg);color:var(--fg)}
 header{position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 16px;border-bottom:1px solid var(--line);
 display:flex;gap:12px;align-items:center;flex-wrap:wrap}
@@ -20,55 +20,72 @@ th.c,td.c{text-align:center}
 td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
 tr:hover td{background:#191c22}
 tr.gone td{opacity:.45}
-.pk{display:flex;gap:10px;align-items:center;min-width:240px}
+tr.out td{opacity:.55}
+.pk{display:flex;gap:10px;align-items:center;min-width:260px}
 .pk img,.pk .ph{width:64px;height:40px;object-fit:cover;border-radius:4px;background:#101216;flex:none}
 .pk .n{font-weight:600;word-break:break-word}
 .pk .f{color:var(--dim);font-size:11.5px;word-break:break-all}
+.pk .ev{color:var(--dim);font-size:11px;margin-top:2px}
+.pk .ev b{color:var(--warn);font-weight:600}
 td.c input{width:18px;height:18px;accent-color:#6ea8fe;cursor:pointer}
-td.tg input{width:100%;min-width:160px}
+td.tg input{width:100%;min-width:140px}
+td.kind select{min-width:110px}
+.pend{color:var(--warn);font-size:11.5px}
 .guess{color:var(--dim);font-size:12px;white-space:nowrap}
-.guess button{background:#243040;color:#7cc4ff;border:1px solid #31506e;border-radius:5px;
+.guess button,.accept{background:#243040;color:#7cc4ff;border:1px solid #31506e;border-radius:5px;
 padding:0 7px;margin-left:4px;cursor:pointer;font-size:11.5px}
 .saved{animation:fl 1s ease}
 @keyframes fl{from{background:#1f3a2a}to{background:transparent}}
 </style></head><body>
-<header><a href="/">&larr; home</a><h1>Pack tags</h1>
-<input id="q" placeholder="filter packs ..." size="26">
-<select id="show"><option value="">all packs</option><option value="untagged">untagged only</option>
-<option value="tagged">tagged only</option></select>
+<header><a href="/">&larr; home</a><h1>Library map</h1>
+<input id="q" placeholder="filter folders ..." size="26">
+<select id="show"><option value="">all folders</option><option value="pending">decisions pending</option>
+<option value="unconfirmed">not confirmed</option><option value="top">top level only</option>
+<option value="untagged">untagged only</option><option value="tagged">tagged only</option></select>
 <span class="meta" id="count"></span><span class="meta" id="msg"></span></header>
-<div id="note">Your labels per pack. Every change saves at once into <code id="file"></code>,
-which you can also edit in a spreadsheet or text editor. New packs appear here after an ingest.
-Photorealistic and Stylized exclude each other; Low Poly combines with either. Untagged packs show
-the classifier's guess; <b>accept</b> copies it.</div>
-<table><thead><tr><th>Pack</th><th class="c">Photo&shy;realistic</th><th class="c">Stylized</th>
-<th class="c">Low Poly</th><th>Domain</th><th>Your tags (comma separated)</th><th>Guess</th></tr></thead>
+<div id="note">What each folder of your library is, and your decisions and labels for it. Every change saves at
+once into <code id="file"></code>, which you can also edit in a spreadsheet. The survey adds new folders after
+an ingest; <b>what it saw</b> stands under each folder (a <b>guess</b> is yours to confirm). A folder below
+another folder of the same kind inherits its decision and tags. Photorealistic and Stylized exclude each
+other; Low Poly combines with either.</div>
+<table><thead><tr><th>Folder</th><th>Kind</th><th class="c">Index</th><th>Decision</th><th class="c">Confirmed</th>
+<th class="c">Photo&shy;realistic</th><th class="c">Stylized</th><th class="c">Low Poly</th><th>Domain</th>
+<th>Your tags (comma separated)</th><th>Guess</th></tr></thead>
 <tbody id="rows"></tbody></table>
 <script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let data={packs:[],markers:[],domains:[]};
+let data={packs:[],markers:[],kinds:[],domains:[],pending:[]};
 const tagged=p=>p.styles.length||p.domain||p.tags.length;
+const pendingSet=()=>new Set(data.pending);
 function say(text,ok){msg.textContent=text;msg.className=ok?'ok':'bad';}
 let shown=0;
-function counts(){count.textContent=`${shown} shown · ${data.packs.filter(tagged).length} of ${data.packs.length} tagged`;}
+function counts(){count.textContent=`${shown} shown · ${data.packs.length} folders · ${data.pending.length} decision(s) pending · ${data.packs.filter(tagged).length} tagged`;}
 async function load(){
  const r=await fetch('/api/pack_tags');data=await r.json();
  if(!r.ok){say(data.error||('HTTP '+r.status),false);return;}
  file.textContent=data.file;render();}
+const depth=f=>f==='.'?0:f.split('/').length;
 function render(){
- const f=q.value.trim().toLowerCase(),s=show.value;
+ const f=q.value.trim().toLowerCase(),s=show.value,pend=pendingSet();
  const vis=data.packs.map((p,i)=>[p,i]).filter(([p])=>
-  (!f||(p.name+' '+p.folder+' '+p.tags.join(' ')).toLowerCase().includes(f))&&
-  (!s||(s==='tagged')===Boolean(tagged(p))));
+  (!f||(p.name+' '+p.folder+' '+p.tags.join(' ')+' '+p.kind).toLowerCase().includes(f))&&
+  (!s||(s==='tagged'&&tagged(p))||(s==='untagged'&&!tagged(p))||(s==='pending'&&pend.has(p.folder))||
+   (s==='unconfirmed'&&!p.confirmed)||(s==='top'&&depth(p.folder)<=1)));
  shown=vis.length;counts();
- const opts=d=>'<option value=""></option>'+data.domains.map(x=>`<option${x===d?' selected':''}>${esc(x)}</option>`).join('');
- rows.innerHTML=vis.map(([p,i])=>{const g=p.guess;
+ const opts=(list,cur)=>'<option value=""></option>'+list.map(x=>`<option${x===cur?' selected':''}>${esc(x)}</option>`).join('');
+ rows.innerHTML=vis.map(([p,i])=>{const g=p.guess,sv=p.survey;
   const gt=g&&!tagged(p)&&(g.style||g.domain)?`<span class="guess">${esc([g.style,g.domain].filter(Boolean).join(' · '))}<button data-act="guess">accept</button></span>`:'';
-  return `<tr data-i="${i}" class="${p.found?'':'gone'}">
+  const ev=sv?`<div class="ev">${sv.confidence==='know'?'known':'<b>guess</b>'}: ${esc(sv.kind)} — ${esc(sv.evidence)}${sv.kind!==p.kind?` <button class="accept" data-act="takekind">use ${esc(sv.kind)}</button>`:''}</div>`:'';
+  const dec=p.options.length?`<select data-act="action">${opts(p.options,p.action)}</select>${!p.action&&p.effective_action?`<div class="meta">inherits ${esc(p.effective_action)}</div>`:''}${pend.has(p.folder)?'<div class="pend">pending</div>':''}`:'';
+  return `<tr data-i="${i}" class="${p.found?'':'gone'} ${p.include?'':'out'}">
  <td><div class="pk">${p.thumb?`<img loading="lazy" src="${esc(p.thumb)}" alt="">`:'<div class="ph"></div>'}
- <div><div class="n">${esc(p.name||p.folder)}</div><div class="f">${esc(p.folder)}${p.found?` · ${p.files} files · ${(p.bytes/1e9).toFixed(1)} GB`:' · folder not indexed'}</div></div></div></td>
+ <div><div class="n" style="padding-left:${Math.max(0,depth(p.folder)-1)*14}px">${esc(p.name||p.folder)}</div><div class="f">${esc(p.folder)}${p.files?` · ${Number(p.files).toLocaleString()} files`:(p.found?'':' · folder not found')}</div>${ev}</div></div></td>
+ <td class="kind"><select data-act="kind">${opts(data.kinds,p.kind)}</select>${p.state?`<div class="meta">${esc(p.state)}</div>`:''}</td>
+ <td class="c"><input type="checkbox" data-act="include"${p.include?' checked':''}></td>
+ <td>${dec}</td>
+ <td class="c"><input type="checkbox" data-act="confirmed"${p.confirmed?' checked':''}></td>
  ${data.markers.map(m=>`<td class="c"><input type="checkbox" data-m="${esc(m)}"${p.styles.includes(m)?' checked':''}></td>`).join('')}
- <td><select data-act="domain">${opts(p.domain)}</select></td>
+ <td><select data-act="domain">${opts(data.domains,p.domain)}</select></td>
  <td class="tg"><input data-act="tags" value="${esc(p.tags.join(', '))}" placeholder="e.g. medieval, modular"></td>
  <td>${gt}</td></tr>`;}).join('');}
 async function save(i,change,tr){
@@ -76,28 +93,36 @@ async function save(i,change,tr){
  try{const r=await fetch('/api/pack_tags',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify({folder:p.folder,...change})});const j=await r.json();
   if(!r.ok){say(j.error||('HTTP '+r.status),false);render();return;}
-  Object.assign(p,j.pack);say(`saved ${p.name||p.folder}`,true);syncRow(tr,p);
+  Object.assign(p,j.pack);p.options=j.options;say(`saved ${p.name||p.folder}`,true);
+  if('kind' in change||'include' in change||'action' in change){await load();return;}
+  syncRow(tr,p);
  }catch(e){say('not saved: '+e,false);}}
 // the edited row is updated in place: a full redraw would steal the
 // focus of the next field the user already clicked
 function syncRow(tr,p){
  tr.querySelectorAll('input[data-m]').forEach(b=>b.checked=p.styles.includes(b.dataset.m));
- tr.querySelector('select').value=p.domain;
+ tr.querySelector('select[data-act="domain"]').value=p.domain;
+ tr.querySelector('input[data-act="confirmed"]').checked=p.confirmed;
  const t=tr.querySelector('input[data-act="tags"]');if(document.activeElement!==t)t.value=p.tags.join(', ');
  const g=tr.querySelector('.guess');if(g&&tagged(p))g.remove();
  tr.classList.remove('saved');void tr.offsetWidth;tr.classList.add('saved');counts();}
 rows.addEventListener('change',e=>{const el=e.target,tr=el.closest('tr');if(!tr)return;
- const i=+tr.dataset.i,p=data.packs[i];
+ const i=+tr.dataset.i,p=data.packs[i],act=el.dataset.act;
  if(el.dataset.m){let st=p.styles.filter(x=>x!==el.dataset.m);
   if(el.checked){st.push(el.dataset.m);
    if(el.dataset.m==='Photorealistic')st=st.filter(x=>x!=='Stylized');
    if(el.dataset.m==='Stylized')st=st.filter(x=>x!=='Photorealistic');}
   save(i,{styles:st},tr);}
- else if(el.dataset.act==='domain')save(i,{domain:el.value},tr);
- else if(el.dataset.act==='tags')save(i,{tags:el.value},tr);});
+ else if(act==='domain')save(i,{domain:el.value},tr);
+ else if(act==='tags')save(i,{tags:el.value},tr);
+ else if(act==='kind')save(i,{kind:el.value,confirmed:true},tr);
+ else if(act==='include')save(i,{include:el.checked},tr);
+ else if(act==='action')save(i,{action:el.value,confirmed:true},tr);
+ else if(act==='confirmed')save(i,{confirmed:el.checked},tr);});
 rows.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.dataset.act==='tags')e.target.blur();});
-rows.addEventListener('click',e=>{if(e.target.dataset.act!=='guess')return;
- const tr=e.target.closest('tr'),i=+tr.dataset.i,g=data.packs[i].guess;
- save(i,{styles:g.style?[g.style]:[],domain:g.domain||''},tr);});
+rows.addEventListener('click',e=>{const act=e.target.dataset.act;if(!act)return;
+ const tr=e.target.closest('tr'),i=+tr.dataset.i,p=data.packs[i];
+ if(act==='guess'){const g=p.guess;save(i,{styles:g.style?[g.style]:[],domain:g.domain||''},tr);}
+ if(act==='takekind'&&p.survey)save(i,{kind:p.survey.kind,state:p.survey.state||'',confirmed:true},tr);});
 q.oninput=render;show.onchange=render;load();
 </script></body></html>

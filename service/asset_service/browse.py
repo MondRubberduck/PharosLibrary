@@ -47,7 +47,7 @@ from asset_service import audio_import  # noqa: E402
 from asset_service import meshes_import  # noqa: E402
 from asset_service import textmatch as tm  # noqa: E402
 from asset_service import skeleton  # noqa: E402
-from asset_service import pack_tags  # noqa: E402
+from asset_service import library_map  # noqa: E402
 from asset_service.auto_classifier import DOMAINS, STYLES  # noqa: E402
 
 DEFAULT_DB = config.DB_PATH
@@ -386,7 +386,7 @@ def api_stats() -> dict:
         status = None
     return {"stats": stats, "sections": sections, "extension_status": status,
             "domains": list(DOMAINS),
-            "styles": [*pack_tags.MARKERS, "Neutral/Unclassified"]}
+            "styles": [*library_map.MARKERS, "Neutral/Unclassified"]}
 
 
 def api_packs(params: dict) -> list[dict]:
@@ -401,7 +401,7 @@ def api_packs(params: dict) -> list[dict]:
     rows = db.search_assets(conn, q or None, vendor=vendor,
                             validated_only=validated, limit=500)
     tags = _tag_rows()
-    want = pack_tags.marker(style) if style else ""
+    want = library_map.marker(style) if style else ""
     out = []
     for r in rows:
         pt = tags.get(r["id"][len("pack::"):].lower())
@@ -444,51 +444,51 @@ def api_packs(params: dict) -> list[dict]:
     return out
 
 
-# ---- pack tags: the owner's labels, kept in <agent_files>/pack_tags.csv ----
+# ---- the library map: what each folder is, and the owner's labels for it
+# (<agent_files>/library_map.csv) ----
 
 _LOOKS = ("Photorealistic", "Stylized")
 
 
 def _tag_rows() -> dict:
-    """The pack-tag file's rows; {} while it cannot be read (a search must
+    """The library map's rows; {} while it cannot be read (a search must
     not fail because a spreadsheet holds the file)."""
     try:
-        return pack_tags.load()
+        return library_map.load()
     except OSError:
         return {}
 
 
+_survey_cache: dict = {"nodes": {}, "at": 0.0}
+
+
+def _survey_nodes() -> dict:
+    """folder (lower) -> the latest survey node, from the last refresh."""
+    return _survey_cache["nodes"]
+
+
 def _sync_pack_tags() -> int:
-    """Give every pack folder a row in the tag file, so new packs appear
-    after an ingest. The purchase section holds store images, not assets,
-    and gets none. Labels the owner set in the registry are copied in when
-    the file is first made."""
-    conn = db.connect(_DB_PATH)
+    """Survey the library and give every folder a row in the map, so new
+    packs appear after an ingest (the 0.10 library_map.csv is carried over
+    once). Returns the number of rows added."""
+    import time
     try:
-        rows = conn.execute(
-            "SELECT id, name, domain, style, validation_status FROM assets "
-            "WHERE substr(id, 1, 6) = 'pack::'").fetchall()
-    finally:
-        conn.close()
-    coll = (config.SECTIONS.get("collection") or "").strip("/").lower()
-    packs, seed = [], {}
-    for r in rows:
-        folder = r["id"][len("pack::"):]
-        low = folder.lower()
-        if coll and (low == coll or low.startswith(coll + "/")):
-            continue
-        packs.append((folder, r["name"]))
-        if r["validation_status"] == "human_verified":
-            seed[folder] = (r["domain"],
-                            r["style"] if r["style"] in _LOOKS else "")
-    return pack_tags.sync(packs, seed)
+        res = library_map.refresh(config.LIBRARY_ROOT)
+    except library_map.TagFileBusy:
+        return 0        # a spreadsheet holds the file: serve what load() reads
+    if "error" in res:
+        return 0
+    _survey_cache["nodes"] = {n["folder"].lower(): n for n in res.get("nodes") or []}
+    _survey_cache["at"] = time.time()
+    return res.get("map_added", 0)
 
 
 def api_pack_tags() -> dict:
-    """Every pack with the owner's tags, the classifier's guess beside
-    them, and whether its folder is still indexed."""
+    """Every folder of the map with its kind, decision and the owner's
+    tags, the survey's guess beside it, and the registry's counts."""
     _sync_pack_tags()
     rows = _tag_rows()
+    nodes = _survey_nodes()
     conn = db.connect(_DB_PATH)
     try:
         packs = {r["id"][len("pack::"):].lower(): dict(r) for r in conn.execute(
@@ -496,54 +496,104 @@ def api_pack_tags() -> dict:
             "COUNT(f.id) AS files, COALESCE(SUM(f.file_size), 0) AS bytes "
             "FROM assets a LEFT JOIN asset_files f ON f.asset_id = a.id "
             "WHERE substr(a.id, 1, 6) = 'pack::' GROUP BY a.id")}
+    except sqlite3.OperationalError:
+        packs = {}
     finally:
         conn.close()
     out = []
-    for k, r in sorted(rows.items(), key=lambda kv: kv[1]["folder"].lower()):
+    for k, r in sorted(rows.items(), key=lambda kv: (kv[1]["folder"] != ".",
+                                                     kv[1]["folder"].lower())):
         p = packs.get(k)
+        n = nodes.get(k)
         thumb = _pack_thumb.get(p["id"]) if p else None
         out.append({
-            "folder": r["folder"], "name": r["name"], "styles": r["styles"],
-            "domain": r["domain"], "tags": r["tags"], "found": p is not None,
+            "folder": r["folder"], "name": r["name"], "kind": r["kind"],
+            "state": r["state"], "include": r["include"], "action": r["action"],
+            "confirmed": r["confirmed"],
+            "options": library_map.decision_options(r["kind"], r["state"]),
+            "effective_action": library_map.effective_action(r, rows),
+            "styles": r["styles"], "domain": r["domain"], "tags": r["tags"],
+            "note": r["note"],
+            "found": bool(n and n.get("files")) or p is not None,
+            "files": (n or {}).get("files") or (p["files"] if p else 0),
+            "survey": ({"kind": n["kind"], "confidence": n["confidence"],
+                        "state": n.get("state", ""),
+                        "evidence": n["evidence"]} if n else None),
             "guess": ({"style": p["style"] if p["style"] in _LOOKS else "",
                        "domain": p["domain"]} if p else None),
-            "files": p["files"] if p else 0, "bytes": p["bytes"] if p else 0,
             "thumb": f"/thumb/{thumb}" if thumb is not None else None})
-    return {"file": str(pack_tags.PATH), "markers": list(pack_tags.MARKERS),
-            "domains": list(DOMAINS), "packs": out}
+    return {"file": str(library_map.PATH), "markers": list(library_map.MARKERS),
+            "kinds": list(library_map.KINDS), "domains": list(DOMAINS),
+            "pending": [r["folder"] for r in library_map.pending(rows)],
+            "packs": out}
 
 
 def api_pack_tags_set(body: dict) -> tuple:
-    """POST {folder, styles?, domain?, tags?} -> (answer, HTTP status).
-    A field left out stays as it is; "" / [] clears it."""
+    """POST {folder, kind?, include?, action?, confirmed?, styles?, domain?,
+    tags?, note?} -> (answer, HTTP status). A field left out stays as it
+    is; "" / [] clears it."""
     folder = body.get("folder")
     if not isinstance(folder, str) or not folder.strip():
         return {"error": "folder missing"}, 400
+    kw: dict = {}
+    if "kind" in body:
+        kind = library_map.kind_of(str(body.get("kind") or ""))
+        if not kind:
+            return {"error": f"unknown kind {body.get('kind')!r}; use: "
+                             f"{', '.join(library_map.KINDS)}"}, 400
+        kw["kind"] = kind
+    if "state" in body:
+        kw["state"] = str(body.get("state") or "").lower()
+    for flag in ("include", "confirmed"):
+        if flag in body:
+            kw[flag] = bool(body.get(flag))
+    if "action" in body:
+        kw["action"] = str(body.get("action") or "").lower()
     styles = body.get("styles")
     if styles is not None:
         if not isinstance(styles, list):
             return {"error": "styles must be a list"}, 400
-        bad = [s for s in styles if not pack_tags.marker(str(s))]
+        bad = [s for s in styles if not library_map.marker(str(s))]
         if bad:
             return {"error": f"unknown style(s) {bad}; use: "
-                             f"{', '.join(pack_tags.MARKERS)}"}, 400
-        styles = [pack_tags.marker(str(s)) for s in styles]
+                             f"{', '.join(library_map.MARKERS)}"}, 400
+        kw["styles"] = [library_map.marker(str(s)) for s in styles]
     domain = body.get("domain")
     if domain not in (None, "") and domain not in DOMAINS:
         return {"error": f"unknown domain {domain!r}; use: "
                          f"{', '.join(DOMAINS)}"}, 400
+    if domain is not None:
+        kw["domain"] = domain
     tags = body.get("tags")
     if tags is not None:
-        tags = pack_tags.split_tags(
+        kw["tags"] = library_map.split_tags(
             ", ".join(map(str, tags)) if isinstance(tags, list) else str(tags))
-    try:
-        row = pack_tags.update(folder, styles=styles, domain=domain, tags=tags)
-    except KeyError:
-        return {"error": "no such pack folder in the tag file"}, 404
-    except pack_tags.TagFileBusy as exc:
-        return {"error": str(exc)}, 409
-    return {"ok": True, "pack": {k: row[k] for k in (
-        "folder", "name", "styles", "domain", "tags")}}, 200
+    if "note" in body:
+        kw["note"] = str(body.get("note") or "")
+    # one lock around the row and the config mirror: two quick changes on
+    # the page are two threads, and the config file is written whole
+    with library_map._LOCK:
+        try:
+            row = library_map.update(folder, **kw)
+        except KeyError:
+            return {"error": "no such folder in the library map"}, 404
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+        except library_map.TagFileBusy as exc:
+            return {"error": str(exc)}, 409
+        # the config mirrors the map (sections, scan folders, skip dirs)
+        try:
+            cfg = config.load()
+            weights = {k: n.get("files", 0) for k, n in _survey_nodes().items()}
+            library_map.apply_to_config(_tag_rows(), cfg, config.LIBRARY_ROOT,
+                                        weights=weights)
+            config.save(cfg)
+        except OSError:
+            pass
+    keys = ("folder", "name", "kind", "state", "include", "action", "confirmed",
+            "styles", "domain", "tags", "note")
+    return {"ok": True, "pack": {k: row[k] for k in keys},
+            "options": library_map.decision_options(row["kind"], row["state"])}, 200
 
 
 def _jailed(t, root) -> bool:
@@ -1348,7 +1398,7 @@ def _mesh_light_rows() -> list:
         if obj and obj != r["name"]:
             r["_mname"] = f"{r['name']} {obj}"
     _mesh_keys(rows)
-    look = pack_tags.Lookup(_tag_rows())
+    look = library_map.Lookup(_tag_rows())
     for r in rows:
         r["_ptag"] = look(r["_file"])
         _mesh_flags(r)
@@ -1581,10 +1631,10 @@ def api_meshes(params: dict) -> dict:
     want_styles = []
     for s in P.s("style", "styles").split(","):
         if s.strip():
-            m = pack_tags.marker(s)
+            m = library_map.marker(s)
             if not m:
                 P.warn(f"style={s.strip()!r} is not a style; use one of: "
-                       f"{', '.join(pack_tags.MARKERS)} (0 results)")
+                       f"{', '.join(library_map.MARKERS)} (0 results)")
             want_styles.append(m)
     min_dim, max_dim = P.num("min_dim", 0.0), P.num("max_dim", 1e9)
     min_h, max_h = P.num("min_h", 0.0), P.num("max_h", 1e9)
@@ -1982,7 +2032,7 @@ def api_meshes_packs() -> dict:
         if r.get("tallest") and (not m.get("tallest")
                                  or r["tallest"] > m["tallest"]):
             m["tallest"] = r["tallest"]
-    look = pack_tags.Lookup(_tag_rows())
+    look = library_map.Lookup(_tag_rows())
     for m in merged.values():
         m["source"] = "+".join(sorted(set(m.pop("sources")))) or None
         dirs = folders.get(m["pack"]) or set()
@@ -1993,7 +2043,7 @@ def api_meshes_packs() -> dict:
                 styles.update(pt["styles"])
                 ptags += [x for x in pt["tags"] if x not in ptags]
         if styles:
-            m["styles"] = [s for s in pack_tags.MARKERS if s in styles]
+            m["styles"] = [s for s in library_map.MARKERS if s in styles]
         if ptags:
             m["pack_tags"] = ptags
         hits = []
@@ -3792,7 +3842,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = body.get("set") or {}
             dom = payload.get("domain") if payload.get("domain") in DOMAINS else None
             sty = payload.get("style")
-            sty = (pack_tags.marker(sty) or (sty if sty in STYLES else None)
+            sty = (library_map.marker(sty) or (sty if sty in STYLES else None)
                    if isinstance(sty, str) else None)
             status = body.get("status")
             if status not in ("validated_blender", "validated_unreal"):
@@ -3814,9 +3864,9 @@ class Handler(BaseHTTPRequestHandler):
                               r["styles"] + ["Low Poly"] if sty == "Low Poly"
                               else [sty] + keep if sty in _LOOKS else keep)
                     try:
-                        pack_tags.update(r["folder"], styles=styles,
+                        library_map.update(r["folder"], styles=styles,
                                          domain=dom)
-                    except pack_tags.TagFileBusy as exc:
+                    except library_map.TagFileBusy as exc:
                         return self._json({"error": str(exc)}, 409)
                     updated += 1
             if status:
@@ -3906,8 +3956,8 @@ def main(argv=None) -> int:
     try:
         added = _sync_pack_tags()
         if added:
-            print(f"pack tags: {added} new pack(s) listed in "
-                  f"{pack_tags.PATH} (tag them at /tags)", flush=True)
+            print(f"library map: {added} new folder(s) listed in "
+                  f"{library_map.PATH} (review them at /tags)", flush=True)
     except Exception as exc:  # noqa: BLE001 -- a locked file must not stop the app
         print(f"pack tags not updated: {exc}", flush=True)
     try:

@@ -45,6 +45,27 @@ def load() -> dict:
     return {}
 
 
+def map_folders() -> set:
+    """Library-relative folders `pharos.py extract` approved (lower-case,
+    forward slashes), from PHAROS_MAP_FOLDERS; empty = no restriction."""
+    raw = os.environ.get("PHAROS_MAP_FOLDERS", "")
+    return {f.replace("\\", "/").strip("/").lower()
+            for f in raw.split(os.pathsep) if f.strip()}
+
+
+def in_map_folders(path: str, allow: set, lib: str = "") -> bool:
+    """True when `path` (absolute) is one of the allowed folders or lies
+    below one; always True when nothing is restricted."""
+    if not allow:
+        return True
+    lib = lib or library_root()
+    try:
+        rel = os.path.relpath(path, lib).replace("\\", "/").strip("/").lower()
+    except ValueError:
+        return False
+    return any(rel == a or rel.startswith(a + "/") for a in allow)
+
+
 def library_root() -> str:
     return (os.environ.get("PHAROS_LIBRARY_ROOT")
             or load().get("library_root") or "")

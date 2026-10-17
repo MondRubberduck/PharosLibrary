@@ -103,15 +103,23 @@ token cost.** Operating manual (setup + build doctrine):
 
 ## 4. Onboarding a fresh library (no crawler output at all)
 
-1. `python pharos.py init <root>` — classifies root's folders by content,
-   writes `pharos_config.json`, prints what it found and what it could not
-   classify. Detection is verbose and correctable by editing the JSON.
-2. `python pharos.py serve` — all importers run at start; **every missing
+1. `python pharos.py init <root>` surveys the root (structural markers
+   first: `Exports/manifest.json`, `kit_manifest.json`, `.uproject`,
+   `Assets/` + `ProjectSettings/`, a purchase CSV header; file shares and
+   names only as a guess) and writes the **library map**,
+   `<root>/_Agent_Files/library_map.csv`: one row per folder that is a
+   thing, with kind, state, evidence and the decision its kind needs.
+   `pharos_config.json` mirrors the map. `python pharos.py survey <root>`
+   prints the tree; `python pharos.py map set "<folder>" kind=...` or
+   the server's `/tags` page correct it. User rows survive a re-survey.
+2. `python pharos.py ingest` runs every engine-free chain and asks the
+   missing decisions. `python pharos.py convert | extract | previews`
+   run the engine chains the map allows (`--dry-run` prints the
+   commands); without the decision they refuse.
+3. `python pharos.py serve` — all importers run at start; **every missing
    source degrades gracefully**: absent sections serve empty results
    (HTTP 200 with `total: 0`), never errors. Verified against a fixture
    library with no audio index, no crawler JSONLs, no manifest packs.
-3. `python service/asset_service/scanner.py <model-folder>` — indexes raw
-   mesh folders so `/api/meshes` works without any crawler.
 
 ## 5. Scene building (agent-authored scenes)
 
@@ -153,9 +161,11 @@ guide: scene-file format, how search results go in, the commands.
 
 One JSON file (`pharos_config.json`, created by init or copied from
 `pharos_config.example.json`): `library_root`, `registry_dir`,
-`previews_dir`, `sections` (folder names per section), `agent_files`,
-`thumb_cache_dirs`, `extension_status_file`, `indexer_skip_dirs`,
-`manifest_roots`, `collection_csv`, `network`, `dashboard` curation.
+`previews_dir`, `agent_files`, `thumb_cache_dirs`,
+`extension_status_file`, `network`, `dashboard` curation. The keys
+`sections`, `scan_folders`, `manifest_roots`, `kitbash_root`,
+`indexer_skip_dirs` and `collection_csv` are written by `ingest` from
+`_Agent_Files/library_map.csv`; change the map, not these keys.
 No owner-specific path exists anywhere in the code; the only absolute
 defaults left are STANDARD install locations searched for optional
 engines (Blender: `BLENDER_EXE`, then PATH, then the newest version under

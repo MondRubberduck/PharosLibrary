@@ -24,14 +24,18 @@ user who cannot trust the result.
    - the generated `AGENT_START_HERE.md` + `AGENT_API.md` in the library
      (if absent: run Phase-1 step 2 first, then `python pharos.py docs`)
 2. **Onboard + crawl** (full contract: `docs/STARTING_PROMPT.md` +
-   `docs/AGENT_SETUP_BRIEF.md`):
+   `docs/AGENT_SETUP.md`; the decisions live in the library map,
+   `_Agent_Files/library_map.csv`):
    - `python pharos.py doctor`, then `python pharos.py init "<library
-     root>"` — read its INGESTION SUMMARY; it lists folders that matched
-     NO section. Fix sections in `pharos_config.json` by hand where
-     detection was wrong (the config is the contract, not the detector).
+     root>"` — read its library-map summary; correct a wrong row with
+     `python pharos.py map set "<folder>" kind=<kind> include=yes
+     confirmed=yes` (or on the server's `/tags` page). Never edit
+     `sections` / `scan_folders` in `pharos_config.json`: `ingest`
+     rewrites them from the map.
    - `python pharos.py ingest` — runs the scanner, the animation indexer,
      the model/kit index builds and every importer, rewrites the agent
-     docs, and prints the ASK YOUR USER block.
+     docs, and prints the ASK YOUR USER block. Record every answer with
+     `python pharos.py map set "<folder>" action=<answer>`.
    - Start the server and READ the startup banner: it ends with
      `INGESTION COMPLETE -- collection=N textures=N audio=N meshes=N`
      plus a `NOT INDEXED` list. That banner is the definition of

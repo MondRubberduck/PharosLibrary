@@ -7,7 +7,7 @@ from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import blender_exe, section_root
+from _config import blender_exe, section_root, map_folders, in_map_folders
 BLENDER = blender_exe()
 if not BLENDER:
     raise SystemExit("FATAL: Blender not found -- set BLENDER_EXE to your "
@@ -21,6 +21,9 @@ if not ROOT or not os.path.isdir(ROOT):
 
 kits = sorted(glob.glob(os.path.join(ROOT, "*", "*.blender.native", "*.blend"))
               + glob.glob(os.path.join(ROOT, "*", "*.blend")))
+ALLOW = map_folders()          # the kits the library map approved, if given
+if ALLOW:
+    kits = [b for b in kits if in_map_folders(os.path.dirname(b), ALLOW)]
 print("kits found:", len(kits), flush=True)
 
 ok = skipped = failed = 0

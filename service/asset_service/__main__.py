@@ -1,6 +1,9 @@
 """python -m asset_service — the Pharos CLI.
 
     init    detect asset folders and write pharos_config.json
+    survey  classify a library's folders by content (read-only; --json)
+    map     the library map: show | refresh | set <folder> k=v | apply | pending
+    convert / extract / previews   the engine chains, gated by the map's decisions
     doctor  check setup end-to-end; print exact fixes for every gap
     ingest  run the safe import chains in order; print the decisions
             that need the user (UE crawl? blend handling? purchase CSV?)
@@ -16,6 +19,15 @@ def main() -> int:
     if cmd == "init":
         from .init import run_init
         return run_init(sys.argv[2:])
+    if cmd == "survey":
+        from .survey import run_survey
+        return run_survey(sys.argv[2:])
+    if cmd == "map":
+        from .library_map import run_map
+        return run_map(sys.argv[2:])
+    if cmd in ("convert", "extract", "previews"):
+        from .chains import run_chain
+        return run_chain(cmd, sys.argv[2:])
     if cmd == "doctor":
         from .doctor import run_doctor
         return run_doctor(sys.argv[2:])

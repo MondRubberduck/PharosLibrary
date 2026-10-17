@@ -2238,9 +2238,9 @@ def test_config_constants_all_have_a_reader():
 
 def _tags_at(tmp):
     """Point the tag file at a temp folder; returns the path to restore."""
-    from asset_service import pack_tags
-    old = pack_tags.PATH
-    pack_tags.PATH = Path(tmp) / "pack_tags.csv"
+    from asset_service import library_map
+    old = library_map.PATH
+    library_map.PATH = Path(tmp) / "library_map.csv"
     return old
 
 
@@ -2249,38 +2249,39 @@ def test_pack_tag_file_reads_what_a_spreadsheet_saves():
     semicolons in cp1252, people tick with x, 1, yes or a check mark and
     write 'Low-Poly'. Pharos adds rows for new packs, never drops one,
     and copies a label set in the registry only when it makes the file."""
-    from asset_service import pack_tags
+    from asset_service import library_map
     with tempfile.TemporaryDirectory() as tmp:
-        p = Path(tmp) / "pack_tags.csv"
-        p.write_bytes(("Folder;Name;Photorealistic;Stylized;Low-Poly;Domain;Tags\r\n"
-                       'Kits/Caf\u00e9;Caf\u00e9;;yes;X;props;"cosy, wood"\r\n'
-                       "Env/Town;Town;1;;;;\r\n").encode("cp1252"))
-        rows = pack_tags.load(p)
+        p = Path(tmp) / "library_map.csv"
+        p.write_bytes(("Folder;Kind;Name;Photorealistic;Stylized;Low-Poly;Domain;Tags\r\n"
+                       'Kits/Caf\u00e9;Blender File;Caf\u00e9;;yes;X;props;"cosy, wood"\r\n'
+                       "Env/Town;;Town;1;;;;\r\n").encode("cp1252"))
+        rows = library_map.load(p)
         cafe = rows["kits/caf\u00e9"]
         assert cafe["styles"] == ["Stylized", "Low Poly"], cafe
         assert cafe["domain"] == "Props" and cafe["tags"] == ["cosy", "wood"], cafe
+        assert cafe["kind"] == "blender" and cafe["include"], cafe
         assert rows["env/town"]["styles"] == ["Photorealistic"]
-        pack_tags.update("Env/Town", add_styles=["Low Poly"], path=p)
-        assert pack_tags.sync([("Env/Town", "Town"), ("New/Pack", "New")],
+        library_map.update("Env/Town", add_styles=["Low Poly"], path=p)
+        assert library_map.sync([("Env/Town", "Town"), ("New/Pack", "New")],
                               path=p) == 1
-        rows = pack_tags.load(p)
+        rows = library_map.load(p)
         assert sorted(rows) == ["env/town", "kits/caf\u00e9", "new/pack"], rows
         assert rows["env/town"]["styles"] == ["Photorealistic", "Low Poly"]
         assert rows["kits/caf\u00e9"]["name"] == "Caf\u00e9", rows
-        assert pack_tags.marker("lowpoly") == "Low Poly"
-        assert pack_tags.marker("cel shaded") == ""
+        assert library_map.marker("lowpoly") == "Low Poly"
+        assert library_map.marker("cel shaded") == ""
         q = Path(tmp) / "first.csv"
-        pack_tags.sync([("A", "A")], seed={"A": ("Props", "Stylized")}, path=q)
-        assert pack_tags.load(q)["a"]["styles"] == ["Stylized"]
-        pack_tags.sync([("B", "B")], seed={"B": ("Props", "Stylized")}, path=q)
-        assert pack_tags.load(q)["b"]["styles"] == [], "seeded after creation"
+        library_map.sync([("A", "A")], seed={"A": ("Props", "Stylized")}, path=q)
+        assert library_map.load(q)["a"]["styles"] == ["Stylized"]
+        library_map.sync([("B", "B")], seed={"B": ("Props", "Stylized")}, path=q)
+        assert library_map.load(q)["b"]["styles"] == [], "seeded after creation"
 
 
 def test_model_search_uses_the_owners_pack_tags():
     """A pack's style lived on its pack card only; nothing an agent asks
     reached it. The owner's tags now filter (style=), are words a query
     matches ('low poly tree'), and come back on each model and pack."""
-    from asset_service import config, pack_tags
+    from asset_service import config, library_map
     lib = config.LIBRARY_ROOT.as_posix()     # paths only: nothing is read
     rows = [("Tree", "Toon", {"fbx": f"{lib}/FX_Toon/Exports/Tree.fbx"}),
             ("Tree", "Real", {"fbx": f"{lib}/FX_Real/Tree.fbx"}),
@@ -2306,60 +2307,66 @@ def test_model_search_uses_the_owners_pack_tags():
     with tempfile.TemporaryDirectory() as tmp:
         old = _tags_at(tmp)
         try:
-            pack_tags.sync([("FX_Toon", "Toon"), ("FX_Real", "Real")])
-            pack_tags.update("FX_Toon", styles=["Stylized", "Low Poly"],
+            library_map.sync([("FX_Toon", "Toon"), ("FX_Real", "Real")])
+            library_map.update("FX_Toon", styles=["Stylized", "Low Poly"],
                              tags=["cartoon"])
-            pack_tags.update("FX_Real", styles=["Photorealistic"])
+            library_map.update("FX_Real", styles=["Photorealistic"])
             _with_registry(rows, run)
         finally:
-            pack_tags.PATH = old
+            library_map.PATH = old
 
 
 def test_tag_page_and_retag_write_the_tag_file_not_the_registry():
     """Labels set on the registry page lived only in the registry, which
-    users are told to delete and rebuild. The Tags page and the bulk retag
-    now write the tag file. Every pack gets a row except the purchase
-    gallery section, and a label already set in the registry is kept."""
+    users are told to delete and rebuild. The map page and the bulk retag
+    write the library map, whose rows come from a survey of the library
+    (every folder, with its kind), not from the legacy pack table."""
     import sqlite3
-    from asset_service import config, pack_tags
-    coll = config.SECTIONS.get("collection") or "Collected Files"
+    from asset_service import config, library_map
+    from test_fresh_install import _min_fbx
 
     def post(path, obj):
         return _drive(path, "POST", json.dumps(obj).encode("utf-8"))
 
     def run(browse):
         conn = sqlite3.connect(browse._DB_PATH)
-        for pid, name, dom, style, val in (
-                ("pack::Props/Crates", "Crates", "Props", "Stylized", "human_verified"),
-                ("pack::Env/Town", "Town", "Environment", "Photorealistic", "auto_tagged"),
-                (f"pack::{coll}/Store", "Store", "Props", "Neutral/Unclassified", "auto_tagged")):
-            conn.execute(
-                "INSERT INTO assets (id,name,canonical_root,hero_file_path,"
-                "domain,style,sub_category,validation_status,content_hash) "
-                "VALUES (?,?,'x','x',?,?,'General',?,'h')",
-                (pid, name, dom, style, val))
+        conn.execute(
+            "INSERT INTO assets (id,name,canonical_root,hero_file_path,"
+            "domain,style,sub_category,validation_status,content_hash) "
+            "VALUES ('pack::Env/Town','Town','x','x','Environment',"
+            "'Photorealistic','General','auto_tagged','h')")
         conn.commit()
         conn.close()
         st, body = _drive("/api/pack_tags")
         assert st == 200, body
         got = {p["folder"]: p for p in body["packs"]}
-        assert sorted(got) == ["Env/Town", "Props/Crates"], sorted(got)
-        assert got["Props/Crates"]["styles"] == ["Stylized"], got
-        assert got["Props/Crates"]["domain"] == "Props", got
-        assert got["Env/Town"]["styles"] == [], got
-        assert got["Env/Town"]["guess"]["style"] == "Photorealistic", got
+        assert {"Env/Town", "Props/Crates", "Purchases"} <= set(got), sorted(got)
+        assert got["Props/Crates"]["kind"] == "3d-assets", got["Props/Crates"]
+        assert got["Purchases"]["kind"] == "purchases" and got["Purchases"]["confirmed"]
+        assert got["Env/Town"]["survey"]["kind"] == "3d-assets", got["Env/Town"]
+        assert got["Env/Town"]["guess"]["style"] == "Photorealistic", got["Env/Town"]
         st, body = post("/api/pack_tags", {"folder": "Env/Town",
                                            "styles": ["Photorealistic", "low poly"],
                                            "tags": "wild west; dusty"})
         assert st == 200, body
         assert body["pack"]["styles"] == ["Photorealistic", "Low Poly"], body
         assert body["pack"]["tags"] == ["wild west", "dusty"], body
+        # kind, include and the decision are the map's too
+        st, body = post("/api/pack_tags", {"folder": "Env/Town", "kind": "Unreal Scene"})
+        assert st == 200 and body["pack"]["kind"] == "unreal", body
+        # a folder of that kind takes the kind's decision (it covers the
+        # packs below it); a word that is no decision is refused
+        st, body = post("/api/pack_tags", {"folder": "Env/Town", "action": "export"})
+        assert st == 200 and body["pack"]["action"] == "export", body
+        assert post("/api/pack_tags", {"folder": "Env/Town", "action": "fly"})[0] == 400
+        st, body = post("/api/pack_tags", {"folder": "Props/Crates", "include": False})
+        assert st == 200 and body["pack"]["include"] is False, body
         assert post("/api/pack_tags", {"folder": "Env/Town", "styles": ["Cel"]})[0] == 400
         assert post("/api/pack_tags", {"folder": "Nope", "styles": []})[0] == 404
         st, body = post("/api/retag", {"ids": ["pack::Env/Town"],
                                        "set": {"style": "Stylized", "domain": "Props"}})
         assert st == 200 and body["updated"] == 1, body
-        row = pack_tags.load()["env/town"]
+        row = library_map.load()["env/town"]
         assert row["styles"] == ["Stylized", "Low Poly"], row
         assert row["domain"] == "Props", row
         conn = sqlite3.connect(browse._DB_PATH)
@@ -2372,14 +2379,39 @@ def test_tag_page_and_retag_write_the_tag_file_not_the_registry():
         assert packs[0]["owner_tagged"] and packs[0]["domain"] == "Props", packs
         st, page = _drive("/tags")
         assert st == 200 and b"/api/pack_tags" in page
+        # the config mirrors the map: the excluded folder left the scan
+        # list (its packs with it) and is skipped by the indexer
+        assert "Props" in (config.load().get("scan_folders") or []), config.load()
+        st, body = post("/api/pack_tags", {"folder": "Props", "include": False})
+        assert st == 200 and body["pack"]["include"] is False, body
+        cfg = config.load()
+        assert not [f for f in cfg.get("scan_folders") or [] if f.split("/")[0] == "Props"], cfg
+        assert "Props" in (cfg.get("indexer_skip_dirs") or []), cfg.get("indexer_skip_dirs")
 
     with tempfile.TemporaryDirectory() as tmp:
-        old = _tags_at(tmp)
+        lib = Path(tmp) / "Lib"
+        for folder in ("Env/Town", "Props/Crates"):
+            (lib / folder).mkdir(parents=True)
+            (lib / folder / "m.fbx").write_bytes(_min_fbx())
+        (lib / "Purchases").mkdir()
+        (lib / "Purchases" / "orders.csv").write_text(
+            "Name,Product URL,Price (USD)\nA,https://e/a,1\n", encoding="utf-8")
+        from asset_service import browse
+        old_path, old_root = library_map.PATH, config.LIBRARY_ROOT
+        old_canon = list(browse.CANONICAL_ROOTS)      # bound at import
+        old_cf = config._CONFIG_FILE                   # the page mirrors the map into it
+        library_map.PATH = lib / "_Agent_Files" / "library_map.csv"
+        config.LIBRARY_ROOT = lib
+        config._CONFIG_FILE = Path(tmp) / "pharos_config.json"
+        config.save({**config._DEFAULTS, "library_root": str(lib),
+                     "registry_dir": str(Path(tmp) / "reg")})
+        browse.CANONICAL_ROOTS[:] = [lib]
         try:
             _with_registry([], run)
         finally:
-            pack_tags.PATH = old
-
+            library_map.PATH, config.LIBRARY_ROOT = old_path, old_root
+            browse.CANONICAL_ROOTS[:] = old_canon
+            config._CONFIG_FILE = old_cf
 
 def test_short_items_repeat_nothing_and_name_owned_purchases():
     """A third of a search answer repeated itself (fbx = root + key,

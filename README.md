@@ -28,6 +28,7 @@ availability — without walking the filesystem.
 Clone https://github.com/MondRubberduck/PharosLibrary and set up Pharos
 for my asset library. Setup only, no scenes yet.
 Read README.md, then docs/STARTING_PROMPT.md, and follow it exactly.
+Show me what the survey found before indexing anything.
 My assets live at: D:\path\to\my\assets
 ```
 
@@ -80,20 +81,26 @@ Your coding agent does all the technical work. You pick the folder, answer a few
 
 ## What your agent does
 
-**Setup** — driven by `docs/STARTING_PROMPT.md`, checked by
-`docs/AGENT_SETUP_BRIEF.md`:
+**Setup** — driven by `docs/STARTING_PROMPT.md`; the agent's contract is
+`docs/AGENT_SETUP.md`:
 
 1. `pharos.py doctor` probes the machine and reports every gap with the
    exact command that fixes it.
-2. `pharos.py init` detects your asset folders and writes
-   `pharos_config.json`.
-3. `pharos.py ingest` indexes everything that needs no engine, then
-   asks you the decisions that are yours: crawl the Unreal packs for
-   material recipes? export KitBash3D kits? enumerate .blend files or
-   leave them alone? where is the purchase CSV?
-4. Nothing with an engine runs without your answer. After your answers
-   the server starts and prints INGESTION COMPLETE with per-section
-   counts.
+2. `pharos.py init` surveys your library and writes the **library map**
+   (`_Agent_Files/library_map.csv`): one row per folder that is a thing,
+   with what it is (3D assets, Unreal, Unity, Blender, textures, HDRI,
+   animation, audio, purchases) and the evidence. The agent shows you the
+   tree; you correct it in the file, on the server's `/tags` page or with
+   `pharos.py map set`. Your rows are never overwritten by a re-survey.
+3. `pharos.py ingest` indexes everything that needs no engine, then asks
+   you the decisions that are yours, each with its answer command: export
+   the Unreal packs or leave them in Unreal? extract the Blender kits and
+   .blend files or leave them? index a Unity project's files? render
+   animation previews?
+4. Nothing with an engine runs without your answer in the map:
+   `pharos.py convert`, `extract` and `previews` refuse without it. After
+   your answers the server starts and prints INGESTION COMPLETE with
+   per-section counts.
 
 **Building** — `docs/AGENT_PLAYBOOK.md`, phase 2: query the API, author
 a scene manifest, validate it, check the triangle budget, build
@@ -148,7 +155,7 @@ generated index files.
 | For | Read |
 |---|---|
 | The paste-ready setup prompt | [docs/STARTING_PROMPT.md](docs/STARTING_PROMPT.md) |
-| The agent's setup contract: decisions and interview | [docs/AGENT_SETUP_BRIEF.md](docs/AGENT_SETUP_BRIEF.md) |
+| The agent's setup contract: the library map, the decisions, the steps | [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md) |
 | The two-phase doctrine and priority ladders | [docs/AGENT_PLAYBOOK.md](docs/AGENT_PLAYBOOK.md) |
 | Every capability and limit, verifiable | [docs/CAPABILITIES.md](docs/CAPABILITIES.md) |
 | MCP client configuration | [docs/MCP_SETUP.md](docs/MCP_SETUP.md) |

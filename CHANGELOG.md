@@ -2,6 +2,14 @@
 
 ## Unreleased (towards 1.0)
 
+Phase 1 of the 1.0 plan: the library map.
+
+- **The library map** (`<library>/_Agent_Files/library_map.csv`) replaces `pack_tags.csv` (read once and carried over) and the hand-edited section keys of `pharos_config.json`. One row per folder that is a thing: kind (3D assets, Unreal, Unity, Blender, textures, HDRI, animation, audio, purchases, archive, other, ignore), state, include, the decision its kind needs (`export`/`leave`, `extract`/`leave`, `index-files`/`leave`, `previews`/`no-previews`), confirmed, and the owner's tags. A folder inherits the decision of the folder above it. The survey fills the map and never overwrites a row the owner changed. The config mirrors the map (`pharos.py map apply`); a kind the library lacks has no section, so `doctor` stops asking for it.
+- **`pharos.py survey <root>`**: a structural survey of the library (markers first, file shares and names as a guess), one row per pack / project / kit / texture library, with the evidence. An 88,000-file library surveys in about a second. `pharos.py map show | pending | set | refresh | apply` edit the map from the shell; the server's Library map page (`/tags`) edits it in a browser.
+- **`pharos.py ingest` asks only what the map lacks**, each question with its answer command, and runs nothing with an engine. **`pharos.py convert | extract | previews`** run the Unreal export, the Blender extraction and the clip previews for the folders whose decision allows it, refuse for the others, and print the commands with `--dry-run`.
+- `pharos.py extract` hands the pipeline scripts the approved folders (`PHAROS_MAP_FOLDERS`), so a kit or a .blend folder the owner leaves alone is never opened; `include=no` on a folder keeps everything below it out; a wrong decision word is refused before anything is written; the survey moves a pack's state once it is converted; owner text with quotes survives a long map file; a marker file in the library root no longer turns the whole library into one row.
+- `init`, `doctor`, the generated `AGENT_START_HERE.md` and the setup docs (`docs/AGENT_SETUP.md` replaces the decision matrix of `AGENT_SETUP_BRIEF.md`) read the map. `tests/test_survey.py` covers the survey, the map and the gated chains.
+
 Phase 0 of the 1.0 plan: ground truth before the restructure.
 
 - **FBX 7.5 and later parse.** Those files write 64-bit record headers; the stdlib reader knew only the 32-bit layout, so every UE5 / recent Maya / Max file came back empty (all 617 clips of one animation pack). `fbx_dims.fbx_nodes()` reads every version.

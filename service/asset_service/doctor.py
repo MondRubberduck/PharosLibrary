@@ -167,9 +167,23 @@ def run_doctor(argv=None) -> int:
             "anim_packs": f'python service/asset_service/indexer.py '
                           f'--root "{lib}"',
         }
+        # the library map says which kinds this library HAS: an empty
+        # table for a kind the map lacks is the truth, not a gap
+        try:
+            from . import library_map
+            present = set(library_map.sections(library_map.load()))
+        except Exception:                                 # noqa: BLE001
+            present = set()
+        wants = {"meshes": {"3d-assets", "unreal", "blender", "unity"},
+                 "textures": {"textures", "hdri"}, "audio": {"audio"},
+                 "collection": {"purchases"}, "anim_packs": {"animation"}}
         for key in ("meshes", "textures", "audio", "collection",
                     "anim_packs"):
             n = counts.get(key)
+            if present and not (n or 0) and not (wants[key] & present):
+                checks.append(_check(f"section:{key}", "ok",
+                                     "none in this library (library map)"))
+                continue
             if n is None:
                 checks.append(_check(
                     f"section:{key}", "not-created",

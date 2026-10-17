@@ -5,7 +5,7 @@ from pathlib import Path
 T = str(Path(__file__).resolve().parent)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "service"))
-from _config import library_root, load
+from _config import library_root, load, map_folders
 from asset_service import kinds
 LIB = library_root() or "."
 OUT = os.path.join(T, "native_manifest.json")
@@ -40,11 +40,18 @@ SKIP_TOP = ({(_cfg.get("sections") or {}).get("animation") or "Animation",
             | set(_cfg.get("scan_folders") or [])
             | {top for top in os.listdir(LIB) if already_converted(top)})
 
+# the folders `pharos.py extract` approved in the library map: with them
+# set, exactly those are walked (at any depth); without, every top-level
+# folder not skipped
+ALLOW = map_folders()
+if ALLOW:
+    walk_roots = [(a.split("/", 1)[0], os.path.join(LIB, *a.split("/")))
+                  for a in sorted(ALLOW)]
+else:
+    walk_roots = [(top, os.path.join(LIB, top)) for top in sorted(os.listdir(LIB))
+                  if top not in SKIP_TOP and not top.startswith(".")]
 items = []
-for top in sorted(os.listdir(LIB)):
-    if top in SKIP_TOP or top.startswith("."):
-        continue
-    root = os.path.join(LIB, top)
+for top, root in walk_roots:
     if not os.path.isdir(root):
         continue
     for dp, dn, fn in os.walk(root):
