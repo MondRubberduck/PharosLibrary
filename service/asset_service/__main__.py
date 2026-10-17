@@ -4,6 +4,9 @@
     survey  classify a library's folders by content (read-only; --json)
     map     the library map: show | refresh | set <folder> k=v | apply | pending
     convert / extract / previews   the engine chains, gated by the map's decisions
+    measure <file> | --clips <folder> | --index <folder>
+            the standard-library measure: facts of one file, the clips
+            table of an animation folder, the index of a model folder
     doctor  check setup end-to-end; print exact fixes for every gap
     ingest  run the safe import chains in order; print the decisions
             that need the user (UE crawl? blend handling? purchase CSV?)
@@ -31,6 +34,9 @@ def main() -> int:
     if cmd in ("convert", "extract", "previews"):
         from .chains import run_chain
         return run_chain(cmd, sys.argv[2:])
+    if cmd == "measure":
+        from .measure import main as measure_main
+        return measure_main(sys.argv[2:])
     if cmd == "doctor":
         from .doctor import run_doctor
         return run_doctor(sys.argv[2:])

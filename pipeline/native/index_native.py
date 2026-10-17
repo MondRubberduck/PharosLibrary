@@ -3,7 +3,11 @@ Two modes:
   * batch  - AMNATIVE_LIST points at the manifest; import every file in turn.
   * blend  - a .blend was passed on the command line; index whatever loaded.
 Emits one JSON line per MESH object with real-world size in metres."""
-import bpy, os, json, mathutils
+import bpy, os, json, sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "service"))
+from asset_service import blender_measure      # noqa: E402  (the one record shape)
 
 LIST = os.environ.get("AMNATIVE_LIST", "")
 OUT = os.environ.get("AMNATIVE_OUT", "")
@@ -12,48 +16,31 @@ SECTION = os.environ.get("AMNATIVE_SECTION", "")
 fh = open(OUT, "a", encoding="utf-8")
 
 
-def scene_scale():
-    try:
-        return float(bpy.context.scene.unit_settings.scale_length) or 1.0
-    except Exception:
-        return 1.0
-
-
-def emit(src, section, container_kind):
-    """Record every mesh object in the current scene."""
-    scale = scene_scale()
+def emit(src, section, container_kind, mtime_ns=None):
+    """Record every mesh object in the current scene (blender_measure's
+    record: corners, location, pivot, materials, UV layers)."""
+    scale = blender_measure.scene_scale()
     n = 0
     for o in bpy.context.scene.objects:
         if o.type != 'MESH' or o.data is None:
             continue
         try:
-            corners = [o.matrix_world @ mathutils.Vector(c) for c in o.bound_box]
-            mn = [min(c[i] for c in corners) for i in range(3)]
-            mx = [max(c[i] for c in corners) for i in range(3)]
-            dims = [round((mx[i] - mn[i]) * scale, 4) for i in range(3)]
-        except Exception:
-            mn = mx = dims = None
-        me = o.data
-        try:
-            tris = sum(max(0, len(p.vertices) - 2) for p in me.polygons)
-        except Exception:
-            tris = None
-        mats = [s.material.name for s in o.material_slots if s.material]
-        rec = {
-            "section": section,
-            "source": src,
-            "kind": container_kind,
-            "object": o.name,
-            "collection": (o.users_collection[0].name if o.users_collection else None),
-            "vertices": len(me.vertices),
-            "triangles": tris,
-            "bbox_m": dims,
-            "max_dim_m": (round(max(dims), 4) if dims else None),
-            "materials": mats,
-        }
+            rec = blender_measure.object_record(o, scale, src, section, container_kind)
+        except Exception as exc:
+            rec = {"section": section, "source": src, "kind": container_kind,
+                   "object": o.name, "error": "%s: %s" % (type(exc).__name__, exc)}
+        if mtime_ns is not None:
+            rec["mtime_ns"] = mtime_ns
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         n += 1
     return n
+
+
+def _mtime(path):
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
 
 
 total = 0
@@ -71,7 +58,7 @@ if LIST:
                 bpy.ops.wm.obj_import(filepath=p)
             else:
                 bpy.ops.wm.usd_import(filepath=p)
-            total += emit(item["rel"], item["section"], ext.lstrip("."))
+            total += emit(item["rel"], item["section"], ext.lstrip("."), _mtime(p))
         except Exception as exc:
             fh.write(json.dumps({"section": item["section"], "source": item["rel"],
                                  "kind": ext.lstrip("."), "error": "%s: %s" % (type(exc).__name__, exc)},
@@ -79,7 +66,7 @@ if LIST:
     print("NATIVE_DONE importable_meshes=%d" % total)
 else:
     src = bpy.data.filepath
-    total = emit(src, SECTION, "blend")
+    total = emit(src, SECTION, "blend", _mtime(src))
     print("NATIVE_DONE blend=%s meshes=%d" % (os.path.basename(src), total))
 
 fh.close()

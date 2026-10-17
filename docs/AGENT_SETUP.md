@@ -88,7 +88,8 @@ roots, kit root, skipped folders). Change the map, not the config.
    decisions are missing), `GET /api/setup/progress` (the running job's
    log, then its result with the doctor verdict and the next steps).
 3. `python pharos.py ingest` runs everything that needs no engine
-   (scanner, animation indexer, importers, agent docs) and prints an
+   (the measure of every model and clip file, the importers, the
+   folders table, the agent docs) and prints an
    **ASK YOUR USER** block: the folders whose decision is missing, each
    with its answer command. Relay the questions in **one** message, in
    plain words, with the cost and a safe default ("if unsure, leave it;

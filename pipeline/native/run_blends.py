@@ -20,7 +20,22 @@ if not os.path.isfile(MAN):
 
 man = json.load(io.open(MAN, encoding="utf-8"))
 kits = man.get("blend_files", [])
-print("kits to index:", len(kits), flush=True)
+# resumable: a file already in the output with the same mtime is not
+# opened again (a crash in one file does not cost the files before it)
+done = set()
+if os.path.exists(OUT):
+    for line in io.open(OUT, encoding="utf-8"):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("source") and r.get("mtime_ns"):
+            done.add((os.path.normcase(os.path.abspath(r["source"])), r["mtime_ns"]))
+todo = [b for b in kits
+        if (os.path.normcase(os.path.abspath(b["path"])),
+            os.stat(b["path"]).st_mtime_ns if os.path.exists(b["path"]) else None) not in done]
+print("kits to index:", len(todo), "(%d already indexed)" % (len(kits) - len(todo)), flush=True)
+kits = todo
 
 ok = fail = 0
 for i, b in enumerate(kits, 1):

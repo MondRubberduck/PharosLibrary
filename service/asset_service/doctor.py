@@ -164,8 +164,7 @@ def run_doctor(argv=None) -> int:
             "audio": 'python service/asset_service/scanner.py "<audio folder>"',
             "collection": "provide the purchase CSV named in "
                           "pharos_config.json (collection_csv)",
-            "anim_packs": f'python service/asset_service/indexer.py '
-                          f'--root "{lib}"',
+            "anim_packs": 'python pharos.py measure --clips "<animation folder>"',
         }
         # the library map says which kinds this library HAS: an empty
         # table for a kind the map lacks is the truth, not a gap

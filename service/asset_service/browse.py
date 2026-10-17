@@ -49,6 +49,7 @@ from asset_service import textmatch as tm  # noqa: E402
 from asset_service import skeleton  # noqa: E402
 from asset_service import library_map  # noqa: E402
 from asset_service import setup_flow  # noqa: E402
+from asset_service import clips_import, folders_import  # noqa: E402
 from asset_service.auto_classifier import DOMAINS, STYLES  # noqa: E402
 
 DEFAULT_DB = config.DB_PATH
@@ -660,14 +661,22 @@ def api_clips(params: dict) -> dict:
     if not pack_id.startswith("pack::"):
         return {"files": [], "name": ""}
     conn = db.connect(_DB_PATH)
-    row = conn.execute("SELECT name FROM assets WHERE id = ?", (pack_id,)).fetchone()
-    files = [dict(r) for r in conn.execute(
-        "SELECT relative_path FROM asset_files WHERE asset_id = ? "
-        "AND (lower(relative_path) LIKE '%.fbx' OR lower(relative_path) LIKE '%.bvh') "
-        "ORDER BY relative_path LIMIT 400", (pack_id,))]
+    folder = pack_id[len("pack::"):]
+    files: list = []
+    if clips_import.has_rows(conn):
+        files = [r[0] for r in conn.execute(
+            "SELECT rel FROM clips WHERE folder = ? ORDER BY rel LIMIT 400", (folder,))]
+    try:
+        row = conn.execute("SELECT name FROM assets WHERE id = ?", (pack_id,)).fetchone()
+        if not files:
+            files = [r[0] for r in conn.execute(
+                "SELECT relative_path FROM asset_files WHERE asset_id = ? "
+                "AND (lower(relative_path) LIKE '%.fbx' OR lower(relative_path) LIKE '%.bvh') "
+                "ORDER BY relative_path LIMIT 400", (pack_id,))]
+    except sqlite3.OperationalError:
+        row = None
     conn.close()
-    return {"name": row["name"] if row else pack_id,
-            "files": [f["relative_path"] for f in files]}
+    return {"name": row["name"] if row else _pretty_folder(folder), "files": files}
 
 
 def api_pack_files(params: dict) -> dict:
@@ -1387,6 +1396,8 @@ def _mesh_flags(r: dict) -> None:
 
 _MESH_LIGHT = ("id,name,pack,source,kind,fbx,on_disk,triangles,bbox_x,"
                "bbox_y,bbox_z,max_dim,texture_count,tags,meta")
+_MESH_FACT_KEYS = ("pivot", "units", "up_axis", "scale_suspect", "skin", "bones",
+                   "category_hint", "lod_level", "lod_group", "variant_group")
 _MESH_HEAVY = ("id", "vertices", "submeshes", "materials", "recipe",
                "bbox_min_x", "bbox_min_y", "bbox_min_z",
                "bbox_max_x", "bbox_max_y", "bbox_max_z")
@@ -1407,15 +1418,16 @@ def _mesh_light_rows() -> list:
                  "+instr(recipe,'\"resolved\": true'))>0"
                  if "recipe" in cols else "0")
         obj = "object_name" if "object_name" in cols else "NULL"
+        facts = "facts" if "facts" in cols else "NULL"
         rows = [dict(r) for r in conn.execute(
-            f"SELECT {_MESH_LIGHT},{obj} AS object_name,{wired} AS wired "
-            f"FROM meshes ORDER BY pack, name")]
+            f"SELECT {_MESH_LIGHT},{obj} AS object_name,{wired} AS wired,"
+            f"{facts} AS facts FROM meshes ORDER BY pack, name")]
     except sqlite3.OperationalError:
         rows = []
     finally:
         conn.close()
     for r in rows:
-        for key, kind in (("tags", list), ("meta", dict)):
+        for key, kind in (("tags", list), ("meta", dict), ("facts", dict)):
             try:
                 v = json.loads(r.get(key) or "null")
             except (ValueError, TypeError):
@@ -1436,6 +1448,13 @@ def _mesh_light_rows() -> list:
     for r in rows:
         if r["_lod"] and (r["pack"], r["_base"]) not in full:
             r["_lod"] = 0          # its only copy: it IS the model
+    lods: dict = {}
+    for r in rows:
+        if r["_lod"]:
+            k = (r["pack"], r["_base"])
+            lods[k] = lods.get(k, 0) + 1
+    for r in rows:
+        r["_lods"] = 0 if r["_lod"] else lods.get((r["pack"], r["_base"]), 0)
         # a flat quad is flagged `card` but only an impostor is ranked
         # down: the same rule marks real 2-triangle floors and wall planes
         r["_junk"] = bool(r["_lod"] or r["_collider"] or _CARD_RE.search(
@@ -1548,6 +1567,23 @@ def _mesh_item(r: dict, tier: int) -> dict:
         item["object_name"] = r.get("object_name") or r["name"]
     if (r["meta"].get("facets") or {}).get("dim_suspect"):
         item["dim_suspect"] = True
+    f = r.get("facts") or {}
+    if f.get("pivot"):
+        item["pivot"] = f["pivot"]        # where the origin sits in the box
+    if f.get("units"):
+        item["units"] = f["units"]        # the source file's unit
+    if f.get("up_axis"):
+        item["up_axis"] = f.get("geo_up_axis") or f["up_axis"]
+    if f.get("skin") or r["kind"] == "SkeletalMesh":
+        item["skin"] = True               # a skinned character
+        if f.get("bones"):
+            item["bones"] = f["bones"]
+    if f.get("scale_suspect"):
+        item["scale_suspect"] = True      # over 60 m or under 1 cm
+    if f.get("category_hint"):
+        item["category"] = "/".join(f["category_hint"])
+    if r.get("_lods"):
+        item["lods"] = r["_lods"]         # lower-detail copies in the pack
     pt = r.get("_ptag")             # the owner's pack tags, when set
     if pt and pt["styles"]:
         item["styles"] = pt["styles"]
@@ -1646,10 +1682,15 @@ def api_meshes(params: dict) -> dict:
     pack tags: Photorealistic, Stylized, Low Poly; a comma list needs
     all), min_dim/max_dim (metres, on the largest axis),
     min_h/max_h (bbox Z: the registry is Z-up), max_tri (triangle
-    budget), textures=1 (only textured), sort, page, size. Items are SHORT
-    by default; detail=1 adds recipe, material names and corners. Size
-    and triangle filters exclude rows without that measurement (unknown
-    triangles are NULL) and disclose the count as `unmeasured_excluded`.
+    budget), textures=1 (only textured), pivot (base-centre | corner |
+    centre | top | outside | other: where the origin sits), skin=1|0
+    (skinned characters only / none), lod=0 (no lower-detail copies),
+    units (cm | m | in ...: the source file's unit), sort, page, size.
+    Items are SHORT by default; detail=1 adds recipe, material names and
+    corners. Size and triangle filters exclude rows without that
+    measurement (unknown triangles are NULL) and disclose the count as
+    `unmeasured_excluded`; pivot and units filters exclude unmeasured
+    rows the same way.
     """
     P = _Params(params)
     q_raw = P.s("q").strip()
@@ -1670,6 +1711,10 @@ def api_meshes(params: dict) -> dict:
     min_h, max_h = P.num("min_h", 0.0), P.num("max_h", 1e9)
     max_tri = P.num("max_tri", 1e12)
     only_tex = P.flag("textures")
+    want_pivot = P.s("pivot").strip().lower()
+    want_skin = P.s("skin").strip().lower()
+    want_units = P.s("units").strip().lower()
+    lod0_only = P.s("lod").strip() == "0"
     detail = P.flag("detail")
     sort = P.s("sort")
     page, size = P.page_size(20)
@@ -1734,6 +1779,28 @@ def api_meshes(params: dict) -> dict:
         ptw = pt["words"] if pt else ()
         if not out and only_tex and not r["texture_count"]:
             out = True
+        facts = r.get("facts") or {}
+        fact_unknown = False
+        if not out and lod0_only and r.get("_lod"):
+            out = True
+        skinned = bool(facts.get("skin")) or (r["kind"] or "") == "SkeletalMesh"
+        if not out and want_skin in ("1", "true", "yes") and not skinned:
+            out = True
+        if not out and want_skin in ("0", "false", "no") and skinned:
+            out = True
+        if not out and want_pivot:
+            if not facts.get("pivot"):
+                fact_unknown = True
+            elif facts["pivot"].lower() != want_pivot:
+                out = True
+        if not out and want_units:
+            if not facts.get("units"):
+                fact_unknown = True
+            elif facts["units"].lower() != want_units:
+                out = True
+        if fact_unknown and not out:
+            unknown.append(r)
+            continue
         if not out and tri_filter and r["triangles"] is not None \
                 and r["triangles"] > max_tri:
             out = True
@@ -1855,7 +1922,7 @@ def api_meshes(params: dict) -> dict:
             by_pack.items(), key=lambda kv: (-kv[1], kv[0] or ""))[:10]]
     _suggest(resp, query, rows, lambda r: r["name"] or "",
              matched[0]["tier"] if matched else 0)
-    if dim_filter or h_filter or tri_filter:
+    if dim_filter or h_filter or tri_filter or want_pivot or want_units:
         # disclose the hidden set: rows excluded because no measurement
         # exists (the agent should know it is filtering over measured
         # assets only, and how much it cannot see)
@@ -1906,7 +1973,7 @@ def _owned_not_downloaded(q_raw: str, styles=()):
 
 _MESH_FILTERS = ("pack", "source", "kind", "theme", "themes", "style",
                  "styles", "min_dim", "max_dim", "min_h", "max_h", "max_tri",
-                 "textures")
+                 "textures", "pivot", "skin", "lod", "units")
 _FULL_BUDGET = 80_000      # bytes of full records per answer (~20k tokens)
 _FULL_MAX_KEYS = 50
 
@@ -2102,46 +2169,121 @@ def api_meshes_themes() -> dict:
 _skel_cache: dict = {}          # (path, size, mtime) -> bone names
 
 
-def _skeletons() -> dict:
-    """pack id -> the skeleton(s) its clips use and the character files of
-    this library whose bones match.
-
-    The tree used to tell every agent that all clips retarget onto ONE
-    body. A library with clips for two rig families (Character Creator
-    and the Unreal mannequin) had a third of its clips share no bone name
-    with that body, while fitting characters sat unlinked in a model pack.
-    A few dozen file reads on the first call, cached afterwards."""
+def _clip_rows() -> list:
+    """Every clip of the animation section as a dict: the measured rows
+    of `clips` (duration, fps, frames, root motion, skeleton) when the
+    table has them, else the legacy pack tables of an index from before
+    `pharos.py measure` (then `measured` is False and the facts absent)."""
     prefix = _anim_prefix()
+    section = prefix[len("pack::"):]
     conn = db.connect(_DB_PATH)
+    rows: list = []
     try:
-        files = conn.execute(
-            "SELECT a.id AS pack, f.relative_path AS rel FROM assets a "
-            "JOIN asset_files f ON f.asset_id = a.id "
-            "WHERE substr(a.id, 1, ?) = ? AND (lower(f.relative_path) LIKE "
-            "'%.fbx' OR lower(f.relative_path) LIKE '%.bvh')",
-            (len(prefix), prefix)).fetchall()
+        if clips_import.has_rows(conn):
+            # the configured section's clips only: rows of a renamed or a
+            # second folder stay in the table but are not this section
+            for r in conn.execute(
+                    "SELECT rel, folder, name, bytes, frames, fps, duration_s, "
+                    "root_motion, has_mesh, bones, skeleton, family, bone_names "
+                    "FROM clips WHERE folder = ? OR substr(folder, 1, ?) = ? ORDER BY rel",
+                    (section, len(section) + 1, section + "/")):
+                d = dict(r)
+                d["pack"] = "pack::" + (d["folder"] or "")
+                d["measured"] = True
+                rows.append(d)
+            if rows:
+                return rows
         try:
-            bodies = [r[0] for r in conn.execute(
-                "SELECT DISTINCT fbx FROM meshes WHERE kind='SkeletalMesh' "
-                "AND on_disk=1 AND fbx != ''")]
+            for r in conn.execute(
+                    "SELECT f.relative_path AS rel, f.file_size AS bytes, a.id AS pack "
+                    "FROM asset_files f JOIN assets a ON a.id = f.asset_id "
+                    "WHERE substr(a.id, 1, ?) = ? AND (lower(f.relative_path) LIKE '%.fbx' "
+                    "OR lower(f.relative_path) LIKE '%.bvh') ORDER BY f.relative_path",
+                    (len(prefix), prefix)):
+                d = dict(r)
+                d["folder"] = d["pack"][len("pack::"):]
+                d["measured"] = False
+                rows.append(d)
         except sqlite3.OperationalError:
-            bodies = []         # no mesh table yet
+            pass
+        return rows
     finally:
         conn.close()
-    if not files:
-        return {}           # no clips: no reason to open a character file
+
+
+def _pretty_folder(folder: str) -> str:
+    last = folder.rsplit("/", 1)[-1]
+    return re.sub(r"[-_]+", " ", last).strip() or folder
+
+
+def _stored_skeletons(rows: list, bodies: dict, root: Path) -> dict:
+    """pack_skeletons from the clips table's stored bone names: no file is
+    opened for a clip; a body without stored names is read once."""
+    body_names = {b: (names if names is not None else skeleton._names(b, _skel_cache))
+                  for b, names in bodies.items()}
+    out: dict = {}
+    for r in rows:
+        try:
+            names = json.loads(r.get("bone_names") or "[]")
+        except ValueError:
+            names = []
+        if not names:
+            continue
+        folder = str(root / r["folder"])
+        inner = r["rel"][len(r["folder"]) + 1:] if r["rel"].startswith(r["folder"] + "/") else r["rel"]
+        sub = inner.split("/")[0] if "/" in inner else ""
+        recs = out.setdefault(folder, {})
+        sig = r.get("skeleton") or skeleton.signature(names)
+        if sig not in recs:
+            recs[sig] = {"family": r.get("family") or skeleton.family(names),
+                         "bones": len(names), "signature": sig,
+                         "subfolders": [], "clips": 0,
+                         "bodies": [b for b, bn in body_names.items()
+                                    if skeleton.overlap(names, bn) >= skeleton._MATCH
+                                    and 4 * len(bn) >= len(names)]}
+        if sub not in recs[sig]["subfolders"]:
+            recs[sig]["subfolders"].append(sub)
+        recs[sig]["clips"] += 1
+    return {folder: list(recs.values()) for folder, recs in out.items()}
+
+
+def _skeletons() -> dict:
+    """pack id -> the skeleton(s) its clips use and the character files of
+    this library whose bones match (from the stored bone names of the
+    clips table; a few dozen file reads for an older index)."""
+    rows = _clip_rows()
+    if not rows:
+        return {}
+    conn = db.connect(_DB_PATH)
+    try:
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(meshes)")}
+            fcol = "facts" if "facts" in cols else "NULL"
+            body_rows = conn.execute(
+                f"SELECT fbx, {fcol} AS facts FROM meshes WHERE kind='SkeletalMesh' "
+                "AND on_disk=1 AND fbx != ''").fetchall()
+        except sqlite3.OperationalError:
+            body_rows = []         # no mesh table yet
+    finally:
+        conn.close()
     root = CANONICAL_ROOTS[0]
-    # no answer cache: pack_skeletons re-checks size + mtime of the few
-    # files it samples, so a replaced clip is read again instead of being
-    # answered stale until the next restart
-    clips: dict = {}
-    for r in files:
-        folder = str(root / r["pack"][len("pack::"):])
-        clips.setdefault(folder, []).append(str(root / r["rel"]))
+    bodies: dict = {}
+    for r in body_rows:
+        try:
+            names = (json.loads(r["facts"] or "{}") or {}).get("bone_names")
+        except ValueError:
+            names = None
+        bodies[str(r["fbx"])] = names        # None = read the file once
     rig = _rig_rel()
     if rig:
-        bodies.append(str(root / rig))
-    found = skeleton.pack_skeletons(clips, bodies, cache=_skel_cache)
+        bodies.setdefault(str(root / rig), None)
+    if all(r.get("measured") for r in rows):
+        found = _stored_skeletons(rows, bodies, root)
+    else:
+        clips: dict = {}
+        for r in rows:
+            clips.setdefault(str(root / r["folder"]), []).append(str(root / r["rel"]))
+        found = skeleton.pack_skeletons(clips, list(bodies), cache=_skel_cache)
     out = {}
     for folder, records in found.items():
         pack = "pack::" + _lib_rel(folder)
@@ -2157,23 +2299,18 @@ def _skeletons() -> dict:
 
 def api_anim_tree() -> dict:
     """Left-panel outliner: the Animation subfolders = packs, with clip counts."""
-    prefix = _anim_prefix()
-    conn = db.connect(_DB_PATH)
-    rows = conn.execute(
-        "SELECT a.id AS id, a.name AS name, COUNT(f.rowid) AS n FROM assets a "
-        "JOIN asset_files f ON f.asset_id = a.id "
-        "WHERE substr(a.id, 1, ?) = ? AND "
-        "(lower(f.relative_path) LIKE '%.fbx' OR lower(f.relative_path) LIKE '%.bvh') "
-        "GROUP BY a.id ORDER BY a.id",
-        (len(prefix), prefix)).fetchall()
-    conn.close()
+    rows = _clip_rows()
+    by: dict = {}
+    for r in rows:
+        by[r["pack"]] = by.get(r["pack"], 0) + 1
     skel = _skeletons()
     folders = []
-    for r in rows:
-        f = {"pack": r["id"], "folder": r["id"][len("pack::"):],
-             "name": r["name"], "clips": r["n"]}
-        if r["id"] in skel:
-            f["skeletons"] = skel[r["id"]]
+    for pack in sorted(by):
+        folder = pack[len("pack::"):]
+        f = {"pack": pack, "folder": folder, "name": _pretty_folder(folder),
+             "clips": by[pack]}
+        if pack in skel:
+            f["skeletons"] = skel[pack]
         folders.append(f)
     return {"rig_body": _rig_rel() or None,
             "rig_note": "the preview body for Character-Creator-family "
@@ -2181,6 +2318,7 @@ def api_anim_tree() -> dict:
                         "lists its own `skeletons` (family, bone count and "
                         "the character files in this library whose bones "
                         "match); null = no rig in this library",
+            "measured": bool(rows) and all(r.get("measured") for r in rows),
             "folders": folders}
 
 
@@ -2190,7 +2328,12 @@ def api_anim_clips(params: dict) -> dict:
     = via folder words, part of a longer word or an alias); only when no
     clip matches every word are single-word matches served (tier 3,
     mode 'or-fallback'). Clips of a RELATED motion ('walk' -> jog, run)
-    follow at the end as tier 3 and are not counted in `exact`."""
+    follow at the end as tier 3 and are not counted in `exact`.
+
+    Measured facts per clip (from `pharos.py measure`): duration_s, fps,
+    frames, root_motion (true/false/null), family, bones, has_mesh.
+    Filters: min_dur / max_dur (seconds; unmeasured clips are excluded
+    and counted in unmeasured_excluded), root_motion=1|0, family=."""
     P = _Params(params)
     q_raw = P.s("q").strip()
     q = q_raw.lower()
@@ -2203,27 +2346,37 @@ def api_anim_clips(params: dict) -> dict:
         if p:
             packs.append(p if p.startswith("pack::") else "pack::" + p)
     page, size = P.page_size(24)
-    conn = db.connect(_DB_PATH)
+    min_dur, max_dur = P.num("min_dur", 0.0), P.num("max_dur", 1e9)
+    dur_filter = min_dur > 0 or max_dur < 1e9
+    want_rm = P.s("root_motion").strip().lower()
+    want_family = P.s("family").strip().lower()
+    rows = _clip_rows()
     if packs:
-        known = {r[0] for r in conn.execute(
-            "SELECT id FROM assets WHERE substr(id, 1, ?) = ?",
-            (len(prefix), prefix))}
+        known = {r["pack"] for r in rows}
         for p in packs:
             if p not in known:
                 P.warn(f"packs: {p!r} is no animation pack (ids: /api/anim/tree)")
         # none left: match nothing (no pack has the empty id), never all
         packs = [p for p in packs if p in known] or [""]
-    where = ("substr(a.id, 1, ?) = ? AND "
-             "(lower(f.relative_path) LIKE '%.fbx' OR lower(f.relative_path) LIKE '%.bvh')")
-    args: list = [len(prefix), prefix]
-    if packs:
-        where += " AND a.id IN (%s)" % ",".join("?" * len(packs))
-        args += packs
-    rows = [dict(r) for r in conn.execute(
-        "SELECT f.relative_path AS rel, f.file_size AS bytes, a.id AS pack "
-        "FROM asset_files f JOIN assets a ON a.id = f.asset_id "
-        "WHERE " + where + " ORDER BY f.relative_path", args)]
-    conn.close()
+        rows = [r for r in rows if r["pack"] in packs]
+    unmeasured = 0
+    if dur_filter or want_rm or want_family:
+        kept = []
+        for r in rows:
+            if dur_filter:
+                if r.get("duration_s") is None:
+                    unmeasured += 1
+                    continue
+                if not (min_dur <= r["duration_s"] <= max_dur):
+                    continue
+            if want_rm in ("1", "true", "yes") and r.get("root_motion") != 1:
+                continue
+            if want_rm in ("0", "false", "no") and r.get("root_motion") != 0:
+                continue
+            if want_family and (r.get("family") or "").lower() != want_family:
+                continue
+            kept.append(r)
+        rows = kept
 
     query = _query(q_raw, P)
     if query.empty:
@@ -2273,11 +2426,20 @@ def api_anim_clips(params: dict) -> dict:
                 rate = json.loads(meta.read_text(encoding="utf-8")).get("rate")
             except (OSError, ValueError):
                 rate = None
-        items.append({"rel": r["rel"], "pack": r["pack"], "folder": r["folder"],
-                      "title": r["title"],
-                      "name": r["title"],   # alias: every other section uses name
-                      "bytes": r["bytes"], "tier": e["tier"],
-                      "preview": pv, "rate": rate, "key": key})
+        item = {"rel": r["rel"], "pack": r["pack"], "folder": r["folder"],
+                "title": r["title"],
+                "name": r["title"],   # alias: every other section uses name
+                "bytes": r["bytes"], "tier": e["tier"],
+                "preview": pv, "rate": rate, "key": key}
+        if r.get("measured"):
+            item.update({
+                "duration_s": r.get("duration_s"), "fps": r.get("fps"),
+                "frames": r.get("frames"),
+                "root_motion": (None if r.get("root_motion") is None
+                                else bool(r["root_motion"])),
+                "family": r.get("family"), "bones": r.get("bones"),
+                "has_mesh": bool(r.get("has_mesh"))})
+        items.append(item)
     total = len(matched)
     resp = {"total": total, "exact": exact,
             "mode": "or-fallback" if (query and exact == 0 and total) else "and",
@@ -2294,9 +2456,29 @@ def api_anim_clips(params: dict) -> dict:
                   "bodies": rec["bodies"]} for rec in skel[pk]]
             for pk in dict.fromkeys(it["pack"] for it in items)
             if skel.get(pk)}
+    if dur_filter:
+        resp["unmeasured_excluded"] = unmeasured
     _suggest(resp, query, rows, name_of,
              matched[0]["tier"] if matched else 0)
     return P.done(resp)
+
+
+def api_folders(params: dict) -> dict:
+    """The library map with what was measured under each folder node:
+    counts, units, up axis, pivot, LOD and variant groups, the vendor's
+    own category words, license file, wiring health, Unity prefabs.
+    `folder=` serves one folder with its `facts`."""
+    folder = (params.get("folder") or [""])[0].strip()
+    conn = db.connect(_DB_PATH)
+    try:
+        rows = folders_import.rows(conn, folder or None)
+    finally:
+        conn.close()
+    if folder:
+        if not rows:
+            return {"error": "not found", "folder": folder}
+        return {"folder": rows[0], "root": CANONICAL_ROOTS[0].as_posix()}
+    return {"folders": rows, "total": len(rows), "root": CANONICAL_ROOTS[0].as_posix()}
 
 
 # ---------------------------------------------------------------------------
@@ -3718,6 +3900,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_pack_files(params))
             elif url.path == "/api/clips":
                 self._json(api_clips(params))
+            elif url.path in ("/api/folders", "/api/folders/item"):
+                self._json_item(api_folders(params))
             elif url.path == "/api/anim/tree":
                 self._json(api_anim_tree())
             elif url.path == "/api/anim/clips":
@@ -4010,6 +4194,11 @@ def _startup_imports(db_path: str) -> dict:
             print(f"{name} imported: {counts[name]} {unit}", flush=True)
         except Exception as exc:  # noqa: BLE001 -- a missing source must not kill the app
             print(f"{name} import skipped: {exc}", flush=True)
+    try:
+        n_f = folders_import.build(db_path, config.LIBRARY_ROOT)
+        print(f"folders: {n_f} node(s) with measured facts", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"folders skipped: {exc}", flush=True)
     try:
         added = _sync_pack_tags()
         if added:

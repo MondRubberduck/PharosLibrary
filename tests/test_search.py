@@ -55,8 +55,9 @@ def _fill_registry(conn, meshes, audio, clips, meshes_import, audio_import):
     audio_import.ensure_source_column(conn)
     # 'object_name' only where the schema has it (the 0.9 tables lack it,
     # and the fail-before run uses those)
-    has_obj = "object_name" in {r[1] for r in
-                                conn.execute("PRAGMA table_info(meshes)")}
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(meshes)")}
+    has_obj = "object_name" in cols
+    has_facts = "facts" in cols
     for i, row in enumerate(meshes):
         name, pack = row[0], row[1]
         x = row[2] if len(row) > 2 else {}
@@ -65,16 +66,17 @@ def _fill_registry(conn, meshes, audio, clips, meshes_import, audio_import):
             "INSERT INTO meshes (name,pack,source,kind,fbx,on_disk,bytes,"
             "triangles,vertices,submeshes,bbox_x,bbox_y,bbox_z,max_dim,"
             "materials,texture_count,texture_files,tags,meta,recipe"
-            + (",object_name" if has_obj else "") + ") "
+            + (",object_name" if has_obj else "") + (",facts" if has_facts else "") + ") "
             "VALUES (?,?,?,?,?,1,1,?,3,0,?,?,?,?,?,0,'[]',?,?,?"
-            + (",?" if has_obj else "") + ")",
+            + (",?" if has_obj else "") + (",?" if has_facts else "") + ")",
             (name, pack, x.get("source", "leartes"),
              x.get("kind", "StaticMesh"),
              x.get("fbx", f"x://{pack}/{name}.fbx"), x.get("tris", 10 + i),
              dim, dim, dim, dim,
              x.get("materials", "[]"), x.get("tags", "[]"),
              x.get("meta", _SEARCH_META), x.get("recipe"))
-            + ((x.get("object_name"),) if has_obj else ()))
+            + ((x.get("object_name"),) if has_obj else ())
+            + ((json.dumps(x["facts"]) if x.get("facts") else None,) if has_facts else ()))
     for name, cat, dur in audio:
         conn.execute(
             "INSERT INTO audio (name,cat,sub,rel,ext,bytes,dur,sr,ch,"
@@ -2480,6 +2482,112 @@ def test_setup_flow_guards_folders_and_jobs():
         finally:
             config._CONFIG_FILE = old_cf
             config.reload()
+
+
+def test_mesh_facts_are_served_and_filter():
+    """Measured facts ride on the short item (pivot, units, up axis,
+    lods, skin, scale_suspect, category) and filter: pivot=, skin=,
+    lod=0, units=; unmeasured rows fall out of a fact filter."""
+    from asset_service import browse
+    base = {"pivot": "base-centre", "units": "cm", "up_axis": "Y", "geo_up_axis": "Z",
+            "category_hint": ["Props", "Seating"]}
+    rows = [("Chair A", "P", {"facts": base}),
+            ("Chair A LOD1", "P", {"facts": {**base, "lod_level": 1}}),
+            ("Chair B", "P", {"facts": {**base, "pivot": "corner", "units": "m"}}),
+            ("Hero", "P", {"facts": {**base, "skin": True, "bones": 65, "scale_suspect": True}}),
+            ("SK Doctor", "P", {"kind": "SkeletalMesh"}),   # a manifest row: skinned by kind
+            ("Old Chair", "P")]              # indexed before measure: no facts
+    old = browse._DB_PATH
+    with tempfile.TemporaryDirectory() as tmp:
+        browse._DB_PATH = _search_registry(tmp, rows)
+        try:
+            got = {i["name"]: i for i in browse.api_meshes({"q": ["chair"], "size": ["50"]})["items"]}
+            a = got["Chair A"]
+            assert a["pivot"] == "base-centre" and a["units"] == "cm" and a["up_axis"] == "Z" \
+                and a["category"] == "Props/Seating" and a["lods"] == 1, a
+            assert "lods" not in got["Chair A LOD1"] and got["Chair A LOD1"]["lod"] == 1
+            assert "pivot" not in got["Old Chair"]
+            h = browse.api_meshes({"q": ["hero"]})["items"][0]
+            assert h["skin"] and h["bones"] == 65 and h["scale_suspect"]
+            names = lambda **kw: sorted(i["name"] for i in browse.api_meshes(   # noqa: E731
+                {k: [v] for k, v in kw.items()})["items"])
+            assert names(q="chair", pivot="base-centre") == ["Chair A", "Chair A LOD1"]
+            assert names(q="chair", pivot="corner") == ["Chair B"]
+            # the unmeasured chair is neither in nor out: it is disclosed
+            r = browse.api_meshes({"q": ["chair"], "pivot": ["corner"]})
+            assert r["unmeasured_excluded"] == 1, r
+            assert names(q="chair", lod="0") == ["Chair A", "Chair B", "Old Chair"]
+            assert names(q="chair", units="m") == ["Chair B"]
+            assert names(skin="1") == ["Hero", "SK Doctor"]
+            assert browse.api_meshes({"q": ["doctor"]})["items"][0]["skin"] is True
+            assert "Hero" not in names(q="chair hero", skin="0")
+        finally:
+            browse._DB_PATH = old
+
+
+def test_clips_api_serves_measured_facts_and_filters():
+    """With a clips table the animation tree and search answer from it:
+    counts per folder, the facts per clip, min_dur / max_dur /
+    root_motion / family filters, and the skeleton records from stored
+    bone names (no file is opened)."""
+    import sqlite3
+    from asset_service import browse, clips_import, skeleton
+    rows = [("Walk Fwd", "Animation/Walks", "Animation/Walks/walk_fwd.fbx", 1.2, 1, ["root", "hips", "spine"]),
+            ("Walk Back", "Animation/Walks", "Animation/Walks/Sub/walk_back.fbx", 0.8, 0, ["root", "hips", "spine"]),
+            ("Idle Long", "Animation/Idles", "Animation/Idles/idle_long.fbx", 12.0, 0, ["mixamorig:Hips", "mixamorig:Spine", "mixamorig:Head", "mixamorig:Neck"]),
+            ("Hop", "Animation/Idles", "Animation/Idles/hop.bvh", None, None, [])]
+    with tempfile.TemporaryDirectory() as tmp:
+        dbp = _search_registry(tmp, [("Body", "Chars", {"kind": "SkeletalMesh", "fbx": str(Path(tmp) / "Chars" / "body.fbx"),
+                                                       "facts": {"skin": True, "bone_names": ["root", "hips", "spine"]}})])
+        conn = sqlite3.connect(dbp)
+        clips_import.ensure_table(conn)
+        for name, folder, rel, dur, rm, bones in rows:
+            conn.execute("INSERT INTO clips (rel,folder,name,ext,bytes,frames,fps,duration_s,root_motion,"
+                         "has_mesh,bones,skeleton,family,bone_names,facts,measured_at) VALUES "
+                         "(?,?,?,?,1,?,30.0,?,?,0,?,?,?,?,'{}','t')",
+                         (rel, folder, name.replace(" ", "_").lower(), rel[-4:],
+                          int(dur * 30) if dur else None, dur, rm, len(bones),
+                          skeleton.signature(bones) if bones else None,
+                          skeleton.family(bones) if bones else None, json.dumps(bones)))
+        conn.execute("INSERT INTO clips (rel,folder,name,ext,bytes,bone_names,facts,measured_at) "
+                     "VALUES ('Old/Stale/x.fbx','Old/Stale','x','.fbx',1,'[]','{}','t')")
+        conn.commit()
+        conn.close()
+        old_roots = list(browse.CANONICAL_ROOTS)
+        old = browse._DB_PATH
+        browse._DB_PATH = dbp
+        browse.CANONICAL_ROOTS[:] = [Path(tmp)]
+        try:
+            tree = browse.api_anim_tree()
+            assert tree["measured"] and {f["folder"]: f["clips"] for f in tree["folders"]} == \
+                {"Animation/Idles": 2, "Animation/Walks": 2}, tree["folders"]
+            walks = next(f for f in tree["folders"] if f["folder"] == "Animation/Walks")
+            sk = walks["skeletons"][0]
+            assert sk["bones"] == 3 and sk["clips"] == 2 and sorted(sk["subfolders"]) == ["", "Sub"] \
+                and sk["bodies"] == ["Chars/body.fbx"], sk
+            idles = next(f for f in tree["folders"] if f["folder"] == "Animation/Idles")
+            assert idles["skeletons"][0]["family"] == "mixamo" and idles["skeletons"][0]["bodies"] == []
+            got = browse.api_anim_clips({"q": ["walk"], "size": ["10"]})
+            assert got["total"] == 2 and all("duration_s" in c for c in got["clips"])
+            fwd = next(c for c in got["clips"] if c["title"] == "walk fwd")
+            assert fwd["duration_s"] == 1.2 and fwd["fps"] == 30.0 and fwd["frames"] == 36 \
+                and fwd["root_motion"] is True and fwd["bones"] == 3, fwd
+            assert got["bodies"]["pack::Animation/Walks"][0]["bodies"] == ["Chars/body.fbx"]
+            titles = lambda **kw: sorted(c["title"] for c in browse.api_anim_clips(   # noqa: E731
+                {k: [v] for k, v in kw.items()})["clips"])
+            assert titles(min_dur="1", max_dur="5") == ["walk fwd"]
+            r = browse.api_anim_clips({"max_dur": ["1"]})
+            assert sorted(c["title"] for c in r["clips"]) == ["walk back"] and r["unmeasured_excluded"] == 1
+            assert titles(root_motion="1") == ["walk fwd"]
+            assert titles(root_motion="0") == ["idle long", "walk back"]
+            assert titles(family="mixamo") == ["idle long"]
+            assert titles(packs="Animation/Idles") == ["hop", "idle long"]
+            assert "Old/Stale" not in {f["folder"] for f in tree["folders"]}
+            assert browse.api_clips({"pack": ["pack::Animation/Walks"]})["files"] == \
+                ["Animation/Walks/Sub/walk_back.fbx", "Animation/Walks/walk_fwd.fbx"]
+        finally:
+            browse._DB_PATH = old
+            browse.CANONICAL_ROOTS[:] = old_roots
 
 
 def test_short_items_repeat_nothing_and_name_owned_purchases():

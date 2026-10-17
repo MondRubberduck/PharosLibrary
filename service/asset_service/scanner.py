@@ -16,11 +16,11 @@ Discovers:
 
 The scanner is honest about its limits:
   - FBX bounding boxes are extracted when possible (binary FBX parse for
-    geometry extents); OBJ/GLB via trimesh if available
+    geometry extents); OBJ/GLB/STL by measure.py (standard library)
   - Material wiring is NOT joined here — that lives in meshes_import.py
     via the crawler indexes + export manifests
-  - Without trimesh, OBJ/GLB/STL get no dimensions (recorded, not guessed)
-
+  - Every fact comes from one read of the file (measure.py); unreadable
+    files keep their name facts (LOD, collision) and no size
 Writes into the same SQLite tables the HTTP API and MCP server read.
 """
 
@@ -77,62 +77,6 @@ def detect_channel(filename: str) -> Optional[str]:
 # FBX bounding box extraction (binary, no dependencies)
 # ---------------------------------------------------------------------------
 
-def obj_bbox(path: Path) -> Optional[list[float]]:
-    """Parse OBJ vertex lines for min/max."""
-    try:
-        min_v = [float("inf")] * 3
-        max_v = [float("-inf")] * 3
-        count = 0
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if line.startswith("v "):
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        for i in range(3):
-                            v = float(parts[i + 1])
-                            min_v[i] = min(min_v[i], v)
-                            max_v[i] = max(max_v[i], v)
-                        count += 1
-                        if count > 500000:
-                            break
-        if count == 0:
-            return None
-        return [max_v[i] - min_v[i] for i in range(3)]
-    except (OSError, ValueError):
-        return None
-
-
-def obj_triangles(path: Path) -> int:
-    """Count faces in OBJ."""
-    try:
-        n = 0
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if line.startswith("f "):
-                    n += 1
-        return n
-    except OSError:
-        return 0
-
-
-def try_trimesh(path: Path) -> Optional[dict]:
-    """Use trimesh if available for GLB/GLTF/STL."""
-    try:
-        import trimesh
-        scene = trimesh.load(str(path), force="mesh", process=False)
-        bounds = scene.bounds
-        extents = bounds[1] - bounds[0]
-        triangles = len(scene.faces)
-        vertices = len(scene.vertices)
-        return {
-            "bbox": [float(x) for x in extents],
-            "triangles": int(triangles),
-            "vertices": int(vertices),
-        }
-    except ImportError:
-        return None
-    except Exception:
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -352,72 +296,70 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
             if fbx:
                 manifest_meshes[fbx] = me
 
+    # every fact comes from ONE read of the file (measure.py), cached per
+    # folder under _Agent_Files/index: a re-scan reads only changed files
+    from asset_service import measure as _measure
+    lib_root = Path(config.LIBRARY_ROOT)
+    index_file = _measure.index_path(lib_root, folder)
+    cache = _measure.load_index(index_file)
+    seen_index: dict = {}
+
+    def _rel_of(p: Path) -> str:
+        try:
+            return p.resolve().relative_to(lib_root.resolve()).as_posix()
+        except (ValueError, OSError):
+            return p.as_posix()
+
     try:
         for mf in mesh_files:
             rel = mf.relative_to(folder).as_posix()
             name = mf.stem
 
             try:
+                if mf.suffix.lower() in BLEND_EXTS:
+                    m = None            # .blend files are Blender's business
+                else:
+                    m = _measure.measure_cached(mf, _rel_of(mf), cache)
+                    seen_index[m["rel"]] = m
+                size = lo = hi = None
+                facts: dict = {}
+                if m is not None:
+                    size, lo, hi = _measure.registry_bbox(m)
+                    facts = _measure.facts_of(m)
+                    if m.get("error") and not size and verbose:
+                        print(f"  [warn] {mf.name}: {m['error']}", flush=True)
+                kind = "SkeletalMesh" if m and m.get("kind") == "skeletal" else "mesh"
                 # check manifest first
                 me = manifest_meshes.get(mf.as_posix()) or manifest_meshes.get(rel)
                 if me:
-                    bbox = me.get("bbox_m") or [0, 0, 0]
-                    # counts from the FBX itself when it parses: the
+                    # counts from the file itself when it parses: the
                     # manifest's engine count is render LOD0 (the reduced
                     # Nanite fallback), not the exported source mesh
-                    g = None
-                    if mf.suffix.lower() == ".fbx":
-                        try:
-                            from asset_service.fbx_dims import fbx_bbox_m
-                            g = fbx_bbox_m(mf)
-                        except Exception:                     # noqa: BLE001
-                            g = None
                     record = {
                         "name": name, "pack": folder.name, "source": "scan",
-                        "kind": me.get("kind", "mesh"),
+                        "kind": me.get("kind", kind),
                         "fbx": mf.as_posix(), "on_disk": 1,
                         "bytes": mf.stat().st_size,
-                        "triangles": (g["triangles"] if g
+                        "triangles": (m["triangles"] if m and m["triangles"] is not None
                                       else me.get("triangles")),
-                        "vertices": (g["vertices"] if g
+                        "vertices": (m["vertices"] if m and m["vertices"] is not None
                                      else me.get("vertices")),
-                        "bbox": bbox,
+                        "bbox": size or me.get("bbox_m") or [0, 0, 0],
                     }
                 else:
-                    # try to extract geometry; ONE corrupt file must skip
-                    # itself, never abort the whole scan (previously a poison
-                    # FBX raised IndexError out of fbx_dims and every row of
-                    # the run was lost)
-                    geo = None
-                    try:
-                        if mf.suffix.lower() == ".fbx":
-                            from asset_service.fbx_dims import fbx_bbox_m
-                            g = fbx_bbox_m(mf)
-                            if g:
-                                geo = {"bbox": g["bbox_m"],
-                                       "triangles": g["triangles"],
-                                       "vertices": g["vertices"]}
-                        elif mf.suffix.lower() == ".obj":
-                            bbox = obj_bbox(mf)
-                            tri = obj_triangles(mf)
-                            if bbox:
-                                geo = {"bbox": bbox, "triangles": tri, "vertices": 0}
-                        elif mf.suffix.lower() in (".glb", ".gltf", ".stl"):
-                            geo = try_trimesh(mf)
-                    except Exception as exc:                  # noqa: BLE001
-                        print(f"  [warn] geometry extraction failed for "
-                              f"{mf.name}: {type(exc).__name__}", flush=True)
-                        geo = None
                     record = {
                         "name": name, "pack": folder.name, "source": "scan",
-                        "kind": "mesh", "fbx": mf.as_posix(), "on_disk": 1,
+                        "kind": kind, "fbx": mf.as_posix(), "on_disk": 1,
                         "bytes": mf.stat().st_size,
                         # unknown stays NULL: a 0 passed every max_tri
                         # filter for free (same rule as meshes_import)
-                        "triangles": geo["triangles"] if geo else None,
-                        "vertices": geo["vertices"] if geo else None,
-                        "bbox": geo["bbox"] if geo else [0, 0, 0],
+                        "triangles": m["triangles"] if m else None,
+                        "vertices": m["vertices"] if m else None,
+                        "bbox": size or [0, 0, 0],
                     }
+                record["facts"] = facts
+                record["corners"] = (lo, hi)
+                record["materials"] = (m or {}).get("materials") or []
 
                 covered = bool(richer) and _norm_path(mf) in richer
                 if dry_run:
@@ -431,6 +373,9 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
                 summary["errors"] += 1
                 print(f"  [warn] skipped mesh {mf.name}: "
                       f"{type(exc).__name__}: {exc}", flush=True)
+
+        if seen_index and not dry_run:
+            _measure.save_index(index_file, seen_index)
 
         # --- texture sets (group images by PARENT FOLDER + stem) ---
         # keying on the stem alone merged same-named sets from different
@@ -516,11 +461,14 @@ def _insert_mesh(conn, record, root, table="meshes"):
     other = "meshes" if table == "meshes_parked" else "meshes_parked"
     conn.execute(f"DELETE FROM {other} WHERE fbx=? AND source='scan'",
                  (record["fbx"],))
+    lo, hi = record.get("corners") or (None, None)
+    facts = record.get("facts") or {}
     conn.execute(
         f"INSERT OR REPLACE INTO {table} (name,pack,source,kind,fbx,on_disk,"
         "bytes,triangles,vertices,submeshes,bbox_x,bbox_y,bbox_z,max_dim,"
-        "materials,texture_count,texture_files,tags,meta) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "materials,texture_count,texture_files,tags,meta,"
+        "bbox_min_x,bbox_min_y,bbox_min_z,bbox_max_x,bbox_max_y,bbox_max_z,facts) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (record["name"], record["pack"], record["source"], record["kind"],
          record["fbx"], record["on_disk"], record["bytes"],
          record["triangles"], record["vertices"], 0,
@@ -528,7 +476,10 @@ def _insert_mesh(conn, record, root, table="meshes"):
          record["bbox"][1] if len(record["bbox"]) > 1 else 0,
          record["bbox"][2] if len(record["bbox"]) > 2 else 0,
          max(record["bbox"]) if record["bbox"] else 0,
-         "[]", 0, "[]", tags, meta))
+         json.dumps(record.get("materials") or [], ensure_ascii=False), 0, "[]",
+         tags, meta,
+         *(lo if lo else (None, None, None)), *(hi if hi else (None, None, None)),
+         json.dumps(facts, ensure_ascii=False) if facts else None))
 
 
 def _tex_themes() -> dict:

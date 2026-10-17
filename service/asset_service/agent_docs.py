@@ -197,7 +197,7 @@ the configured roots — outside paths return 404/403.
 
 | Endpoint | Key filters (all optional) | Result key |
 |---|---|---|
-| `/api/meshes` | `q`, `pack`, `source`, `kind`, `theme` (one or a comma list), `style` (`Photorealistic`, `Stylized`, `Low Poly`; a comma list needs all), `min_dim`/`max_dim`, `min_h`/`max_h`, `max_tri`, `textures=1`, `sort` (see below), `detail=1` | `items` (short) |
+| `/api/meshes` | `q`, `pack`, `source`, `kind`, `theme` (one or a comma list), `style` (`Photorealistic`, `Stylized`, `Low Poly`; a comma list needs all), `min_dim`/`max_dim`, `min_h`/`max_h`, `max_tri`, `textures=1`, `pivot` (base-centre, corner, centre, top, outside, other), `skin=1|0`, `lod=0` (no lower-detail copies), `units` (cm, m, in ...), `sort` (see below), `detail=1` | `items` (short) |
 | `/api/meshes/item?key=` | `key` repeatable (up to 50), or `id` | `items` (full: recipe, materials, corners) + `not_returned` / `missing` / `candidates` |
 | `/api/meshes/packs` | — (pack names, counts, wiring health, linked `purchases`, the owner's `styles` / `pack_tags`) | `packs` |
 | `/api/pack_tags` | — (every pack folder with the owner's styles, domain and tags) | `packs` |
@@ -211,8 +211,9 @@ the configured roots — outside paths return 404/403.
 | `/api/collection/items` | `q`, `store`, `group`, `cat`, `avail=local|notdown` (`owned-not-downloaded` = notdown) | `items` |
 | `/api/collection/item?id=` | — | object (`image_paths`: the store images) |
 | `/api/collection/tree` | — (valid `store` / `group` / `cat` values) | `stores`, `groups`, `cats` |
-| `/api/anim/clips` | `q`, `packs` (pack ids or folders from `/api/anim/tree`, pipe-separated), `page`, `size` | `clips` (NOT `items`); the answer's `root` + `/` + `rel` is the file, and `bodies` lists, keyed like each clip's `pack`, the character files the clips play on: one record per skeleton (`family`, the `subfolders` of the pack that use it, `bodies`) |
+| `/api/anim/clips` | `q`, `packs` (pack ids or folders from `/api/anim/tree`, pipe-separated), `min_dur`/`max_dur` (seconds), `root_motion=1|0`, `family` (cc, mixamo, ue-mannequin), `page`, `size` | `clips` (NOT `items`): each with `duration_s`, `fps`, `frames`, `root_motion` (true / false / null = not readable), `family`, `bones`, `has_mesh` (measured; absent on an index from before `pharos.py measure`); the answer's `root` + `/` + `rel` is the file, and `bodies` lists, keyed like each clip's `pack`, the character files the clips play on: one record per skeleton (`family`, the `subfolders` of the pack that use it, `bodies`) |
 | `/api/anim/tree` | — | folders, clip counts, `skeletons` per folder |
+| `/api/folders` | `folder=` (one folder) | `folders` + `total` (every node); with `folder=` the answer is `folder` (one record, with its `facts`) and an unknown folder is a 404 `{"error": "not found"}`. Each node: the library map's row with what was measured under each: `meshes` / `clips` / `textures` / `audio` counts, `units`, `up_axis`, `pivot` (the common ones), `lod_groups`, `variant_groups`, `category_hints` (the vendor's own folder words), `vendor`, `license` (file path), `wiring_ratio`, `prefabs` |
 | `/api/stats` | — | `stats` (legacy packs) + `sections` (live totals) |
 
 Styles and `pack_tags` are the owner's own labels per pack (kept in
@@ -246,7 +247,16 @@ hulls and impostors after real models; `name` sorts by pack and name.
 `kind` · `bbox_m` [x,y,z] extents in metres (Z-up: z is the height) ·
 `triangles` · `texture_count` · `wired` (a resolved material recipe
 exists) · `themes` · `tier` · `styles` / `pack_tags` (the owner's pack
-tags, when set) · `container` + `object_name` (only when the file holds
+tags, when set) · `pivot` (where the origin sits in the box:
+`base-centre` is the ground contact under the middle, else `corner`,
+`centre`, `top`, `outside`, `other`; only when measured) · `units` (the
+source file's unit) · `up_axis` (the vertical axis of the model's
+geometry, the one `bbox_m` and `pivot` refer to; a Y-up file whose mesh
+is turned 90 degrees about X reads `Z`; only when known) · `lods` (lower-detail
+copies of this model in the pack; only on the full model) · `skin` +
+`bones` (only for a skinned character) · `scale_suspect` (only when the
+measured size is implausible: over 60 m or under 1 cm) · `category` (the
+vendor's own folder words, only when any) · `container` + `object_name` (only when the file holds
 several objects: the object's exact name inside it) · `dim_suspect`
 (only when the size was withheld as unreliable) · `lod` (only for a
 lower-detail copy: 1, 2 ...; LOD0 is the full model) · `collider` (only

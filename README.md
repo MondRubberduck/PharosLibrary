@@ -121,9 +121,10 @@ absent → model it and say so.
 | Capability | Python only | + Blender | + Unreal Editor 5.x |
 |---|---|---|---|
 | Search: names, paths, tags, themes, your pack tags, availability | ✅ | ✅ | ✅ |
+| Measured facts: size, triangles, pivot class, units, LOD and variant groups, skin and bones; clip duration, fps, root motion, skeleton | ✅ | ✅ | ✅ |
 | FBX dimensions + triangle counts | ✅ | ✅ | ✅ |
 | Texture sets, audio durations, purchase catalog | ✅ | ✅ | ✅ |
-| OBJ/GLB/STL measured geometry | + trimesh | ✅ | ✅ |
+| OBJ/GLB/STL measured geometry | ✅ | ✅ | ✅ |
 | .blend / USD container enumeration | — | ✅ | ✅ |
 | Kits → per-assembly FBX + manifests | — | ✅ | ✅ |
 | Engine-exact material recipes | — | — | ✅ |

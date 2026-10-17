@@ -86,7 +86,10 @@ CREATE TABLE IF NOT EXISTS meshes (
   -- of a .blend / multi-object file, and part of the stable key) and the
   -- vendor's own asset path (Unreal: /Game/Pack/Folder/SM_Name)
   object_name TEXT,
-  asset_path TEXT
+  asset_path TEXT,
+  -- 1.0: measured facts (units, up axis, pivot class, LOD group, skin,
+  -- bones, category words ...) as JSON; NULL for manifest rows
+  facts TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_meshes_pack ON meshes(pack);
 CREATE INDEX IF NOT EXISTS idx_meshes_maxdim ON meshes(max_dim);
@@ -118,7 +121,7 @@ MESH_EXTRA_COLUMNS = (
     ("recipe", "TEXT"),
     ("bbox_min_x", "REAL"), ("bbox_min_y", "REAL"), ("bbox_min_z", "REAL"),
     ("bbox_max_x", "REAL"), ("bbox_max_y", "REAL"), ("bbox_max_z", "REAL"),
-    ("object_name", "TEXT"), ("asset_path", "TEXT"),
+    ("object_name", "TEXT"), ("asset_path", "TEXT"), ("facts", "TEXT"),
 )
 
 # Where a texture binding came from, best first. An instance_override is the
@@ -841,6 +844,35 @@ def import_meshes(db_path: str | Path) -> int:
                 f"INSERT OR IGNORE INTO meshes_parked ({','.join(scan_cols)}) "
                 f"VALUES ({marks})", parked)
             n += len(unique_rows)
+            # the parked row's measured FILE facts (units, up axis, LOD
+            # group, skin, bones, category words) still hold for the
+            # richer rows of that file, which measured geometry only: they
+            # take them where they have none (not the pivot: that is per
+            # object, and the richer row has its own corners)
+            if parked and "facts" in scan_cols:
+                xi = scan_cols.index("facts")
+                by_file: dict = {}
+                for rid, fbx in conn.execute(
+                        "SELECT id, fbx FROM meshes WHERE facts IS NULL AND fbx != ''"):
+                    by_file.setdefault(_norm_path(fbx), []).append(rid)
+                merged = 0
+                for r in parked:
+                    if not r[xi]:
+                        continue
+                    try:
+                        f = json.loads(r[xi]) or {}
+                    except ValueError:
+                        continue
+                    f.pop("pivot", None)
+                    if not f:
+                        continue
+                    for rid in by_file.get(_norm_path(r[fi]), ()):
+                        conn.execute("UPDATE meshes SET facts=? WHERE id=? AND facts IS NULL",
+                                     (json.dumps(f, ensure_ascii=False), rid))
+                        merged += 1
+                if merged:
+                    print(f"meshes import: {merged} richer row(s) took the file facts "
+                          f"of their parked scan row", flush=True)
             if parked:
                 print(f"meshes import: {len(parked)} scan row(s) parked: a "
                       f"richer row covers the same file (served again when "

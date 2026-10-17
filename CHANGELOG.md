@@ -2,6 +2,14 @@
 
 ## Unreleased (towards 1.0)
 
+Phase 3 of the 1.0 plan: knowing more.
+
+- **One measure for every model and clip file** (`measure.py`, standard library, every FBX version, OBJ, glTF/GLB, STL, BVH): size and placement corners in metres, triangles, vertices, materials, UV layers, skin and bones, LOD level and group, collision hulls, variant group, the file's units and up axis (a Y-up file with a mesh turned about X keeps its Z-up geometry: height stays height), the pivot class (`base-centre`, `corner`, `centre`, `top`, `outside`), animation stacks with duration, fps and frames, a root-motion flag, whether a clip file also carries a mesh, a scale warning. Cached per folder under `_Agent_Files/index/` by size and mtime: a re-scan reads only changed files (176 clips: 6 s, then 0.04 s). The scanner takes its geometry from it; `pharos.py measure <file>` prints a record.
+- **The clips table.** `pharos.py measure --clips <folder>` (ingest runs it for the animation section) writes one row per clip: duration, fps, frames, root motion, skeleton signature and family, bone names, has_mesh. `/api/anim/clips` serves them (`duration_s`, `fps`, `frames`, `root_motion`, `family`, `bones`, `has_mesh`) and filters by `min_dur` / `max_dur` / `root_motion` / `family`; `/api/anim/tree` and the body match use the stored bone names instead of opening files at request time; `doctor`, the docs and the MCP tool count from it. A body file in the clip folder is no longer counted as a clip.
+- **Mesh facts on the item** (`pivot`, `units`, `up_axis`, `lods`, `skin` + `bones`, `scale_suspect`, `category`) with filters `pivot=`, `skin=`, `lod=0`, `units=` on `/api/meshes`; scanned rows carry their material names and placement corners; a skinned scanned file is a `SkeletalMesh`.
+- **The folders table** (`/api/folders`, MCP `pharos_tree('folders')`): the map's nodes with counts per section, the common units / up axis / pivot, LOD and variant groups, the vendor's own category words, vendor, license file, material-wiring health, Unity prefab count. Built at the end of ingest and at server start.
+- **One Blender record shape** (`blender_measure.py`): the native index of .blend files and the KitBash3D kit export measure through it (corners, location, pivot, materials, UV layers); the native driver skips files it already indexed (resumable).
+
 Phase 2 of the 1.0 plan: setup mode and the setup page.
 
 - **`pharos.py setup`** starts the server and opens `/setup`: a folder browser for the library root, the survey's tree (one line per pack, project, kit or texture library, with its evidence) with kind, index and decision per folder, *Accept every guess*, *Start indexing* with a live log, then the doctor verdict, the counts and the engine chains the decisions ask for. The same page adds folders later (*Survey again*).

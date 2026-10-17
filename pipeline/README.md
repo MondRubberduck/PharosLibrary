@@ -72,6 +72,9 @@ cd ../.. && python pharos.py ingest  # builds _Agent_Files/kb3d_models.jsonl + i
 Blender is found automatically (`BLENDER_EXE`, then PATH, then the newest
 installed version).
 Kits root: `kitbash_root` in pharos_config.json or `PHAROS_KB3D_ROOT`.
+Both Blender chains measure through `service/asset_service/blender_measure.py`
+(one record shape: corners and location in metres, pivot, materials, UV
+layers), the same facts `pharos.py measure` reads without an engine.
 `PHAROS_MAP_FOLDERS` (library-relative folders, `os.pathsep`-separated) limits
 chains 2 and 3 to those folders; `pharos.py extract` sets it from the library
 map's decisions, so only approved kits and .blend folders are opened.

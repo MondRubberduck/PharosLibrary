@@ -531,6 +531,18 @@ def anim_clip_count(conn: sqlite3.Connection, section: Optional[str],
     pack ids start with 'pack::<section>' -- the same substr-prefix rule
     as browse._anim_prefix, so doctor, agent docs and MCP agree with the
     API. A hard-coded 'Animation' read 0 on any other folder name."""
+    # the measured clips table answers first (one row per clip, written
+    # by `pharos.py measure --clips`); the legacy pack tables otherwise
+    sec = section or "Animation"
+    try:
+        sql = ("SELECT COUNT(DISTINCT folder) FROM clips" if packs
+               else "SELECT COUNT(*) FROM clips")
+        n = conn.execute(sql + " WHERE folder = ? OR substr(folder, 1, ?) = ?",
+                         (sec, len(sec) + 1, sec + "/")).fetchone()[0]
+        if n:
+            return n
+    except sqlite3.OperationalError:
+        pass
     prefix = "pack::" + (section or "Animation")
     if packs:
         sql = "SELECT COUNT(*) FROM assets a WHERE substr(a.id, 1, ?) = ?"

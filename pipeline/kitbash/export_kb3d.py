@@ -9,7 +9,11 @@ Writes:
   <kit>\\Exports\\FBX\\<grp>\\<grp>.fbx
   <kit>\\Exports\\kit_manifest.json
 """
-import bpy, os, json, time, mathutils
+import bpy, os, json, time, sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "service"))
+from asset_service import blender_measure      # noqa: E402  (the one record shape)
 
 SRC = bpy.data.filepath
 KIT = os.path.splitext(os.path.basename(SRC))[0]
@@ -34,29 +38,12 @@ def tree(o):
 
 
 def group_stats(nodes):
-    meshes = [n for n in nodes if n.type == 'MESH' and n.data]
-    tris = verts = 0
-    for m in meshes:
-        verts += len(m.data.vertices)
-        try:
-            tris += sum(max(0, len(p.vertices) - 2) for p in m.data.polygons)
-        except Exception:
-            pass
-    lo = [1e18] * 3
-    hi = [-1e18] * 3
-    for m in meshes:
-        for c in m.bound_box:
-            w = m.matrix_world @ mathutils.Vector(c)
-            for i in range(3):
-                lo[i] = min(lo[i], w[i])
-                hi[i] = max(hi[i], w[i])
-    dims = [round(hi[i] - lo[i], 4) for i in range(3)] if meshes else None
-    mats = sorted({s.material.name for m in meshes for s in m.material_slots if s.material})
-    # world-space AABB corners (metres): `dims` says how big the assembly is, the
-    # corners say where it sits, which is what snapping to a ground plane needs.
-    bbox_min = [round(lo[i], 4) for i in range(3)] if meshes else None
-    bbox_max = [round(hi[i], 4) for i in range(3)] if meshes else None
-    return meshes, tris, verts, dims, mats, bbox_min, bbox_max
+    """(meshes, triangles, vertices, dims, materials, bbox_min, bbox_max)
+    of an assembly, measured by blender_measure (the same corners the
+    native index writes: `dims` says how big, the corners say where)."""
+    rec = blender_measure.group_record(nodes)
+    return (rec["meshes"], rec["triangles"], rec["vertices"], rec["bbox_m"],
+            rec["materials"], rec["bbox_min_m"], rec["bbox_max_m"])
 
 
 records = []

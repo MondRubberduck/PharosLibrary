@@ -16,7 +16,7 @@ token cost.** Operating manual (setup + build doctrine):
 
 | Interface | How | Use for |
 |---|---|---|
-| HTTP JSON API | `GET http://127.0.0.1:8765/api/*` (localhost, no auth) | everything — search, details, file bytes, previews |
+| HTTP JSON API | `GET http://127.0.0.1:8765/api/*` (localhost, no auth) | everything — search, details, measured facts (size, pivot, units, LOD groups, clip duration and root motion), file bytes, previews |
 | MCP server | `python -m service.pharos_mcp_server` (stdio, 10 tools) | agents with MCP support (Claude Desktop, Cursor, …) |
 | Web dashboard | `http://127.0.0.1:8765` in a browser | human verification of what the agent found |
 | Setup page | `http://127.0.0.1:8765/setup` (`python pharos.py setup` opens it); API `/api/setup/state`, `/api/setup/survey`, `/api/setup/map`, `/api/setup/confirm`, `/api/setup/progress`, `/api/fs/drives`, `/api/fs/list` (folder browsing on loopback binds only) | picking the library, correcting the survey, deciding, indexing; a server without a config serves only this |
@@ -92,7 +92,7 @@ token cost.** Operating manual (setup + build doctrine):
 
 | Content | Ingestion path | Notes |
 |---|---|---|
-| Any mesh folder (FBX/OBJ/GLB/STL/BLEND) | `python service/asset_service/scanner.py <folder>` | FBX: real bbox in metres + exact triangle/vertex counts via the stdlib binary walker (`fbx_dims.py`, ground-truth verified vs Blender measurements, 197/200 within 5%); OBJ parses vertices; GLB/STL via trimesh if installed; .blend indexed as name+path placeholder |
+| Any mesh folder (FBX/OBJ/GLB/STL/BLEND) | `python service/asset_service/scanner.py <folder>` | FBX: real bbox in metres + exact triangle/vertex counts via the stdlib binary walker (`fbx_dims.py`, ground-truth verified vs Blender measurements, 197/200 within 5%); OBJ, glTF/GLB and STL measured by the stdlib `measure.py` (size, triangles, materials, pivot); .blend indexed as name+path placeholder until the Blender chain measures it |
 | Texture folders (PBR sets, loose map families) | `textures_import` at server start, or scanner | sets grouped per leaf folder / stripped map-channel suffixes |
 | Audio folders | `scanner.py` (WAV duration from header) or crawler `library_files.jsonl` | jsonl path additionally brings categories, keywords, sample rates |
 | Animation clip packs (FBX/BVH) | `indexer.py --root <library_root>` | builds the pack grid; previews are rendered once by the browser |

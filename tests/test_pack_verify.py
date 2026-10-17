@@ -2003,6 +2003,327 @@ def test_doctor_honours_blender_exe():
                     os.environ[k] = v
 
 
+def _fbxfix():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "fbxfix", str(REPO / "tests" / "fbxfix.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_measure_reads_the_facts_of_every_format():
+    """One read of a file gives size and corners in metres, units and up
+    axis, the pivot class, materials, UV layers, skin and bones, LOD and
+    variant names, the stacks with duration, fps and root motion -- for
+    FBX of every header width, OBJ, glTF, STL and BVH; an unreadable
+    FBX keeps what its name and markers say."""
+    import json
+    import tempfile
+    from asset_service import measure
+    F = _fbxfix()
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        # a 1 m cube on the ground in a Y-up cm file, two UV layers, two
+        # materials, a skin with two bones, a 2 s stack whose root walks
+        nodes = [
+            F.global_settings(up="Y", unit=1.0, time_mode=6),
+            F.objects(F.box_mesh(size=100.0, base=0.0, uv_layers=2),
+                      F.model(1, "SM_Crate_A_LOD1", "Mesh"),
+                      F.model(2, "root", "Root"), F.model(3, "hips", "LimbNode"),
+                      F.material(10, "M_Wood"), F.material(11, "M_Metal"),
+                      F.deformer(20, "Skin"), F.anim_stack(30, "Walk", stop_s=2.0),
+                      F.curve_node(40, "T"), F.curve(41, [0, 1, 2], [0.0, 50.0, 100.0]),
+                      F.curve(42, [0, 1, 2], [0.0, 0.0, 0.0])),
+            F.connections([(40, 2, "Lcl Translation"), (41, 40, "d|X"), (42, 40, "d|Y")]),
+        ]
+        for ver in (7400, 7700):
+            f = d / f"SM_Crate_A_LOD1.fbx"
+            f.write_bytes(F.fbx_bytes(nodes, version=ver))
+            r = measure.measure_file(f, f"Props/Crates/{f.name}")
+            assert r["error"] is None and r["kind"] == "skeletal", (ver, r["error"], r["kind"])
+            assert r["triangles"] == 12 and r["vertices"] == 8, (r["triangles"], r["vertices"])
+            assert r["bbox_m"] == [1.0, 1.0, 1.0] and r["bbox_min_m"] == [-0.5, 0.0, -0.5], r["bbox_m"]
+            assert r["units"] == "cm" and r["up_axis"] == "Y" and r["pivot"] == "base-centre", r
+            assert r["materials"] == ["M_Wood", "M_Metal"] and r["uv_layers"] == 2
+            assert r["skin"] and r["bones"] == 2 and r["bone_names"] == ["root", "hips"]
+            assert r["lod_level"] == 1 and r["lod_group"] == "sm_crate_a" \
+                and r["variant_group"] == "sm_crate", (r["lod_group"], r["variant_group"])
+            assert r["category_hint"] == ["Props", "Crates"], r["category_hint"]
+            c = r["clips"][0]
+            assert c["duration_s"] == 2.0 and c["fps"] == 30.0 and c["frames"] == 60 \
+                and c["root_motion"] is True, c
+            # the registry is Z-up: a Y-up file's height moves to z
+            size, lo, hi = measure.registry_bbox(r)
+            assert size == [1.0, 1.0, 1.0] and lo == [-0.5, -0.5, 0.0] and hi == [0.5, 0.5, 1.0], (lo, hi)
+            facts = measure.facts_of(r)
+            assert facts["pivot"] == "base-centre" and facts["skin"] and facts["clips"] == 1
+            assert json.dumps(facts)      # the registry stores it as JSON
+        # a mesh model turned -90 about X in a Y-up scene holds Z-up
+        # vertices: the cube then stands along z, and its height stays
+        rot = F.model(1, "SM_Post", "Mesh")
+        rot = ("Model", rot[1], [("Properties70", [], [
+            ("P", [F.S("Lcl Rotation"), F.S("Lcl Rotation"), F.S(""), F.S("A"),
+                   F.D(-90.0), F.D(0.0), F.D(0.0)], [])])])
+        # a 1 x 1 x 3 m post standing along z (x, y in -0.5..0.5, z in 0..3)
+        v = []
+        for x in (-0.5, 0.5):
+            for y in (-0.5, 0.5):
+                for z in (0.0, 3.0):
+                    v += [x, y, z]
+        polys = []
+        for q in [(0, 1, 3, 2), (4, 6, 7, 5), (0, 2, 6, 4), (1, 5, 7, 3), (0, 4, 5, 1), (2, 3, 7, 6)]:
+            polys += [q[0], q[1], q[2], ~q[3]]
+        f = d / "SM_Post.fbx"
+        f.write_bytes(F.fbx_bytes([F.global_settings(up="Y", unit=100.0),
+                                   F.objects(F.geometry(v, polys), rot)]))
+        r = measure.measure_file(f, f.name)
+        assert r["units"] == "m" and r["up_axis"] == "Y" and r["geo_up_axis"] == "Z", r
+        assert r["pivot"] == "base-centre" and r["lod_level"] is None and r["variant_group"] is None
+        assert measure.registry_bbox(r) == ([1.0, 1.0, 3.0], [-0.5, -0.5, 0.0], [0.5, 0.5, 3.0]), \
+            measure.registry_bbox(r)
+        # a Y-up file standing along y with an off-centre z: the registry
+        # rotates (y' = -z), it does not mirror
+        f = d / "SM_Shelf.fbx"
+        v2 = []
+        for x in (-0.5, 0.5):
+            for y in (0.0, 1.0):
+                for z in (0.0, 2.0):
+                    v2 += [x, y, z]
+        f.write_bytes(F.fbx_bytes([F.global_settings(up="Y", unit=100.0),
+                                   F.objects(F.geometry(v2, polys))]))
+        r = measure.measure_file(f, f.name)
+        assert measure.registry_bbox(r) == ([1.0, 2.0, 1.0], [-0.5, -2.0, 0.0], [0.5, 0.0, 1.0]), \
+            measure.registry_bbox(r)
+        # Blender's export: metres in a centimetre file, Lcl Scaling 100
+        scaled = ("Model", F.model(1, "SM_Box", "Mesh")[1], [("Properties70", [], [
+            ("P", [F.S("Lcl Scaling"), F.S("Lcl Scaling"), F.S(""), F.S("A"),
+                   F.D(100.0), F.D(100.0), F.D(100.0)], [])])])
+        f = d / "SM_Box.fbx"
+        f.write_bytes(F.fbx_bytes([F.global_settings(up="Y", unit=1.0),
+                                   F.objects(F.box_mesh(size=1.0, base=0.0), scaled)]))
+        r = measure.measure_file(f, f.name)
+        assert r["bbox_m"] == [1.0, 1.0, 1.0] and r["model_scale"] == 100.0, r["bbox_m"]
+        # a card far from its origin is "outside", not "centre"
+        assert measure.pivot_class([-50, 300, -50], [50, 300, 50], 1) == "outside"
+        assert measure.pivot_class([-50, 0, -50], [50, 0, 50], 1) == "centre"   # a card on its own plane
+        # a root that sways and comes back is no root motion; a jaw bone
+        # named ...Root is no root; the hips stand in only without a root
+        f = d / "sway.fbx"
+        f.write_bytes(F.fbx_bytes([F.global_settings(), F.objects(
+            F.model(2, "CC_Base_BoneRoot", "LimbNode"), F.model(3, "CC_Base_Hip", "LimbNode"),
+            F.model(4, "CC_Base_JawRoot", "LimbNode"),
+            F.anim_stack(30, "Idle", 2.0),
+            F.curve_node(40, "T"), F.curve(41, [0, 1, 2], [0.0, 19.0, 0.3]),
+            F.curve_node(50, "T"), F.curve(51, [0, 1, 2], [0.0, 10.0, 30.0]),
+            F.curve_node(60, "T"), F.curve(61, [0, 1, 2], [0.0, 40.0, 80.0])),
+            F.connections([(40, 2, "Lcl Translation"), (41, 40, "d|X"),
+                           (50, 3, "Lcl Translation"), (51, 50, "d|X"),
+                           (60, 4, "Lcl Translation"), (61, 60, "d|X")])]))
+        r = measure.measure_file(f, f.name)
+        assert r["clips"][0]["root_motion"] is False, r["clips"]
+        f = d / "hips_only.fbx"
+        f.write_bytes(F.fbx_bytes([F.global_settings(), F.objects(
+            F.model(3, "mixamorig:Hips", "LimbNode"), F.anim_stack(30, "Walk", 2.0),
+            F.curve_node(50, "T"), F.curve(51, [0, 1, 2], [0.0, 40.0, 80.0])),
+            F.connections([(50, 3, "Lcl Translation"), (51, 50, "d|X")])]))
+        r = measure.measure_file(f, f.name)
+        assert r["clips"][0]["root_motion"] is True, r["clips"]
+        # a binary STL whose header starts with "solid" is still binary
+        import struct as _st
+        tri = _st.pack("<12fH", 0, 0, 1, 0, 0, 0, 10, 0, 0, 0, 10, 0, 0)
+        st2 = d / "cad.stl"
+        st2.write_bytes(b"solid exported by CAD".ljust(80, b"\0") + _st.pack("<I", 1) + tri)
+        r = measure.measure_file(st2, st2.name)
+        assert r["triangles"] == 1 and r["kind"] == "mesh", r
+        # a clip whose root stays put: root_motion False; no mesh
+        f = d / "idle.fbx"
+        f.write_bytes(F.fbx_bytes([F.global_settings(), F.objects(
+            F.model(2, "mixamorig:Hips", "LimbNode"), F.anim_stack(30, "Idle", 1.5),
+            F.curve_node(40, "T"), F.curve(41, [0, 1.5], [3.0, 3.0])),
+            F.connections([(40, 2, "Lcl Translation"), (41, 40, "d|X")])]))
+        r = measure.measure_file(f, f.name)
+        assert r["kind"] == "clip" and not r["has_mesh"] and r["clips"][0]["root_motion"] is False
+        assert r["clips"][0]["duration_s"] == 1.5 and r["bones"] == 1
+        # unreadable FBX with the marker: still a clip, facts unknown
+        f = d / "stub.fbx"
+        f.write_bytes(b"stubfbx\x00AnimationStack\x00AnimationCurve\x00")
+        r = measure.measure_file(f, f.name)
+        assert r["error"] and r["kind"] == "clip" and r["clips"][0]["duration_s"] is None
+        # the other formats
+        o = d / "plate_01.obj"
+        o.write_text("usemtl Wood\nv 0 0 0\nv 1 0 0\nv 1 0 1\nv 0 0 1\nvt 0 0\nf 1 2 3 4\n",
+                     encoding="utf-8")
+        r = measure.measure_file(o, o.name)
+        assert r["kind"] == "mesh" and r["triangles"] == 2 and r["bbox_m"] == [1.0, 0.0, 1.0] \
+            and r["materials"] == ["Wood"] and r["uv_layers"] == 1 and r["variant_group"] == "plate", r
+        g = d / "thing.gltf"
+        g.write_text(json.dumps({
+            "asset": {"version": "2.0"},
+            "accessors": [{"count": 4, "min": [-1, 0, -1], "max": [1, 2, 1]}, {"count": 6},
+                          {"count": 2, "max": [1.25]}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 5},
+                                        "indices": 1}]}],
+            "materials": [{"name": "Paint"}],
+            "animations": [{"name": "Spin", "samplers": [{"input": 2}]}]}), encoding="utf-8")
+        r = measure.measure_file(g, g.name)
+        assert r["kind"] == "mesh+clip" and r["triangles"] == 2 and r["vertices"] == 4 \
+            and r["bbox_m"] == [2.0, 2.0, 2.0] and r["pivot"] == "base-centre" \
+            and r["units"] == "m" and r["materials"] == ["Paint"] \
+            and r["clips"][0]["duration_s"] == 1.25, r
+        import struct
+        tri = struct.pack("<12fH", 0, 0, 1, 0, 0, 0, 10, 0, 0, 0, 10, 0, 0)
+        st = d / "part.stl"
+        st.write_bytes(b"\0" * 80 + struct.pack("<I", 1) + tri)
+        r = measure.measure_file(st, st.name)
+        assert r["kind"] == "mesh" and r["triangles"] == 1 and r["bbox_m"] == [10.0, 10.0, 0.0], r
+        b = d / "walk.bvh"
+        b.write_text("HIERARCHY\nROOT Hips\n{\n OFFSET 0 0 0\n CHANNELS 6 Xposition Yposition "
+                     "Zposition Zrotation Xrotation Yrotation\n JOINT Spine\n {\n  OFFSET 0 10 0\n"
+                     "  CHANNELS 3 Zrotation Xrotation Yrotation\n  End Site\n  {\n   OFFSET 0 10 0\n"
+                     "  }\n }\n}\nMOTION\nFrames: 3\nFrame Time: 0.033333\n0 90 0 0 0 0 0 0 0\n"
+                     "5 90 0 0 0 0 0 0 0\n12 90 1 0 0 0 0 0 0\n", encoding="utf-8")
+        r = measure.measure_file(b, b.name)
+        c = r["clips"][0]
+        assert r["kind"] == "clip" and r["bones"] == 2 and c["frames"] == 3 and c["fps"] == 30.0 \
+            and c["duration_s"] == 0.1 and c["root_motion"] is True, r
+        # an absent file never raises
+        r = measure.measure_file(d / "nope.fbx", "nope.fbx")
+        assert r["error"] and r["kind"] == "unknown"
+
+
+def test_measure_folder_caches_by_size_and_mtime():
+    """The per-folder index: unchanged files are not read again, a
+    changed file is, a removed file leaves the index, converted packs
+    are skipped (their manifests import them)."""
+    import os
+    import tempfile
+    from asset_service import measure, config
+    F = _fbxfix()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "Lib"
+        (root / "Models" / "A").mkdir(parents=True)
+        (root / "Models" / "Conv" / "Exports").mkdir(parents=True)
+        (root / "Models" / "Conv" / "Exports" / "manifest.json").write_text("{}", encoding="utf-8")
+        (root / "Models" / "Conv" / "x.fbx").write_bytes(F.fbx_bytes([F.objects(F.box_mesh())]))
+        a = root / "Models" / "A" / "a.fbx"
+        b = root / "Models" / "A" / "b.obj"
+        a.write_bytes(F.fbx_bytes([F.global_settings(), F.objects(F.box_mesh())]))
+        b.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+        old_af = config.AGENT_FILES
+        config.AGENT_FILES = root / "_Agent_Files"
+        try:
+            recs, st = measure.measure_folder(root / "Models", root)
+            assert {r["rel"] for r in recs} == {"Models/A/a.fbx", "Models/A/b.obj"}, [r["rel"] for r in recs]
+            assert st["measured"] == 2 and st["cached"] == 0 and Path(st["index"]).is_file()
+            recs, st = measure.measure_folder(root / "Models", root)
+            assert st["measured"] == 0 and st["cached"] == 2, st
+            b.write_text("v 0 0 0\nv 2 0 0\nv 0 2 0\nf 1 2 3\n", encoding="utf-8")
+            os.utime(b, (1_700_000_000, 1_700_000_000))
+            a.unlink()
+            recs, st = measure.measure_folder(root / "Models", root)
+            assert st["measured"] == 1 and st["cached"] == 0 and [r["rel"] for r in recs] == ["Models/A/b.obj"]
+            assert recs[0]["bbox_m"] == [2.0, 2.0, 0.0]
+            assert "Models/A/a.fbx" not in measure.load_index(st["index"])
+            # a folder outside the library keeps no cache in the library
+            outside = Path(tmp) / "Elsewhere"
+            outside.mkdir()
+            (outside / "x.obj").write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+            assert measure.index_path(root, outside) is None
+            recs, st = measure.measure_folder(outside, root)
+            assert st["index"] is None and len(recs) == 1 and st["measured"] == 1
+            assert not list((root / "_Agent_Files" / "index").glob("Elsewhere*"))
+        finally:
+            config.AGENT_FILES = old_af
+
+
+def test_clips_and_folders_tables_from_measured_records():
+    """`pharos.py measure --clips` fills the clips table (one row per
+    clip with duration, fps, root motion, skeleton signature and family;
+    a body file in the section is no clip) and the folders table sums
+    the facts under each node of the map."""
+    import json
+    import sqlite3
+    import tempfile
+    from asset_service import clips_import, folders_import, library_map, config, db
+    F = _fbxfix()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "Lib"
+        anim = root / "Animation"
+        (anim / "Walks").mkdir(parents=True)
+        (anim / "Walks" / "Sub").mkdir()
+        walk = F.fbx_bytes([F.global_settings(), F.objects(
+            F.model(2, "root", "Root"), F.model(3, "hips", "LimbNode"), F.model(4, "spine", "LimbNode"),
+            F.anim_stack(30, "Walk", 1.0), F.curve_node(40, "T"), F.curve(41, [0, 1], [0.0, 80.0])),
+            F.connections([(40, 2, "Lcl Translation"), (41, 40, "d|X")])])
+        (anim / "Walks" / "walk_01.fbx").write_bytes(walk)
+        (anim / "Walks" / "Sub" / "walk_02.fbx").write_bytes(walk)
+        (anim / "Walks" / "body.fbx").write_bytes(F.fbx_bytes([F.global_settings(), F.objects(
+            F.box_mesh(), F.model(1, "Body", "Mesh"), F.model(2, "root", "Root"), F.deformer(20))]))
+        (anim / "loose.bvh").write_text("HIERARCHY\nROOT Hips\n{\n OFFSET 0 0 0\n CHANNELS 3 Zrotation "
+                                       "Xrotation Yrotation\n End Site\n {\n  OFFSET 0 1 0\n }\n}\n"
+                                       "MOTION\nFrames: 2\nFrame Time: 0.5\n0 0 0\n0 0 0\n", encoding="utf-8")
+        reg = Path(tmp) / "reg.sqlite"
+        db.init_db(reg).close()
+        old = (config.AGENT_FILES, library_map.PATH)
+        config.AGENT_FILES = root / "_Agent_Files"
+        library_map.PATH = root / "_Agent_Files" / "library_map.csv"
+        conn = None
+        try:
+            n, st = clips_import.write_clips(reg, root, anim)
+            assert n == 3 and st["errors"] == 0, (n, st)
+            conn = sqlite3.connect(reg)
+            conn.row_factory = sqlite3.Row
+            rows = {r["rel"]: dict(r) for r in conn.execute("SELECT * FROM clips")}
+            assert set(rows) == {"Animation/Walks/walk_01.fbx", "Animation/Walks/Sub/walk_02.fbx",
+                                 "Animation/loose.bvh"}, sorted(rows)
+            w = rows["Animation/Walks/walk_01.fbx"]
+            assert w["folder"] == "Animation/Walks" and w["duration_s"] == 1.0 and w["fps"] == 30.0 \
+                and w["root_motion"] == 1 and w["bones"] == 3 and w["family"] == "unknown" \
+                and w["skeleton"] and json.loads(w["bone_names"]) == ["root", "hips", "spine"], w
+            assert rows["Animation/loose.bvh"]["folder"] == "Animation"
+            assert rows["Animation/Walks/Sub/walk_02.fbx"]["skeleton"] == w["skeleton"]
+            assert db.anim_clip_count(conn, "Animation") == 3
+            assert db.anim_clip_count(conn, "Animation", packs=True) == 2
+            # the folders table over a map of this library (the survey
+            # lists the animation folder as one node: clips below it count)
+            # an audio section: rows are relative to the section folder
+            (root / "Audio" / "Alarms").mkdir(parents=True)
+            (root / "Audio" / "Alarms" / "bell.wav").write_bytes(b"RIFF0000WAVE")
+            from asset_service import audio_import
+            conn.executescript(audio_import.AUDIO_DDL)
+            audio_import.ensure_source_column(conn)
+            conn.execute("INSERT INTO audio (name,cat,sub,rel,ext,bytes,dur,sr,ch,tags,meta) "
+                         "VALUES ('bell','Alarms','','Alarms/bell.wav','.wav',12,1.0,0,0,'[]','{}')")
+            conn.commit()
+            library_map.refresh(root)
+            # rows below the node, three levels deep: counts climb to each parent
+            library_map.sync([("Animation/Walks", "Walks"), ("Animation/Walks/Sub", "Sub")])
+            old_audio = config.AUDIO_ROOT
+            config.AUDIO_ROOT = root / "Audio"
+            try:
+                n_f = folders_import.build(reg, root)
+            finally:
+                config.AUDIO_ROOT = old_audio
+            got = {r["folder"]: r for r in folders_import.rows(conn)}
+            assert n_f >= 3 and got["Animation"]["clips"] == 3 \
+                and got["Animation"]["kind"] == "animation" \
+                and got["Animation/Walks"]["clips"] == 2 \
+                and got["Animation/Walks/Sub"]["clips"] == 1, \
+                {k: (v["kind"], v["clips"]) for k, v in got.items()}
+            assert got["Audio"]["audio"] == 1, {k: v["audio"] for k, v in got.items()}
+            one = folders_import.rows(conn, "animation")[0]
+            assert one["kind"] == "animation" and isinstance(one["facts"], dict) \
+                and one["facts"]["effective_action"] == ""
+            # a second write replaces, never duplicates
+            n, _ = clips_import.write_clips(reg, root, anim)
+            assert conn.execute("SELECT COUNT(*) FROM clips").fetchone()[0] == 3
+        finally:
+            if conn is not None:
+                conn.close()
+            config.AGENT_FILES, library_map.PATH = old
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -134,17 +134,20 @@ def pharos_tree(section: str) -> str:
     Args:
         section: 'meshes' (themes), 'textures' (groups/subs), 'audio'
                  (categories/subs), 'animations' (folders, skeletons),
-                 'collection' (stores/groups/categories)
+                 'collection' (stores/groups/categories), 'folders' (the
+                 library map's nodes with their measured facts: counts,
+                 units, pivot, LOD and variant groups, category words)
     """
     fn = {"meshes": browse.api_meshes_themes,
           "textures": browse.api_textures_tree,
           "audio": browse.api_audio_tree,
           "animations": browse.api_anim_tree,
-          "collection": browse.api_collection_tree}.get(
+          "collection": browse.api_collection_tree,
+          "folders": lambda: browse.api_folders({})}.get(
               (section or "").strip().lower())
     if fn is None:
         return json.dumps({"error": "unknown section", "sections": [
-            "meshes", "textures", "audio", "animations", "collection"]})
+            "meshes", "textures", "audio", "animations", "collection", "folders"]})
     return json.dumps(_api(fn), ensure_ascii=False)
 
 
@@ -307,6 +310,10 @@ def pharos_search_audio(
 @mcp.tool()
 def pharos_search_animations(
     query: Optional[str] = None,
+    min_duration: Optional[float] = None,
+    max_duration: Optional[float] = None,
+    root_motion: Optional[bool] = None,
+    family: Optional[str] = None,
     limit: int = 20,
     page: int = 1,
 ) -> str:
@@ -314,10 +321,16 @@ def pharos_search_animations(
     count too ('root', a pack name). pharos_tree('animations') lists the
     folders and which skeleton each uses.
 
-    Items: title, rel (path under the library), path (absolute), tier.
+    Items: title, rel (path under the library), path (absolute), tier,
+    and the measured facts duration_s, fps, frames, root_motion (true /
+    false / null), family (cc, mixamo, ue-mannequin), bones, has_mesh.
+    Filters: min_duration / max_duration (seconds), root_motion, family.
     Clips of a related motion follow the matches as tier 3.
     """
-    out = _api(browse.api_anim_clips, q=query, size=_page(limit), page=page)
+    out = _api(browse.api_anim_clips, q=query, size=_page(limit), page=page,
+               min_dur=min_duration, max_dur=max_duration,
+               root_motion=(None if root_motion is None else int(bool(root_motion))),
+               family=family)
     for c in out.get("clips") or []:
         c["path"] = str(config.LIBRARY_ROOT / (c.get("rel") or ""))
     return json.dumps(out, ensure_ascii=False)

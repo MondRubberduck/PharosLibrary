@@ -209,11 +209,16 @@ def run_ingest(argv=None) -> int:
                 str(root / audio_dir)], dry) else 0
 
     if _section("animation"):
+        # the clips table: every clip measured (duration, fps, root
+        # motion, skeleton) from one read of the file, cached per folder
+        failed_steps += 1 if _run([py, str(
+            Path(REPO) / "service" / "asset_service" / "measure.py"),
+            "--clips", str(root / _section("animation"))], dry) else 0
         failed_steps += 1 if _run([py, str(
             Path(REPO) / "service" / "asset_service" / "indexer.py"),
             "--root", str(root)], dry) else 0
     else:
-        print("\n  animation: no clip folder detected -- skipping indexer")
+        print("\n  animation: no clip folder detected -- skipping the clip measure")
 
     # converted packs -> mesh rows: meshes_import creates rows ONLY from the
     # _Agent_Files index files (manifests add the recipes), so rebuild an
@@ -267,6 +272,12 @@ def run_ingest(argv=None) -> int:
                 else:
                     failed_steps += 1
                     print(f"  {name} import FAILED: {exc}", flush=True)
+        try:
+            from asset_service import folders_import
+            n_f = folders_import.build(config.DB_PATH, root, library_map.load())
+            print(f"  folders: {n_f} node(s) with measured facts", flush=True)
+        except Exception as exc:                      # noqa: BLE001
+            print(f"  folders skipped: {exc}", flush=True)
         try:
             for p in agent_docs.generate(config.DB_PATH):
                 print(f"  wrote {p}", flush=True)
@@ -365,12 +376,17 @@ def run_ingest(argv=None) -> int:
                     f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
             except sqlite3.OperationalError:
                 totals[tbl] = 0
-        try:      # `assets` only exists once indexer.py ran (animation)
-            anim = conn.execute(
-                "SELECT COUNT(*) FROM assets WHERE id LIKE 'pack::%'"
-            ).fetchone()[0]
+        try:      # the clips table, else the legacy pack table
+            anim = conn.execute("SELECT COUNT(*) FROM clips").fetchone()[0]
         except sqlite3.OperationalError:
             anim = 0
+        if not anim:
+            try:
+                anim = conn.execute(
+                    "SELECT COUNT(*) FROM assets WHERE id LIKE 'pack::%'"
+                ).fetchone()[0]
+            except sqlite3.OperationalError:
+                anim = 0
         conn.close()
     except Exception:                                     # noqa: BLE001
         return 0
