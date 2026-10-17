@@ -1,0 +1,338 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>3D Animation Viewer</title><style>
+:root{--bg:#101216;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1}
+body{margin:0;font:13px/1.4 system-ui;background:var(--bg);color:var(--fg);overflow:hidden}
+#bar{position:fixed;top:0;left:0;right:0;display:flex;gap:8px;align-items:center;
+padding:8px 14px;background:rgba(20,22,26,.94);border-bottom:1px solid var(--line);z-index:2;flex-wrap:wrap}
+#bar a{color:#7cc4ff;text-decoration:none}
+select,button{background:var(--card);color:var(--fg);border:1px solid var(--line);
+border-radius:6px;padding:4px 8px}
+button{cursor:pointer}
+button.r{min-width:36px}
+#status{color:var(--dim);margin-left:auto;max-width:48vw;white-space:pre-wrap}
+#status .err{color:#ff8a8a}
+canvas{display:block}
+</style>
+<script type="importmap">
+{"imports":{"three":"/static/three.module.js","three/addons/":"/static/jsm/"}}
+</script>
+<script>window.__errs=[];window.addEventListener('error',e=>window.__errs.push(String(e.message||e).slice(0,200)));window.addEventListener('unhandledrejection',e=>window.__errs.push('REJ: '+String(e.reason&&(e.reason.message||e.reason)).slice(0,200)));</script></head><body>
+<div id="bar"><a href="/" title="home">⌂</a><strong id="pname"></strong>
+<select id="file"></select><select id="clip"></select>
+<button id="play">pause</button><button id="restart" title="restart clip from 0">&#9198;</button>
+<span title="orientation (auto-detected — override here if the model lies on its side; your choice is remembered per file)">
+<button class="r" data-r="x-">X&minus;</button><button class="r" data-r="x+">X+</button>
+<button class="r" data-r="y-">Y&minus;</button><button class="r" data-r="y+">Y+</button>
+<button class="r" data-r="z-">Z&minus;</button><button class="r" data-r="z+">Z+</button>
+<button class="r" id="orientReset" title="clear saved orientation and re-run auto-detect">reset</button></span>
+<a id="dl" href="#" title="download this FBX/BVH file" style="display:none;color:#7cc4ff;text-decoration:none">&#8681;</a>
+<button id="vcp" title="copy the file's absolute path" style="display:none">path &#10697;</button>
+<button id="vexp" title="show file in Explorer" style="display:none">&#128193;</button>
+<span id="status">loading…</span></div>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {FBXLoader} from 'three/addons/loaders/FBXLoader.js';
+import {BVHLoader} from 'three/addons/loaders/BVHLoader.js';
+
+const fileSel=document.getElementById('file'),clipSel=document.getElementById('clip'),
+      status=document.getElementById('status'),playBtn=document.getElementById('play');
+const q=new URLSearchParams(location.search), pack=q.get('pack')||'';
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+document.body.appendChild(renderer.domElement);
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x101216);
+const camera=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.01,1e7);
+const controls=new OrbitControls(camera,renderer.domElement);
+async function fetchBuf(url,ms){
+  const ctl=new AbortController();
+  const t=setTimeout(()=>ctl.abort(),ms||30000);
+  try{const r=await fetch(url,{signal:ctl.signal});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return await r.arrayBuffer();}
+  finally{clearTimeout(t);}}
+scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.4));
+const key=new THREE.DirectionalLight(0xffffff,2.2); key.position.set(3,6,4); scene.add(key);
+const rim=new THREE.DirectionalLight(0x88aaff,0.8); rim.position.set(-4,3,-3); scene.add(rim);
+let grid=null,mixer=null,playing=true,holder=null,clips=[],currentRel='',mode='fbx';
+
+// skeleton-only clips all target the Actor motion-dummy rig
+// ("skeletons should be the same") — show its body instead of naked bones
+const RETARGET_REL="{{RIG_REL}}";  // from the server; '' = no rig in this library
+let dummyObj=null,dummyPromise=null;
+function getDummy(){
+  if(!RETARGET_REL)return Promise.reject(new Error('no retarget rig'));
+  if(!dummyPromise){
+    const L=new FBXLoader();
+    L.setResourcePath('/res/'+encodeURIComponent(RETARGET_REL.split('/').slice(0,-1).join('/'))+'/');
+    dummyPromise=new Promise((res,rej)=>L.load('/file?path='+encodeURIComponent(RETARGET_REL),
+      o=>{dummyObj=o;res(o);},undefined,rej));
+  }
+  return dummyPromise;}
+
+function fail(msg){status.innerHTML='<span class="err">&#9888; '+esc(msg)+'</span>';console.error(msg);}
+let watchdog=0;
+function loading(msg){clearTimeout(watchdog);status.textContent=msg;
+  watchdog=setTimeout(()=>{if(status.textContent===msg)
+    status.textContent=msg+'\nstill loading after 15s — very large file, or the server restarted (reload this page)';},15000);}
+function loaded(msg){clearTimeout(watchdog);status.textContent=msg;}
+
+function orientKey(){return 'orient2:'+pack+':'+currentRel;}
+function saveOrient(){if(!holder)return;
+  try{localStorage.setItem(orientKey(),JSON.stringify({x:holder.rotation.x,y:holder.rotation.y,z:holder.rotation.z}));}catch(e){}}
+function loadOrient(){try{return JSON.parse(localStorage.getItem(orientKey()));}catch(e){return null;}}
+function clearOrient(){try{localStorage.removeItem(orientKey());}catch(e){}}
+
+function modelBox(){
+  let b=new THREE.Box3().setFromObject(holder);
+  let s=b.getSize(new THREE.Vector3());
+  if(b.isEmpty()||s.lengthSq()===0){          // skin-only meshes: bind-pose
+    try{b=new THREE.Box3().setFromObject(holder,true);}catch(e){}  // precise = skinned verts
+    s=b.getSize(new THREE.Vector3());}
+  if(b.isEmpty()||s.lengthSq()===0){          // skeleton-driven files: use bones
+    const bb=new THREE.Box3();
+    holder.traverse(o=>{if(o.isBone)bb.expandByPoint(o.getWorldPosition(new THREE.Vector3()));});
+    if(!bb.isEmpty())b=bb;}
+  return b;}
+function autoOrientEuler(box){
+  if(!box||box.isEmpty())return null;
+  const s=box.getSize(new THREE.Vector3());
+  const horiz=Math.max(s.x,s.z);
+  if(!horiz||s.y>=horiz*0.4)return null;                 // upright already
+  if(s.z>=s.x)return new THREE.Euler(-Math.PI/2,0,0);    // content up is +Z
+  return new THREE.Euler(0,0,Math.PI/2);                 // content up is +X
+}
+function _findBone(re){let best=null;
+  holder.traverse(o=>{if(o.isBone&&re.test(o.name)&&(!best||o.name.length<best.name.length))best=o;});
+  return best;}
+function boneAxisDelta(){
+  // anatomy beats bounding boxes: the head bone must sit above the hips.
+  // Returns the 90-degree step (absolute, from identity) that achieves that,
+  // {x:0,z:0} when already upright, or null when no head/hip bones exist.
+  const head=_findBone(/head/i),hip=_findBone(/pelvis|hips/i);
+  if(!head||!hip)return null;
+  const v=head.getWorldPosition(new THREE.Vector3()).sub(hip.getWorldPosition(new THREE.Vector3()));
+  const ax=Math.abs(v.x),ay=Math.abs(v.y),az=Math.abs(v.z);
+  if(v.y>0&&ay>=ax&&ay>=az)return{x:0,z:0};
+  if(v.y<0&&ay>=ax&&ay>=az)return{x:0,z:Math.PI};   // 180 flipped (CC rigs)
+  if(az>=ax)return v.z>0?{x:-Math.PI/2,z:0}:{x:Math.PI/2,z:0};
+  return v.x>0?{x:0,z:Math.PI/2}:{x:0,z:-Math.PI/2};}
+let bindBoxEmpty=false,bindAnatomyOk=false;
+function applyOrient(){
+  const saved=loadOrient();
+  if(saved){holder.rotation.set(saved.x,saved.y,saved.z);bindBoxEmpty=false;bindAnatomyOk=true;return 'saved orientation';}
+  const box0=modelBox();
+  bindBoxEmpty=box0.isEmpty()||box0.getSize(new THREE.Vector3()).lengthSq()===0;
+  if(!clips.length){bindAnatomyOk=true;return 'native orientation';}   // static props stay as-authored
+  // clips are downloaded/exported from Blender = Z-up.
+  // Baseline X-90 maps Z-up onto three.js Y-up, THEN anatomy verifies it.
+  holder.rotation.set(-Math.PI/2,0,0);
+  holder.updateMatrixWorld(true);
+  const d=boneAxisDelta();
+  bindAnatomyOk=!!d;
+  if(d&&(d.x||d.z)){holder.rotation.x+=d.x;holder.rotation.z+=d.z;return 'auto-oriented (Z-up baseline)';}
+  if(!d){const e=autoOrientEuler(modelBox());       // no head/hip bones → bbox check
+    if(e){holder.rotation.x+=e.x;holder.rotation.z+=e.z;}}
+  return 'auto-oriented (Z-up baseline)';}
+function refit(){if(!holder)return;holder.updateMatrixWorld(true);fitCamera(modelBox());}
+function scheduleDeferredOrient(){
+  // ONLY for clips whose bind pose could not be verified anatomically:
+  // authored motion (falls, dives, rolls) must never be "corrected" --
+  // the run-fallover misfire rotated the scene 90 degrees mid-fall and
+  // saved it. And auto-fixes never persist; only manual buttons save.
+  if(bindAnatomyOk)return;
+  setTimeout(()=>{if(!holder||loadOrient())return;
+    let fix=false;
+    if(clips.length){
+      const d2=boneAxisDelta();
+      if(d2&&(d2.x||d2.z)){holder.rotation.x+=d2.x;holder.rotation.z+=d2.z;fix=true;}
+      else{const e2=autoOrientEuler(modelBox());
+        if(e2){holder.rotation.x+=e2.x;holder.rotation.z+=e2.z;fix=true;}}}
+    if(fix){refit();status.textContent+=' — auto-oriented once animation started';}
+    else if(bindBoxEmpty)refit();},1400);}
+function fitCamera(box){
+  if(box.isEmpty())return;
+  const size=box.getSize(new THREE.Vector3()),center=box.getCenter(new THREE.Vector3());
+  const radius=Math.max(size.x,size.y,size.z)||1;
+  camera.near=radius/100; camera.far=radius*50; camera.updateProjectionMatrix();
+  camera.position.copy(center).add(new THREE.Vector3(radius*1.4,radius*0.9,radius*1.7));
+  controls.target.copy(center); controls.update();
+  if(grid)scene.remove(grid);
+  grid=new THREE.GridHelper(radius*4,24,0x2c313a,0x1c2026); grid.position.set(center.x,box.min.y,center.z);
+  scene.add(grid);
+}
+function fixMaterials(obj){
+  obj.traverse(o=>{ if(!o.isMesh)return;
+    const mats=Array.isArray(o.material)?o.material:[o.material];
+    for(const m of mats){ if(!m.map&&(!m.color||m.color.getHex()===0))m.color=new THREE.Color(0xb8c0cc);
+      if(m.map)m.color=new THREE.Color(0xffffff);}
+    o.frustumCulled=false; });
+}
+function dispose(obj){obj.traverse(n=>{
+  if(n.geometry)n.geometry.dispose();
+  if(n.material)(Array.isArray(n.material)?n.material:[n.material]).forEach(m=>{
+    for(const k of ['map','normalMap','bumpMap','roughnessMap','metalnessMap','emissiveMap','aoMap','alphaMap'])
+      if(m[k])m[k].dispose();
+    m.dispose();});});}
+function clearModel(){
+  if(mixer)mixer.stopAllAction(); mixer=null; clips=[]; clipSel.innerHTML='';
+  if(holder){if(dummyObj&&dummyObj.parent===holder)holder.remove(dummyObj);  // keep the dummy for reuse
+    scene.remove(holder);dispose(holder);holder=null;}
+  if(grid){scene.remove(grid);grid=null;}}
+function playClip(i){
+  if(!mixer||!clips.length)return;
+  mixer.stopAllAction();
+  const action=mixer.clipAction(clips[i]); action.reset().play();
+  clipSel.innerHTML=clips.map((c,j)=>`<option ${j===i?'selected':''}>${esc(c.name||j)}</option>`).join('');}
+
+async function loadFile(rel){
+  clearModel(); currentRel=rel;
+  const dlA=document.getElementById('dl');
+  dlA.href='/file?path='+encodeURIComponent(rel);
+  dlA.setAttribute('download',rel.split('/').pop());
+  dlA.style.display='';
+  document.getElementById('vcp').style.display='';document.getElementById('vexp').style.display='';
+  document.getElementById('vcp').onclick=()=>{fetch('/api/open_explorer?dry=1&path='+encodeURIComponent(rel))
+    .then(r=>r.json()).then(j=>{if(j.abs&&navigator.clipboard)
+      navigator.clipboard.writeText(j.abs).then(()=>{
+        document.getElementById('vcp').textContent='copied ✓';
+        setTimeout(()=>{document.getElementById('vcp').textContent='path ⧉';},1500);});});};
+  document.getElementById('vexp').onclick=()=>{fetch('/api/open_explorer?path='+encodeURIComponent(rel))
+    .then(r=>r.json()).then(j=>{if(!r.ok)alert('failed: '+(j.error||'?'));});};
+  history.replaceState(null,'','/viewer?pack='+encodeURIComponent(pack)+'&file='+encodeURIComponent(rel));
+  loading('loading '+rel.split('/').pop()+' …');
+  const url='/file?path='+encodeURIComponent(rel);
+  const dir=rel.split('/').slice(0,-1).join('/');
+  // fetch with hard timeout + parse locally: a dead/restarted server must
+  // surface as an error, never as an eternal "loading..."
+  let buf;
+  try{buf=await fetchBuf(url,30000);}
+  catch(e){fail('load failed: '+((e&&e.message)||e)+' — if the server was just restarted, reload this page');return;}
+  if(rel.toLowerCase().endsWith('.bvh')){
+    mode='bvh';
+    // BVHLoader.parse string-splits its input; a raw ArrayBuffer throws
+    try{const res=new BVHLoader().parse(new TextDecoder('utf-8').decode(buf));
+      try{
+        holder=new THREE.Group();
+        const root=res.skeleton.bones[0];
+        holder.add(root);
+        const helper=new THREE.SkeletonHelper(root);
+        holder.add(helper);
+        scene.add(holder);
+        clips=[res.clip]; mixer=new THREE.AnimationMixer(root);
+        const how=applyOrient(); refit(); playClip(0);
+        loaded('playing skeleton ('+how+') — drag to orbit, wheel to zoom');
+        scheduleDeferredOrient();
+      }catch(e){fail('BVH error: '+((e&&e.message)||e));}
+    }catch(err){fail('BVH load failed: '+((err&&err.message)||err));}
+    return;
+  }
+  mode='fbx';
+  window.__retarget={retargeted:false,common:0,clipBones:0};
+  let obj;
+  try{obj=new FBXLoader().setResourcePath('/res/'+encodeURIComponent(dir)+'/').parse(buf,'');}
+  catch(err){
+    const msg=(err&&err.message)||String(err);
+    let extra=/ascii/i.test(msg)?' — ASCII FBX is not supported, binary only':'';
+    fail('FBX load failed: '+String(msg).slice(0,200)+extra);
+    return;}
+  (async obj=>{
+    try{
+      holder=new THREE.Group(); holder.add(obj); scene.add(holder);
+      clips=obj.animations||[];
+      let hasMesh=false; obj.traverse(o=>{if(o.isMesh)hasMesh=true;});
+      if(!hasMesh&&clips.length){
+        // skeleton-only clip: drive the motion-dummy body with it, provided
+        // the rigs actually share bone names
+        try{
+          const dummy=await getDummy();
+          const dummyBones=new Set(); dummy.traverse(o=>{if(o.isBone)dummyBones.add(o.name);});
+          const clipBones=new Set();
+          for(const t of clips[0].tracks){const m=t.name.match(/bones\[([^\]]+)\]/);
+            clipBones.add(m?m[1]:t.name.split('.')[0]);}
+          let common=0; for(const b of clipBones)if(dummyBones.has(b))common++;
+          window.__retarget={retargeted:false,common,clipBones:clipBones.size};
+          if(common>=6){
+            holder.add(dummy); holder.remove(obj); dispose(obj);
+            fixMaterials(dummy);
+            hasMesh=true; window.__retarget.retargeted=true;
+            mixer=new THREE.AnimationMixer(dummy); playClip(0);
+          }
+        }catch(e){/* dummy unavailable → fall back to bone view */}
+      }
+      if(!mixer&&clips.length){mixer=new THREE.AnimationMixer(obj);playClip(0);}
+      if(!hasMesh)holder.add(new THREE.SkeletonHelper(obj));  // skeleton-only FBX
+      const how=applyOrient(); refit();
+      loaded((clips.length?('playing: '+(clips[0].name||'clip')):'static mesh — no animation in file')
+        +(window.__retarget.retargeted?' on Render_Dummy body':(hasMesh?'':' — skeleton-only file, bones shown'))
+        +' ('+how+') — drag to orbit, wheel to zoom');
+      scheduleDeferredOrient();
+    }catch(e){fail('FBX error: '+((e&&e.message)||e));}
+  })(obj);
+}
+
+playBtn.onclick=()=>{playing=!playing;playBtn.textContent=playing?'pause':'play';};
+document.getElementById('restart').onclick=()=>{
+  if(mixer&&clips.length){mixer.stopAllAction();
+    mixer.clipAction(clips[Math.max(0,clipSel.selectedIndex)]||clips[0]).reset().play();
+    if(!playing){playing=true;playBtn.textContent='pause';}}};
+document.querySelectorAll('button.r[data-r]').forEach(b=>b.onclick=()=>{
+  if(!holder)return;
+  const r=b.dataset.r, ax=r[0], dir=r[1]==='+'?1:-1;
+  holder.rotation[ax]+=dir*Math.PI/2;
+  saveOrient(); refit();});
+document.getElementById('orientReset').onclick=()=>{
+  if(!holder)return; clearOrient();
+  holder.rotation.set(0,0,0);
+  const how=applyOrient(); refit();
+  loaded('orientation reset ('+how+')');};
+clipSel.onchange=()=>playClip(clipSel.selectedIndex);
+fileSel.onchange=()=>loadFile(fileSel.value);
+
+// read-only debug probe so humans AND agents can verify viewer state
+window.__viewerInfo=()=>{if(!holder)return{loaded:false};
+  const s=modelBox().getSize(new THREE.Vector3());
+  const probe={meshes:0,skinned:0,bones:0,verts:0};
+  holder.traverse(o=>{if(o.isBone)probe.bones++;
+    else if(o.isMesh){probe.meshes++;if(o.isSkinnedMesh)probe.skinned++;
+      if(o.geometry&&o.geometry.attributes.position)probe.verts+=o.geometry.attributes.position.count;}});
+  const head=_findBone(/head/i),hip=_findBone(/pelvis|hips/i);
+  const headUp=(head&&hip)?+(head.getWorldPosition(new THREE.Vector3()).y
+    -hip.getWorldPosition(new THREE.Vector3()).y).toFixed(1):null;
+  return {loaded:true,mode,file:currentRel,clips:clips.length,probe,headUp,
+    retarget:window.__retarget||null,
+    rotation:{x:+holder.rotation.x.toFixed(3),y:+holder.rotation.y.toFixed(3),z:+holder.rotation.z.toFixed(3)},
+    box:{x:+s.x.toFixed(3),y:+s.y.toFixed(3),z:+s.z.toFixed(3)},
+    uprightRatio:+(s.y/(Math.max(s.x,s.z)||1)).toFixed(3)};};
+
+(async()=>{
+  try{
+    const fileOnly=q.get('file');
+    if(!pack&&fileOnly){
+      document.getElementById('pname').textContent=fileOnly.split('/').pop();
+      fileSel.innerHTML=`<option value="${esc(fileOnly)}">${esc(fileOnly.split('/').pop())}</option>`;
+      loadFile(fileOnly);
+      return;}
+    const data=await(await fetch('/api/clips?pack='+encodeURIComponent(pack))).json();
+    document.getElementById('pname').textContent=data.name||pack;
+    if(!data.files.length){fail('no FBX/BVH files indexed for this pack');return;}
+    fileSel.innerHTML=data.files.map(f=>`<option value="${esc(f)}">${esc(f.split('/').pop())}</option>`).join('');
+    const want=q.get('file');
+    let idx=want?data.files.indexOf(want):-1;
+    if(idx<0)idx=0;
+    fileSel.selectedIndex=idx;
+    loadFile(data.files[idx]);
+  }catch(e){fail('cannot load clip list: '+((e&&e.message)||e)+' — is the registry browser running? try reloading.');}
+})();
+const clock=new THREE.Clock();
+(function loop(){requestAnimationFrame(loop);
+  const dt=clock.getDelta();
+  if(mixer&&playing)mixer.update(dt);
+  controls.update(); renderer.render(scene,camera);})();
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);});
+</script></body></html>

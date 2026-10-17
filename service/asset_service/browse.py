@@ -1,20 +1,19 @@
-"""Local registry browser.
+"""The Pharos server: the HTTP API agents search with and the pages a
+human verifies with, over the SQLite registry.
 
-A tiny localhost web UI over the SQLite registry so the virtual taxonomy is
-actually VISIBLE — the shared source of truth for the human AND the coding
-agent ("know what's there and where to find it"):
-
-  /                registry grid: search, filters, bulk human re-tagging
-  /pack?id=...     pack CONTENT: every indexed file, filter/paginate,
-                   per-file 3D play (FBX/BVH), copy-absolute-path buttons
+  /                dashboard: the four sections with their counts
+  /setup           pick the library, correct the survey, index
+  /tags            the library map: kinds, decisions, the owner's labels
+  /assets /textures /audio /animation   browse one section
   /viewer?pack=..  live three.js FBX/BVH playback with auto-orientation
+  /api/...         the JSON API (the generated AGENT_API.md lists it)
 
-    python service/asset_service/browse.py            # http://127.0.0.1:8765
-    python service/asset_service/browse.py --port 9000 --no-open
+    python pharos.py serve                 # http://127.0.0.1:8765
+    python pharos.py serve --port 9000 --rebuild
 
-Stdlib only; binds 127.0.0.1 exclusively (offline & license safety: nothing
-leaves the workstation). Reads the registry and thumbnail caches;
-writes nothing except its own access log output to stdout.
+Stdlib only; binds 127.0.0.1 by default (nothing leaves the workstation).
+Reads the registry and the library; writes the registry, the previews
+and the library map, nothing else.
 """
 
 from __future__ import annotations
@@ -50,7 +49,7 @@ from asset_service import skeleton  # noqa: E402
 from asset_service import library_map  # noqa: E402
 from asset_service import setup_flow  # noqa: E402
 from asset_service import clips_import, folders_import  # noqa: E402
-from asset_service.auto_classifier import DOMAINS, STYLES  # noqa: E402
+from asset_service.library_map import DOMAINS  # noqa: E402
 
 DEFAULT_DB = config.DB_PATH
 CANONICAL_ROOTS = [config.LIBRARY_ROOT]
@@ -315,72 +314,16 @@ def _with_rig(page: str) -> str:
                         json.dumps(_rig_rel())[1:-1].replace("<", "\\u003c"))
 
 
-_thumb_lock = threading.Lock()
-_thumbs: list[dict] = []          # {"index": i, "abs": path, "key": mirrored rel}
-_pack_thumb: dict[str, int] = {}  # pack id -> thumb index
-
-
-# ---------------------------------------------------------------------------
-# thumbnail index (external cache dirs from config, mirror-named after sources)
-# ---------------------------------------------------------------------------
-
-def build_thumb_index() -> None:
-    with _thumb_lock:
-        _thumbs.clear()
-        _pack_thumb.clear()
-        thumb_dirs: list[Path] = []
-        for root in CANONICAL_ROOTS:
-            if not root.is_dir():
-                continue
-            # host apps create thumbnail caches next to each added source
-            # (usually depth 1-2 below the root); walk a few levels only
-            for dirpath, dirnames, _ in os.walk(root):
-                if dirpath.count(os.sep) - str(root).count(os.sep) > 3:
-                    dirnames[:] = []
-                    continue
-                for name in list(dirnames):
-                    if name in config.THUMB_CACHE_DIRS:
-                        thumb_dirs.append(Path(dirpath) / name)
-                        dirnames.remove(name)
-                if len(thumb_dirs) > 50:
-                    break
-            for thumbs_dir in thumb_dirs:
-                for p in thumbs_dir.rglob("*.jpg"):
-                    if len(_thumbs) >= THUMB_LIMIT:
-                        break
-                    key = p.relative_to(thumbs_dir).as_posix()
-                    _thumbs.append({"index": len(_thumbs), "abs": str(p), "key": key})
-        # pack -> first thumbnail whose mirrored path lives under the pack
-        # (caches mirror the source-relative layout, so also try the pack's
-        # last path segment as fallback)
-        for pack_id in [r["id"] for r in _all_pack_ids()]:
-            rel = pack_id[len("pack::"):]
-            candidates = [t for t in _thumbs
-                          if t["key"].startswith(rel + "/") or t["key"].startswith(rel)]
-            if not candidates:
-                last = rel.rsplit("/", 1)[-1]
-                candidates = [t for t in _thumbs
-                              if t["key"].startswith(last + "/")]
-            if candidates:
-                _pack_thumb[pack_id] = candidates[0]["index"]
-
-
-def _all_pack_ids() -> list[dict]:
-    try:
-        conn = db.connect(_DB_PATH)
-        rows = conn.execute("SELECT id FROM assets").fetchall()
-        conn.close()
-        return rows
-    except Exception:  # noqa: BLE001
-        return []
-
-
 _DB_PATH = DEFAULT_DB
 
 
 # ---------------------------------------------------------------------------
 # API payload builders
 # ---------------------------------------------------------------------------
+
+def _preview_key(rel: str) -> str:
+    return hashlib.sha1(rel.encode("utf-8")).hexdigest()[:20]
+
 
 def api_stats() -> dict:
     conn = db.connect(_DB_PATH)
@@ -399,10 +342,8 @@ def api_stats() -> dict:
             conn, config.SECTIONS.get("animation"))
     except sqlite3.OperationalError:
         sections["animations"] = 0
-    row = conn.execute(
-        "SELECT MAX(updated_at) AS last, COUNT(*) AS n FROM assets").fetchone()
+    stats["last_write"] = db.get_meta(conn, "sources_stamp_at")
     conn.close()
-    stats["last_write"] = row["last"] if row else None
     status = None
     try:
         if STATUS_FILE is not None and STATUS_FILE.is_file():
@@ -414,65 +355,6 @@ def api_stats() -> dict:
             "styles": [*library_map.MARKERS, "Neutral/Unclassified"]}
 
 
-def api_packs(params: dict) -> list[dict]:
-    q = (params.get("q") or [""])[0].strip()
-    domain = (params.get("domain") or [""])[0].strip() or None
-    style = (params.get("style") or [""])[0].strip() or None
-    vendor = (params.get("vendor") or [""])[0].strip() or None
-    validated = (params.get("validated") or [""])[0] in ("1", "true")
-    conn = db.connect(_DB_PATH)
-    # domain and style are filtered below, AFTER the owner's pack tags
-    # replaced the classifier's guesses
-    rows = db.search_assets(conn, q or None, vendor=vendor,
-                            validated_only=validated, limit=500)
-    tags = _tag_rows()
-    want = library_map.marker(style) if style else ""
-    out = []
-    for r in rows:
-        pt = tags.get(r["id"][len("pack::"):].lower())
-        styles = (pt["styles"] if pt and pt["styles"] else
-                  [r["style"]] if r["style"] in _LOOKS else [])
-        dom = pt["domain"] if pt and pt["domain"] else r["domain"]
-        if domain and dom != domain:
-            continue
-        if style and not (want in styles if want else
-                          style == "Neutral/Unclassified"
-                          and not set(styles) & set(_LOOKS)):
-            continue
-        detail = None
-        if (params.get("detail") or [""])[0] == "1":
-            detail = db.get_asset_details(conn, r["id"])
-        counts = conn.execute(
-            "SELECT COUNT(*) AS n, COALESCE(SUM(file_size),0) AS bytes "
-            "FROM asset_files WHERE asset_id = ?", (r["id"],)).fetchone()
-        thumb = _pack_thumb.get(r["id"])
-        out.append({
-            "id": r["id"], "name": r["name"], "domain": dom,
-            "sub_category": r["sub_category"],
-            "style": next((s for s in styles if s in _LOOKS),
-                          "Neutral/Unclassified"),
-            "styles": styles,
-            "owner_tagged": bool(pt and (pt["styles"] or pt["domain"]
-                                         or pt["tags"])),
-            "pack_tags": pt["tags"] if pt else [],
-            "confidence": r["confidence_score"],
-            "validation": r["validation_status"], "status": r["status"],
-            "vendor": r["vendor"], "formats": json.loads(r["formats"] or "[]"),
-            "tags": json.loads(r["host_tags"] or "[]"),
-            "hero": r["hero_file_path"],
-            "files": counts["n"], "bytes": counts["bytes"],
-            "updated_at": r["updated_at"],
-            "thumb": f"/thumb/{thumb}" if thumb is not None else None,
-            "detail": detail,
-        })
-    conn.close()
-    return out
-
-
-# ---- the library map: what each folder is, and the owner's labels for it
-# (<agent_files>/library_map.csv) ----
-
-_LOOKS = ("Photorealistic", "Stylized")
 
 
 def _tag_rows() -> dict:
@@ -520,23 +402,10 @@ def api_pack_tags() -> dict:
     _sync_pack_tags()
     rows = _tag_rows()
     nodes = _survey_nodes()
-    conn = db.connect(_DB_PATH)
-    try:
-        packs = {r["id"][len("pack::"):].lower(): dict(r) for r in conn.execute(
-            "SELECT a.id AS id, a.domain AS domain, a.style AS style, "
-            "COUNT(f.id) AS files, COALESCE(SUM(f.file_size), 0) AS bytes "
-            "FROM assets a LEFT JOIN asset_files f ON f.asset_id = a.id "
-            "WHERE substr(a.id, 1, 6) = 'pack::' GROUP BY a.id")}
-    except sqlite3.OperationalError:
-        packs = {}
-    finally:
-        conn.close()
     out = []
     for k, r in sorted(rows.items(), key=lambda kv: (kv[1]["folder"] != ".",
                                                      kv[1]["folder"].lower())):
-        p = packs.get(k)
         n = nodes.get(k)
-        thumb = _pack_thumb.get(p["id"]) if p else None
         out.append({
             "folder": r["folder"], "name": r["name"], "kind": r["kind"],
             "state": r["state"], "include": r["include"], "action": r["action"],
@@ -545,14 +414,12 @@ def api_pack_tags() -> dict:
             "effective_action": library_map.effective_action(r, rows),
             "styles": r["styles"], "domain": r["domain"], "tags": r["tags"],
             "note": r["note"],
-            "found": bool(n and n.get("files")) or p is not None,
-            "files": (n or {}).get("files") or (p["files"] if p else 0),
+            "found": bool(n and n.get("files")),
+            "files": (n or {}).get("files") or 0,
             "survey": ({"kind": n["kind"], "confidence": n["confidence"],
                         "state": n.get("state", ""),
                         "evidence": n["evidence"]} if n else None),
-            "guess": ({"style": p["style"] if p["style"] in _LOOKS else "",
-                       "domain": p["domain"]} if p else None),
-            "thumb": f"/thumb/{thumb}" if thumb is not None else None})
+            "guess": None, "thumb": None})
     return {"file": str(library_map.PATH), "markers": list(library_map.MARKERS),
             "kinds": list(library_map.KINDS), "domains": list(DOMAINS),
             "pending": [r["folder"] for r in library_map.pending(rows)],
@@ -666,74 +533,11 @@ def api_clips(params: dict) -> dict:
     if clips_import.has_rows(conn):
         files = [r[0] for r in conn.execute(
             "SELECT rel FROM clips WHERE folder = ? ORDER BY rel LIMIT 400", (folder,))]
-    try:
-        row = conn.execute("SELECT name FROM assets WHERE id = ?", (pack_id,)).fetchone()
-        if not files:
-            files = [r[0] for r in conn.execute(
-                "SELECT relative_path FROM asset_files WHERE asset_id = ? "
-                "AND (lower(relative_path) LIKE '%.fbx' OR lower(relative_path) LIKE '%.bvh') "
-                "ORDER BY relative_path LIMIT 400", (pack_id,))]
-    except sqlite3.OperationalError:
-        row = None
     conn.close()
-    return {"name": row["name"] if row else _pretty_folder(folder), "files": files}
+    return {"name": _pretty_folder(folder), "files": files}
 
 
-def api_pack_files(params: dict) -> dict:
-    """File-level contents of one pack (server-side pagination + filters)."""
-    pack_id = _normalize_pack_id((params.get("id") or [""])[0])
-    if not re.fullmatch(r"pack::[\w .()&!',#%/+-]+", pack_id):
-        return {"error": "bad pack id"}
-    q = (params.get("q") or [""])[0].strip()
-    ext = re.sub(r"[^a-z0-9]", "", (params.get("ext") or [""])[0].lower())
-    try:
-        page = max(1, int((params.get("page") or ["1"])[0]))
-    except ValueError:
-        page = 1
-    conn = db.connect(_DB_PATH)
-    asset = conn.execute(
-        "SELECT name, domain, style, sub_category, vendor, hero_file_path, "
-        "validation_status, source_url FROM assets WHERE id = ?", (pack_id,)).fetchone()
-    if asset is None:
-        conn.close()
-        return {"error": "pack not found in registry"}
-    where, args = "asset_id = ?", [pack_id]
-    if q:
-        where += " AND lower(relative_path) LIKE ? ESCAPE '/'"
-        # % and _ are LIKE wildcards: a literal % in the query must not
-        # match everything
-        args.append("%" + q.lower().replace("/", "//")
-                    .replace("%", "/%").replace("_", "/_") + "%")
-    if ext:
-        where += " AND lower(relative_path) LIKE ?"
-        args.append(f"%.{ext}")
-    total = conn.execute(
-        f"SELECT COUNT(*) AS n FROM asset_files WHERE {where}", args).fetchone()["n"]
-    rows = [dict(r) for r in conn.execute(
-        f"SELECT relative_path, file_type, file_size FROM asset_files "
-        f"WHERE {where} ORDER BY relative_path LIMIT ? OFFSET ?",
-        args + [PAGE_SIZE, (page - 1) * PAGE_SIZE])]
-    counts: dict[str, int] = {}
-    for r in conn.execute(
-            "SELECT relative_path FROM asset_files WHERE asset_id = ?", (pack_id,)):
-        base = r["relative_path"].rsplit("/", 1)[-1]
-        extn = base.rsplit(".", 1)[-1].lower() if "." in base else "(no ext)"
-        counts[extn] = counts.get(extn, 0) + 1
-    conn.close()
-    ext_counts = sorted(({"ext": k, "n": v} for k, v in counts.items()),
-                        key=lambda e: -e["n"])[:24]
-    return {"pack": dict(asset), "hero": asset["hero_file_path"],
-            "total": total, "page": page, "size": PAGE_SIZE,
-            "files": rows, "ext_counts": ext_counts,
-            "root": CANONICAL_ROOTS[0].as_posix() + "/"}
 
-
-# ---------------------------------------------------------------------------
-# animation page: folder tree, tiered clip search, preview cache
-# ---------------------------------------------------------------------------
-
-def _preview_key(rel: str) -> str:
-    return hashlib.sha1(rel.encode("utf-8")).hexdigest()[:20]
 
 
 def _query(q_raw: str, P) -> "tm.Query":
@@ -2171,9 +1975,8 @@ _skel_cache: dict = {}          # (path, size, mtime) -> bone names
 
 def _clip_rows() -> list:
     """Every clip of the animation section as a dict: the measured rows
-    of `clips` (duration, fps, frames, root motion, skeleton) when the
-    table has them, else the legacy pack tables of an index from before
-    `pharos.py measure` (then `measured` is False and the facts absent)."""
+    of `clips` (duration, fps, frames, root motion, skeleton); [] until
+    `pharos.py measure --clips` (ingest runs it) wrote them."""
     prefix = _anim_prefix()
     section = prefix[len("pack::"):]
     conn = db.connect(_DB_PATH)
@@ -2191,21 +1994,6 @@ def _clip_rows() -> list:
                 d["pack"] = "pack::" + (d["folder"] or "")
                 d["measured"] = True
                 rows.append(d)
-            if rows:
-                return rows
-        try:
-            for r in conn.execute(
-                    "SELECT f.relative_path AS rel, f.file_size AS bytes, a.id AS pack "
-                    "FROM asset_files f JOIN assets a ON a.id = f.asset_id "
-                    "WHERE substr(a.id, 1, ?) = ? AND (lower(f.relative_path) LIKE '%.fbx' "
-                    "OR lower(f.relative_path) LIKE '%.bvh') ORDER BY f.relative_path",
-                    (len(prefix), prefix)):
-                d = dict(r)
-                d["folder"] = d["pack"][len("pack::"):]
-                d["measured"] = False
-                rows.append(d)
-        except sqlite3.OperationalError:
-            pass
         return rows
     finally:
         conn.close()
@@ -2485,954 +2273,16 @@ def api_folders(params: dict) -> dict:
 # pages
 # ---------------------------------------------------------------------------
 
-VIEWER_PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<title>3D Animation Viewer</title><style>
-:root{--bg:#101216;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1}
-body{margin:0;font:13px/1.4 system-ui;background:var(--bg);color:var(--fg);overflow:hidden}
-#bar{position:fixed;top:0;left:0;right:0;display:flex;gap:8px;align-items:center;
-padding:8px 14px;background:rgba(20,22,26,.94);border-bottom:1px solid var(--line);z-index:2;flex-wrap:wrap}
-#bar a{color:#7cc4ff;text-decoration:none}
-select,button{background:var(--card);color:var(--fg);border:1px solid var(--line);
-border-radius:6px;padding:4px 8px}
-button{cursor:pointer}
-button.r{min-width:36px}
-#status{color:var(--dim);margin-left:auto;max-width:48vw;white-space:pre-wrap}
-#status .err{color:#ff8a8a}
-canvas{display:block}
-</style>
-<script type="importmap">
-{"imports":{"three":"/static/three.module.js","three/addons/":"/static/jsm/"}}
-</script>
-<script>window.__errs=[];window.addEventListener('error',e=>window.__errs.push(String(e.message||e).slice(0,200)));window.addEventListener('unhandledrejection',e=>window.__errs.push('REJ: '+String(e.reason&&(e.reason.message||e.reason)).slice(0,200)));</script></head><body>
-<div id="bar"><a href="/" title="home">⌂</a><strong id="pname"></strong>
-<select id="file"></select><select id="clip"></select>
-<button id="play">pause</button><button id="restart" title="restart clip from 0">&#9198;</button>
-<span title="orientation (auto-detected — override here if the model lies on its side; your choice is remembered per file)">
-<button class="r" data-r="x-">X&minus;</button><button class="r" data-r="x+">X+</button>
-<button class="r" data-r="y-">Y&minus;</button><button class="r" data-r="y+">Y+</button>
-<button class="r" data-r="z-">Z&minus;</button><button class="r" data-r="z+">Z+</button>
-<button class="r" id="orientReset" title="clear saved orientation and re-run auto-detect">reset</button></span>
-<a id="dl" href="#" title="download this FBX/BVH file" style="display:none;color:#7cc4ff;text-decoration:none">&#8681;</a>
-<button id="vcp" title="copy the file's absolute path" style="display:none">path &#10697;</button>
-<button id="vexp" title="show file in Explorer" style="display:none">&#128193;</button>
-<span id="status">loading…</span></div>
-<script type="module">
-import * as THREE from 'three';
-import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
-import {FBXLoader} from 'three/addons/loaders/FBXLoader.js';
-import {BVHLoader} from 'three/addons/loaders/BVHLoader.js';
-
-const fileSel=document.getElementById('file'),clipSel=document.getElementById('clip'),
-      status=document.getElementById('status'),playBtn=document.getElementById('play');
-const q=new URLSearchParams(location.search), pack=q.get('pack')||'';
-const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-
-const renderer=new THREE.WebGLRenderer({antialias:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
-renderer.setSize(innerWidth,innerHeight);
-document.body.appendChild(renderer.domElement);
-const scene=new THREE.Scene();
-scene.background=new THREE.Color(0x101216);
-const camera=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.01,1e7);
-const controls=new OrbitControls(camera,renderer.domElement);
-async function fetchBuf(url,ms){
-  const ctl=new AbortController();
-  const t=setTimeout(()=>ctl.abort(),ms||30000);
-  try{const r=await fetch(url,{signal:ctl.signal});
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    return await r.arrayBuffer();}
-  finally{clearTimeout(t);}}
-scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.4));
-const key=new THREE.DirectionalLight(0xffffff,2.2); key.position.set(3,6,4); scene.add(key);
-const rim=new THREE.DirectionalLight(0x88aaff,0.8); rim.position.set(-4,3,-3); scene.add(rim);
-let grid=null,mixer=null,playing=true,holder=null,clips=[],currentRel='',mode='fbx';
-
-// skeleton-only clips all target the Actor motion-dummy rig
-// ("skeletons should be the same") — show its body instead of naked bones
-const RETARGET_REL="{{RIG_REL}}";  // from the server; '' = no rig in this library
-let dummyObj=null,dummyPromise=null;
-function getDummy(){
-  if(!RETARGET_REL)return Promise.reject(new Error('no retarget rig'));
-  if(!dummyPromise){
-    const L=new FBXLoader();
-    L.setResourcePath('/res/'+encodeURIComponent(RETARGET_REL.split('/').slice(0,-1).join('/'))+'/');
-    dummyPromise=new Promise((res,rej)=>L.load('/file?path='+encodeURIComponent(RETARGET_REL),
-      o=>{dummyObj=o;res(o);},undefined,rej));
-  }
-  return dummyPromise;}
-
-function fail(msg){status.innerHTML='<span class="err">&#9888; '+esc(msg)+'</span>';console.error(msg);}
-let watchdog=0;
-function loading(msg){clearTimeout(watchdog);status.textContent=msg;
-  watchdog=setTimeout(()=>{if(status.textContent===msg)
-    status.textContent=msg+'\\nstill loading after 15s — very large file, or the server restarted (reload this page)';},15000);}
-function loaded(msg){clearTimeout(watchdog);status.textContent=msg;}
-
-function orientKey(){return 'orient2:'+pack+':'+currentRel;}
-function saveOrient(){if(!holder)return;
-  try{localStorage.setItem(orientKey(),JSON.stringify({x:holder.rotation.x,y:holder.rotation.y,z:holder.rotation.z}));}catch(e){}}
-function loadOrient(){try{return JSON.parse(localStorage.getItem(orientKey()));}catch(e){return null;}}
-function clearOrient(){try{localStorage.removeItem(orientKey());}catch(e){}}
-
-function modelBox(){
-  let b=new THREE.Box3().setFromObject(holder);
-  let s=b.getSize(new THREE.Vector3());
-  if(b.isEmpty()||s.lengthSq()===0){          // skin-only meshes: bind-pose
-    try{b=new THREE.Box3().setFromObject(holder,true);}catch(e){}  // precise = skinned verts
-    s=b.getSize(new THREE.Vector3());}
-  if(b.isEmpty()||s.lengthSq()===0){          // skeleton-driven files: use bones
-    const bb=new THREE.Box3();
-    holder.traverse(o=>{if(o.isBone)bb.expandByPoint(o.getWorldPosition(new THREE.Vector3()));});
-    if(!bb.isEmpty())b=bb;}
-  return b;}
-function autoOrientEuler(box){
-  if(!box||box.isEmpty())return null;
-  const s=box.getSize(new THREE.Vector3());
-  const horiz=Math.max(s.x,s.z);
-  if(!horiz||s.y>=horiz*0.4)return null;                 // upright already
-  if(s.z>=s.x)return new THREE.Euler(-Math.PI/2,0,0);    // content up is +Z
-  return new THREE.Euler(0,0,Math.PI/2);                 // content up is +X
-}
-function _findBone(re){let best=null;
-  holder.traverse(o=>{if(o.isBone&&re.test(o.name)&&(!best||o.name.length<best.name.length))best=o;});
-  return best;}
-function boneAxisDelta(){
-  // anatomy beats bounding boxes: the head bone must sit above the hips.
-  // Returns the 90-degree step (absolute, from identity) that achieves that,
-  // {x:0,z:0} when already upright, or null when no head/hip bones exist.
-  const head=_findBone(/head/i),hip=_findBone(/pelvis|hips/i);
-  if(!head||!hip)return null;
-  const v=head.getWorldPosition(new THREE.Vector3()).sub(hip.getWorldPosition(new THREE.Vector3()));
-  const ax=Math.abs(v.x),ay=Math.abs(v.y),az=Math.abs(v.z);
-  if(v.y>0&&ay>=ax&&ay>=az)return{x:0,z:0};
-  if(v.y<0&&ay>=ax&&ay>=az)return{x:0,z:Math.PI};   // 180 flipped (CC rigs)
-  if(az>=ax)return v.z>0?{x:-Math.PI/2,z:0}:{x:Math.PI/2,z:0};
-  return v.x>0?{x:0,z:Math.PI/2}:{x:0,z:-Math.PI/2};}
-let bindBoxEmpty=false,bindAnatomyOk=false;
-function applyOrient(){
-  const saved=loadOrient();
-  if(saved){holder.rotation.set(saved.x,saved.y,saved.z);bindBoxEmpty=false;bindAnatomyOk=true;return 'saved orientation';}
-  const box0=modelBox();
-  bindBoxEmpty=box0.isEmpty()||box0.getSize(new THREE.Vector3()).lengthSq()===0;
-  if(!clips.length){bindAnatomyOk=true;return 'native orientation';}   // static props stay as-authored
-  // clips are downloaded/exported from Blender = Z-up.
-  // Baseline X-90 maps Z-up onto three.js Y-up, THEN anatomy verifies it.
-  holder.rotation.set(-Math.PI/2,0,0);
-  holder.updateMatrixWorld(true);
-  const d=boneAxisDelta();
-  bindAnatomyOk=!!d;
-  if(d&&(d.x||d.z)){holder.rotation.x+=d.x;holder.rotation.z+=d.z;return 'auto-oriented (Z-up baseline)';}
-  if(!d){const e=autoOrientEuler(modelBox());       // no head/hip bones → bbox check
-    if(e){holder.rotation.x+=e.x;holder.rotation.z+=e.z;}}
-  return 'auto-oriented (Z-up baseline)';}
-function refit(){if(!holder)return;holder.updateMatrixWorld(true);fitCamera(modelBox());}
-function scheduleDeferredOrient(){
-  // ONLY for clips whose bind pose could not be verified anatomically:
-  // authored motion (falls, dives, rolls) must never be "corrected" --
-  // the run-fallover misfire rotated the scene 90 degrees mid-fall and
-  // saved it. And auto-fixes never persist; only manual buttons save.
-  if(bindAnatomyOk)return;
-  setTimeout(()=>{if(!holder||loadOrient())return;
-    let fix=false;
-    if(clips.length){
-      const d2=boneAxisDelta();
-      if(d2&&(d2.x||d2.z)){holder.rotation.x+=d2.x;holder.rotation.z+=d2.z;fix=true;}
-      else{const e2=autoOrientEuler(modelBox());
-        if(e2){holder.rotation.x+=e2.x;holder.rotation.z+=e2.z;fix=true;}}}
-    if(fix){refit();status.textContent+=' — auto-oriented once animation started';}
-    else if(bindBoxEmpty)refit();},1400);}
-function fitCamera(box){
-  if(box.isEmpty())return;
-  const size=box.getSize(new THREE.Vector3()),center=box.getCenter(new THREE.Vector3());
-  const radius=Math.max(size.x,size.y,size.z)||1;
-  camera.near=radius/100; camera.far=radius*50; camera.updateProjectionMatrix();
-  camera.position.copy(center).add(new THREE.Vector3(radius*1.4,radius*0.9,radius*1.7));
-  controls.target.copy(center); controls.update();
-  if(grid)scene.remove(grid);
-  grid=new THREE.GridHelper(radius*4,24,0x2c313a,0x1c2026); grid.position.set(center.x,box.min.y,center.z);
-  scene.add(grid);
-}
-function fixMaterials(obj){
-  obj.traverse(o=>{ if(!o.isMesh)return;
-    const mats=Array.isArray(o.material)?o.material:[o.material];
-    for(const m of mats){ if(!m.map&&(!m.color||m.color.getHex()===0))m.color=new THREE.Color(0xb8c0cc);
-      if(m.map)m.color=new THREE.Color(0xffffff);}
-    o.frustumCulled=false; });
-}
-function dispose(obj){obj.traverse(n=>{
-  if(n.geometry)n.geometry.dispose();
-  if(n.material)(Array.isArray(n.material)?n.material:[n.material]).forEach(m=>{
-    for(const k of ['map','normalMap','bumpMap','roughnessMap','metalnessMap','emissiveMap','aoMap','alphaMap'])
-      if(m[k])m[k].dispose();
-    m.dispose();});});}
-function clearModel(){
-  if(mixer)mixer.stopAllAction(); mixer=null; clips=[]; clipSel.innerHTML='';
-  if(holder){if(dummyObj&&dummyObj.parent===holder)holder.remove(dummyObj);  // keep the dummy for reuse
-    scene.remove(holder);dispose(holder);holder=null;}
-  if(grid){scene.remove(grid);grid=null;}}
-function playClip(i){
-  if(!mixer||!clips.length)return;
-  mixer.stopAllAction();
-  const action=mixer.clipAction(clips[i]); action.reset().play();
-  clipSel.innerHTML=clips.map((c,j)=>`<option ${j===i?'selected':''}>${esc(c.name||j)}</option>`).join('');}
-
-async function loadFile(rel){
-  clearModel(); currentRel=rel;
-  const dlA=document.getElementById('dl');
-  dlA.href='/file?path='+encodeURIComponent(rel);
-  dlA.setAttribute('download',rel.split('/').pop());
-  dlA.style.display='';
-  document.getElementById('vcp').style.display='';document.getElementById('vexp').style.display='';
-  document.getElementById('vcp').onclick=()=>{fetch('/api/open_explorer?dry=1&path='+encodeURIComponent(rel))
-    .then(r=>r.json()).then(j=>{if(j.abs&&navigator.clipboard)
-      navigator.clipboard.writeText(j.abs).then(()=>{
-        document.getElementById('vcp').textContent='copied ✓';
-        setTimeout(()=>{document.getElementById('vcp').textContent='path ⧉';},1500);});});};
-  document.getElementById('vexp').onclick=()=>{fetch('/api/open_explorer?path='+encodeURIComponent(rel))
-    .then(r=>r.json()).then(j=>{if(!r.ok)alert('failed: '+(j.error||'?'));});};
-  history.replaceState(null,'','/viewer?pack='+encodeURIComponent(pack)+'&file='+encodeURIComponent(rel));
-  loading('loading '+rel.split('/').pop()+' …');
-  const url='/file?path='+encodeURIComponent(rel);
-  const dir=rel.split('/').slice(0,-1).join('/');
-  // fetch with hard timeout + parse locally: a dead/restarted server must
-  // surface as an error, never as an eternal "loading..."
-  let buf;
-  try{buf=await fetchBuf(url,30000);}
-  catch(e){fail('load failed: '+((e&&e.message)||e)+' — if the server was just restarted, reload this page');return;}
-  if(rel.toLowerCase().endsWith('.bvh')){
-    mode='bvh';
-    // BVHLoader.parse string-splits its input; a raw ArrayBuffer throws
-    try{const res=new BVHLoader().parse(new TextDecoder('utf-8').decode(buf));
-      try{
-        holder=new THREE.Group();
-        const root=res.skeleton.bones[0];
-        holder.add(root);
-        const helper=new THREE.SkeletonHelper(root);
-        holder.add(helper);
-        scene.add(holder);
-        clips=[res.clip]; mixer=new THREE.AnimationMixer(root);
-        const how=applyOrient(); refit(); playClip(0);
-        loaded('playing skeleton ('+how+') — drag to orbit, wheel to zoom');
-        scheduleDeferredOrient();
-      }catch(e){fail('BVH error: '+((e&&e.message)||e));}
-    }catch(err){fail('BVH load failed: '+((err&&err.message)||err));}
-    return;
-  }
-  mode='fbx';
-  window.__retarget={retargeted:false,common:0,clipBones:0};
-  let obj;
-  try{obj=new FBXLoader().setResourcePath('/res/'+encodeURIComponent(dir)+'/').parse(buf,'');}
-  catch(err){
-    const msg=(err&&err.message)||String(err);
-    let extra=/ascii/i.test(msg)?' — ASCII FBX is not supported, binary only':'';
-    fail('FBX load failed: '+String(msg).slice(0,200)+extra);
-    return;}
-  (async obj=>{
-    try{
-      holder=new THREE.Group(); holder.add(obj); scene.add(holder);
-      clips=obj.animations||[];
-      let hasMesh=false; obj.traverse(o=>{if(o.isMesh)hasMesh=true;});
-      if(!hasMesh&&clips.length){
-        // skeleton-only clip: drive the motion-dummy body with it, provided
-        // the rigs actually share bone names
-        try{
-          const dummy=await getDummy();
-          const dummyBones=new Set(); dummy.traverse(o=>{if(o.isBone)dummyBones.add(o.name);});
-          const clipBones=new Set();
-          for(const t of clips[0].tracks){const m=t.name.match(/bones\\[([^\\]]+)\\]/);
-            clipBones.add(m?m[1]:t.name.split('.')[0]);}
-          let common=0; for(const b of clipBones)if(dummyBones.has(b))common++;
-          window.__retarget={retargeted:false,common,clipBones:clipBones.size};
-          if(common>=6){
-            holder.add(dummy); holder.remove(obj); dispose(obj);
-            fixMaterials(dummy);
-            hasMesh=true; window.__retarget.retargeted=true;
-            mixer=new THREE.AnimationMixer(dummy); playClip(0);
-          }
-        }catch(e){/* dummy unavailable → fall back to bone view */}
-      }
-      if(!mixer&&clips.length){mixer=new THREE.AnimationMixer(obj);playClip(0);}
-      if(!hasMesh)holder.add(new THREE.SkeletonHelper(obj));  // skeleton-only FBX
-      const how=applyOrient(); refit();
-      loaded((clips.length?('playing: '+(clips[0].name||'clip')):'static mesh — no animation in file')
-        +(window.__retarget.retargeted?' on Render_Dummy body':(hasMesh?'':' — skeleton-only file, bones shown'))
-        +' ('+how+') — drag to orbit, wheel to zoom');
-      scheduleDeferredOrient();
-    }catch(e){fail('FBX error: '+((e&&e.message)||e));}
-  })(obj);
-}
-
-playBtn.onclick=()=>{playing=!playing;playBtn.textContent=playing?'pause':'play';};
-document.getElementById('restart').onclick=()=>{
-  if(mixer&&clips.length){mixer.stopAllAction();
-    mixer.clipAction(clips[Math.max(0,clipSel.selectedIndex)]||clips[0]).reset().play();
-    if(!playing){playing=true;playBtn.textContent='pause';}}};
-document.querySelectorAll('button.r[data-r]').forEach(b=>b.onclick=()=>{
-  if(!holder)return;
-  const r=b.dataset.r, ax=r[0], dir=r[1]==='+'?1:-1;
-  holder.rotation[ax]+=dir*Math.PI/2;
-  saveOrient(); refit();});
-document.getElementById('orientReset').onclick=()=>{
-  if(!holder)return; clearOrient();
-  holder.rotation.set(0,0,0);
-  const how=applyOrient(); refit();
-  loaded('orientation reset ('+how+')');};
-clipSel.onchange=()=>playClip(clipSel.selectedIndex);
-fileSel.onchange=()=>loadFile(fileSel.value);
-
-// read-only debug probe so humans AND agents can verify viewer state
-window.__viewerInfo=()=>{if(!holder)return{loaded:false};
-  const s=modelBox().getSize(new THREE.Vector3());
-  const probe={meshes:0,skinned:0,bones:0,verts:0};
-  holder.traverse(o=>{if(o.isBone)probe.bones++;
-    else if(o.isMesh){probe.meshes++;if(o.isSkinnedMesh)probe.skinned++;
-      if(o.geometry&&o.geometry.attributes.position)probe.verts+=o.geometry.attributes.position.count;}});
-  const head=_findBone(/head/i),hip=_findBone(/pelvis|hips/i);
-  const headUp=(head&&hip)?+(head.getWorldPosition(new THREE.Vector3()).y
-    -hip.getWorldPosition(new THREE.Vector3()).y).toFixed(1):null;
-  return {loaded:true,mode,file:currentRel,clips:clips.length,probe,headUp,
-    retarget:window.__retarget||null,
-    rotation:{x:+holder.rotation.x.toFixed(3),y:+holder.rotation.y.toFixed(3),z:+holder.rotation.z.toFixed(3)},
-    box:{x:+s.x.toFixed(3),y:+s.y.toFixed(3),z:+s.z.toFixed(3)},
-    uprightRatio:+(s.y/(Math.max(s.x,s.z)||1)).toFixed(3)};};
-
-(async()=>{
-  try{
-    const fileOnly=q.get('file');
-    if(!pack&&fileOnly){
-      document.getElementById('pname').textContent=fileOnly.split('/').pop();
-      fileSel.innerHTML=`<option value="${esc(fileOnly)}">${esc(fileOnly.split('/').pop())}</option>`;
-      loadFile(fileOnly);
-      return;}
-    const data=await(await fetch('/api/clips?pack='+encodeURIComponent(pack))).json();
-    document.getElementById('pname').textContent=data.name||pack;
-    if(!data.files.length){fail('no FBX/BVH files indexed for this pack');return;}
-    fileSel.innerHTML=data.files.map(f=>`<option value="${esc(f)}">${esc(f.split('/').pop())}</option>`).join('');
-    const want=q.get('file');
-    let idx=want?data.files.indexOf(want):-1;
-    if(idx<0)idx=0;
-    fileSel.selectedIndex=idx;
-    loadFile(data.files[idx]);
-  }catch(e){fail('cannot load clip list: '+((e&&e.message)||e)+' — is the registry browser running? try reloading.');}
-})();
-const clock=new THREE.Clock();
-(function loop(){requestAnimationFrame(loop);
-  const dt=clock.getDelta();
-  if(mixer&&playing)mixer.update(dt);
-  controls.update(); renderer.render(scene,camera);})();
-addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth,innerHeight);});
-</script></body></html>"""
+VIEWER_PAGE = _load_tpl("viewer.html")
 
 
-PACK_PAGE = _load_tpl("pack.html")
+ANIM_PAGE = _load_tpl("animation.html")
 
 
-ANIM_PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<title>Animations — AI Asset Registry</title><style>
-:root{--bg:#14161a;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1;--cols:6}
-*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui;background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column;overflow:hidden}
-header{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-header a{color:#7cc4ff;text-decoration:none}
-h1{font-size:15px;margin:0}
-input,select{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 9px}
-#wrap{flex:1;display:flex;min-height:0}
-#side{width:250px;min-width:250px;border-right:1px solid var(--line);overflow-y:auto;padding:10px 8px}
-#side h2{font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin:4px 8px 8px}
-.fbtn{display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:none;border:none;
-color:var(--fg);padding:6px 10px;border-radius:6px;cursor:pointer;font-size:13px;word-break:break-all}
-.fbtn:hover{background:#1c2028}
-.fbtn.on{background:#243040;color:#7cc4ff}
-.fbtn .n{color:var(--dim);white-space:nowrap}
-#main{flex:1;overflow-y:auto;padding:14px}
-#grid{display:grid;grid-template-columns:repeat(var(--cols),1fr);gap:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;cursor:pointer;position:relative}
-.card:hover{border-color:#3a4250}
-.media{aspect-ratio:16/9;background:#101216;display:flex;align-items:center;justify-content:center;position:relative}
-.media video{width:100%;height:100%;object-fit:contain;display:block}
-.ph{color:#4a5261;font-size:26px}
-.ph.rendering{color:#7cc4ff;animation:pulse 1.2s ease-in-out infinite}
-@keyframes pulse{50%{opacity:.35}}
-.cap{padding:4px 8px;font-size:11.5px}
-.cap .t{word-break:break-word;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
-.badge{position:absolute;top:6px;right:6px;background:#3d3220;color:#ffd479;border-radius:10px;
-padding:1px 8px;font-size:10.5px;z-index:2}
-#tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-left:auto}
-#tools label{color:var(--dim);font-size:12px;display:flex;gap:6px;align-items:center}
-#indicator{color:#7cc4ff;font-size:12px}
-#pager{display:flex;gap:12px;align-items:center;justify-content:center;padding:16px 0;color:var(--dim)}
-#pager button{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 14px;cursor:pointer}
-#pager button:disabled{opacity:.35;cursor:default}
-#renderAll{background:#243040;color:#7cc4ff;border:1px solid #31506e;border-radius:6px;
-padding:5px 12px;cursor:pointer;font-size:12.5px}
-#renderAll:hover{background:#2b3b50}
-#renderAll:disabled{opacity:.4;cursor:default}
-input[type=range]{accent-color:#6ea8fe;width:130px}
-</style>
-<script type="importmap">
-{"imports":{"three":"/static/three.module.js","three/addons/":"/static/jsm/"}}
-</script>
-<script>window.__errs=[];window.addEventListener('error',e=>window.__errs.push(String(e.message||e).slice(0,200)));window.addEventListener('unhandledrejection',e=>window.__errs.push('REJ: '+String(e.reason&&(e.reason.message||e.reason)).slice(0,200)));</script></head><body>
-<header><a href="/" style="color:#8b93a1;text-decoration:none">⌂ home</a><h1>Animations</h1>
-<input id="q" placeholder="search or meta-search (e.g. talking, fight, idle) …" size="36">
-<div id="tools"><span id="indicator"></span>
-<span id="count" style="color:var(--dim)"></span>
-<button id="renderAll" title="render previews for every clip of the current filter. Keep this tab visible while it runs -- browsers pause rendering in hidden panels. Progress is cached; you can continue later.">render all previews</button>
-<label>thumb size <input type="range" id="size" min="3" max="12" step="1"></label></div></header>
-<div id="wrap"><div id="side"><h2>Subfolders</h2><div id="tree"></div></div>
-<div id="main"><div id="grid"></div><div id="pager">
-<button id="prev">&lsaquo; prev</button><span id="pg"></span><button id="next">next &rsaquo;</button></div></div></div>
-<script type="module">
-import * as THREE from 'three';
-import {FBXLoader} from 'three/addons/loaders/FBXLoader.js';
-
-const $=id=>document.getElementById(id);
-const qBox=$('q'),sizeEl=$('size');
-const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let folders=[],sel=null,q='',page=1,total=0;
-let cols=parseInt(localStorage.getItem('animCols')||'6');sizeEl.value=cols;
-document.documentElement.style.setProperty('--cols',cols);
-const pageSize=()=>{                       // fill the viewport: rows that fit
- const gw=main.clientWidth-28;
- const cw=(gw-(cols-1)*12)/cols;
- const rowH=cw*9/16+34+12;                 // media + caption + gap
- const rows=Math.max(4,Math.floor((main.clientHeight-28)/rowH));
- return cols*rows;};
-const PVV=2;   // bump to escape browsers that cached pre-fix preview bytes
-async function previewKey(rel){
- const buf=await crypto.subtle.digest('SHA-1',new TextEncoder().encode(rel));
- return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,20);}
-
-async function loadTree(){
- const d=await(await fetch('/api/anim/tree')).json();folders=d.folders;
- tree.innerHTML=`<button class="fbtn${sel===null?' on':''}" data-f="">All animations <span class="n">${folders.reduce((s,f)=>s+f.clips,0)}</span></button>`+
-  folders.map(f=>`<button class="fbtn${sel===f.pack?' on':''}" data-f="${esc(f.pack)}">${esc(f.folder)} <span class="n">${f.clips}</span></button>`).join('');
-}
-tree.onclick=e=>{const b=e.target.closest('.fbtn');if(!b)return;
- sel=b.dataset.f||null;page=1;loadTree();load();};
-
-async function load(){
- const p=new URLSearchParams({q,page,size:pageSize()});
- if(sel)p.set('packs',sel);
- let d;try{d=await(await fetch('/api/anim/clips?'+p)).json();}catch(e){grid.innerHTML='';count.textContent='load failed — is the server up?';return;}
- total=d.total;page=d.page;
- count.textContent=`${d.total} clip(s)`;
- for(const c of d.clips)keyByRel.set(c.rel,c.key);
- grid.innerHTML=(d.total===0&&!d.q&&!sel)?`<div style="grid-column:1/-1;padding:56px 24px;text-align:center;color:#8b93a1;font-size:14px;line-height:1.7"><div style="font-size:17px;color:#dfe3ea;margin-bottom:10px">No animation packs indexed yet</div>Index your clip folders with <code>indexer.py --root &lt;library-root&gt;</code>,<br>then restart the server — previews render here automatically.</div>`:d.clips.map(c=>{
-  const media=c.preview
-   ?`<video src="/preview/${c.key}.webm?v=${PVV}" autoplay muted loop playsinline data-rate="${c.rate||''}"></video>`
-   :`<div class="ph" data-rel="${esc(c.rel)}">&#9654;</div>`;
-  const badge=d.q&&c.tier===3?`<span class="badge">related</span>`:'';
-  return `<div class="card" data-rel="${esc(c.rel)}" data-pack="${esc(c.pack)}">${badge}
-   <div class="media">${media}</div>
-   <div class="cap" title="${esc(c.folder)} / ${esc(c.rel)}"><span class="t">${esc(c.title)}</span></div></div>`;}).join('');
- pg.textContent=`page ${d.page} / ${Math.max(1,Math.ceil(total/pageSize()))}`;
- prev.disabled=page<=1;next.disabled=page>=Math.ceil(total/pageSize());
- observer.disconnect();
- grid.querySelectorAll('.ph').forEach(el=>observer.observe(el));
- grid.querySelectorAll('video[data-rate]').forEach(v=>{
-   const r=parseFloat(v.dataset.rate);
-   if(r>0)v.addEventListener('loadedmetadata',()=>{v.playbackRate=Math.min(8,Math.max(.25,r));});});
- pump();
-}
-grid.onclick=e=>{const c=e.target.closest('.card');if(!c)return;
- location.href='/viewer?pack='+encodeURIComponent(c.dataset.pack)+'&file='+encodeURIComponent(c.dataset.rel);};
-prev.onclick=()=>{if(page>1){page--;load();main.scrollTop=0;}};
-next.onclick=()=>{if(page<Math.ceil(total/pageSize())){page++;load();main.scrollTop=0;}};
-qBox.oninput=()=>{clearTimeout(window._t);window._t=setTimeout(()=>{q=qBox.value.trim();page=1;load();},250);};
-sizeEl.oninput=()=>{cols=parseInt(sizeEl.value);localStorage.setItem('animCols',cols);
- document.documentElement.style.setProperty('--cols',cols);page=1;
- clearTimeout(window._s);window._s=setTimeout(load,250);};
-addEventListener('resize',()=>{clearTimeout(window._r);window._r=setTimeout(load,300);});
-
-// ---------------- preview rendering worker ----------------
-// Renders each clip ONCE offscreen (three.js + MediaRecorder on a shared
-// 480x270 canvas), uploads the webm to the server cache under
-// (registry previews dir), and swaps in a looping <video>.
-const PW=480,PH=270,FPS=30,MAXDUR=6;
-let prenderer=null,pqueue=[],pactive=false;
-const pdone=new Set();
-const observer=new IntersectionObserver(es=>{
- for(const e of es){if(!e.isIntersecting)continue;
-  const rel=e.target.dataset.rel;if(!rel||pdone.has(rel))continue;
-  pdone.add(rel);if(!pqueue.includes(rel))pqueue.push(rel);}
- pump();},{root:main,rootMargin:'200px'});
-const keyByRel=new Map();   // server is the source of truth for cache keys
-
-let pdummy=null;
-const RIG="{{RIG_REL}}";   // from the server; '' = no rig -> bones-only previews
-function pgetRenderer(){if(!prenderer){
-  prenderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
-  prenderer.setSize(PW,PH);prenderer.setPixelRatio(1);
-  // recorded previews came out very dark on some GPUs: explicit tone
-  // mapping + exposure normalizes brightness across machines
-  if(THREE.ACESFilmicToneMapping!==undefined){prenderer.toneMapping=THREE.ACESFilmicToneMapping;
-   prenderer.toneMappingExposure=1.35;}}return prenderer;}
-function pgetDummy(){
- if(!RIG)return Promise.reject(new Error('no retarget rig'));
- if(!pdummy){const L=new FBXLoader();
-  L.setResourcePath('/res/'+encodeURIComponent(RIG.split('/').slice(0,-1).join('/'))+'/');
-  pdummy=new Promise((res,rej)=>L.load('/file?path='+encodeURIComponent(RIG),
-    res,undefined,e=>{pdummy=null;rej(e);}));}
- return pdummy;}
-function pfit(cam,holder){
- holder.updateMatrixWorld(true);
- const box=new THREE.Box3().setFromObject(holder);
- if(box.isEmpty())return;
- const s=box.getSize(new THREE.Vector3()),c=box.getCenter(new THREE.Vector3());
- const r=Math.max(s.x,s.y,s.z)||1;
- cam.near=r/100;cam.far=r*40;cam.updateProjectionMatrix();
- cam.position.copy(c).add(new THREE.Vector3(r*1.1,r*0.8,r*1.9));
- cam.lookAt(c);}
-async function renderPreview(rel){
- const renderer=pgetRenderer();
- const dir=rel.split('/').slice(0,-1).join('/');
- // fetch with timeout + local parse: one malformed file must never wedge
- // the page's main thread (hang bug 2026-09-15)
- const ctl=new AbortController();
- const kill=setTimeout(()=>ctl.abort(),45000);
- let buf;
- try{const r=await fetch('/file?path='+encodeURIComponent(rel),{signal:ctl.signal});
-  if(!r.ok)throw new Error('HTTP '+r.status);
-  buf=await r.arrayBuffer();}
- catch(e){clearTimeout(kill);throw new Error('fetch failed: '+((e&&e.message)||e));}
- const obj=new FBXLoader().setResourcePath('/res/'+encodeURIComponent(dir)+'/').parse(buf,'');
- clearTimeout(kill);
- const clips=obj.animations||[];
- if(!clips.length)throw new Error('no animation in file');
- let root=obj,hasMesh=false,holderHelper=null;obj.traverse(o=>{if(o.isMesh)hasMesh=true;});
- if(!hasMesh){try{
-   const dummy=await pgetDummy();
-   const db=new Set();dummy.traverse(o=>{if(o.isBone)db.add(o.name);});
-   const cb=new Set();
-   for(const t of clips[0].tracks){const m=t.name.match(/bones\\[([^\\]]+)\\]/);cb.add(m?m[1]:t.name.split('.')[0]);}
-   let common=0;for(const b of cb)if(db.has(b))common++;
-   if(common>=6)root=dummy;
-   else holderHelper=obj;
- }catch(e){}}
- if(root===obj&&!hasMesh)holderHelper=obj;   // skeleton-only fallback: show bones
- root.traverse(o=>{                                     // skinned meshes get
-  if(o.isMesh){o.frustumCulled=false;                   // culled without this
-   const mats=Array.isArray(o.material)?o.material:[o.material];
-   for(const m of mats){if(!m.map&&(!m.color||m.color.getHex()===0))m.color=new THREE.Color(0xb8c0cc);
-     if(m.map)m.color=new THREE.Color(0xffffff);}}});
- const scene=new THREE.Scene();
- scene.background=new THREE.Color(0x101216);
- scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.9));
- const key=new THREE.DirectionalLight(0xffffff,2.8);key.position.set(3,6,4);scene.add(key);
- const fill=new THREE.DirectionalLight(0xcfe0ff,1.1);fill.position.set(-4,2,5);scene.add(fill);
- const holder=new THREE.Group();holder.add(root);scene.add(holder);
- if(holderHelper)holder.add(new THREE.SkeletonHelper(holderHelper));
- root.rotation.set(-Math.PI/2,0,0);   // Blender Z-up exports
- root.updateMatrixWorld(true);
- let head=null,hip=null;
- root.traverse(o=>{if(o.isBone){const n=o.name.toLowerCase();
-   if(!head&&n.includes('head'))head=o;if(!hip&&/pelvis|hips/.test(n))hip=o;}});
- if(head&&hip){const v=head.getWorldPosition(new THREE.Vector3()).sub(hip.getWorldPosition(new THREE.Vector3()));
-   const ax=Math.abs(v.x),ay=Math.abs(v.y),az=Math.abs(v.z);
-   if(v.y<0&&ay>=ax&&ay>=az)holder.rotation.z+=Math.PI;              // 180 flipped (CC rig)
-   else if(az>ay&&az>=ax)holder.rotation.x+=(v.z>0?-Math.PI/2:Math.PI/2);
-   else if(ax>ay&&ax>=az)holder.rotation.z+=(v.x>0?Math.PI/2:-Math.PI/2);}
- const cam=new THREE.PerspectiveCamera(40,PW/PH,0.01,1e7);
- pfit(cam,holder);
- const clip=clips[0];
- const mixer=new THREE.AnimationMixer(root);
- mixer.clipAction(clip).play();
- const dur=Math.min(clip.duration||3,MAXDUR);
- const SPEED=2;                         // 2x recording, rate 0.5 playback = true speed
- const mime=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm']
-   .find(m=>window.MediaRecorder&&MediaRecorder.isTypeSupported(m));
- if(!mime)throw new Error('MediaRecorder/webm unsupported');
- // real-time capture: captureStream(0)+requestFrame drops frames when the
- // recorder is stopped quickly (Chrome quirk), so record the wall clock
- const stream=renderer.domElement.captureStream(FPS);
- const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:1500000});
- const chunks=[];rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
- const stopped=new Promise(res=>rec.onstop=res);
- rec.start(100);
- let mixT=0;const t0=performance.now();
- await new Promise(res=>{
-  (function step(){
-   const wallTotal=Math.max(1.0,dur);
-   mixT=(performance.now()-t0)/1000;
-   if(mixT>=wallTotal||mixT>wallTotal*6+2){res();return;}   // bail if rAF starved (occluded)
-   mixer.setTime((mixT*SPEED)%dur);
-   holder.updateMatrixWorld(true);
-   renderer.render(scene,cam);
-   requestAnimationFrame(step);})();
- });
- rec.stop();await stopped;
- const blob=new Blob(chunks,{type:'video/webm'});
- if(blob.size<1024)throw new Error('recording came out empty ('+blob.size+'B)');
- const rate=1/SPEED;
- const r=await fetch('/api/preview/store?clip='+encodeURIComponent(rel)+'&rate='+rate.toFixed(3),
-   {method:'POST',body:blob});
- if(!r.ok)throw new Error('store failed: '+r.status);
- return {rate};}
-let batchTotal=0,batchDone=0,batchRunning=false;
-function updateIndicator(n){
- if(batchTotal>0)$('indicator').textContent=`rendering previews: ${batchDone} / ${batchTotal}`;
- else if(n)$('indicator').textContent='rendering previews: '+n+' queued';
- else $('indicator').textContent='';}
-$('renderAll').onclick=async()=>{
- if(batchRunning)return;batchRunning=true;$('renderAll').disabled=true;
- try{
-  const pages=Math.ceil(total/pageSize());
-  for(let p2=1;p2<=pages;p2++){
-   const q2=new URLSearchParams({q,page:p2,size:pageSize()});
-   if(sel)q2.set('packs',sel);
-   const d=await(await fetch('/api/anim/clips?'+q2)).json();
-   for(const c of d.clips){keyByRel.set(c.rel,c.key);
-    if(!c.preview&&!pdone.has(c.rel)&&!pqueue.includes(c.rel)){
-     pdone.add(c.rel);pqueue.push(c.rel);}}}
-  batchDone=0;batchTotal=pqueue.length;
-  updateIndicator(batchTotal);
-  pump();
- }finally{batchRunning=false;$('renderAll').disabled=false;}};
-async function pump(){
- if(pactive)return;pactive=true;
- try{
-  while(pqueue.length){
-   const rel=pqueue.shift();
-   updateIndicator(pqueue.length+1);
-   const ph=cardFor(rel)?.querySelector('.ph');
-   if(ph){ph.classList.add('rendering');ph.textContent='\\u23f3';}
-   try{const {rate}=await renderPreview(rel);
-    const card=cardFor(rel);
-    if(card){const media=card.querySelector('.media');
-     const k=keyByRel.get(rel)||await previewKey(rel);
-     const v=document.createElement('video');
-     v.src='/preview/'+k+'.webm?v='+PVV;
-     v.autoplay=true;v.muted=true;v.loop=true;v.playsInline=true;
-     v.addEventListener('loadedmetadata',()=>{v.playbackRate=Math.min(8,Math.max(.25,rate));});
-     media.innerHTML='';media.appendChild(v);}
-   }catch(e){console.warn('preview render failed:',rel,e);
-    const p2=cardFor(rel)?.querySelector('.ph');
-    if(p2){p2.classList.remove('rendering');p2.textContent='\\u26a0';}}
-   if(batchTotal>0){batchDone++;updateIndicator(pqueue.length+1);}
-  }
- }finally{pactive=false;if(batchTotal&&!pqueue.length)batchTotal=0;updateIndicator(0);}}
-function cardFor(rel){return grid.querySelector(`.card[data-rel="${CSS.escape(rel)}"]`);}
-loadTree();load();
-if(new URLSearchParams(location.search).has('renderall')){
- const iv=setInterval(()=>{const b=$('renderAll');
-  if(total>0&&b&&!b.disabled){clearInterval(iv);b.click();}},300);
- setTimeout(()=>clearInterval(iv),20000);}
-</script></body></html>"""
+DASH_PAGE = _load_tpl("dashboard.html")
 
 
-DASH_PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<title>Library — Dashboard</title><style>
-:root{--bg:#14161a;--fg:#dfe3ea;--dim:#8b93a1}
-*{box-sizing:border-box}body{margin:0;font:15px/1.4 system-ui;background:var(--bg);color:var(--fg);height:100vh;overflow:hidden;display:flex}
-a.tile{position:relative;flex:1;overflow:hidden;display:block;text-decoration:none;color:var(--fg)}
-a.tile img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
-filter:grayscale(.85) brightness(.5);transition:filter .3s ease,transform .3s ease;transform:scale(1.001)}
-a.tile:hover img{filter:grayscale(0) brightness(1);transform:scale(1.06)}
-.edge{position:absolute;inset:0;pointer-events:none;transition:opacity .3s}
-.l .edge{background:linear-gradient(to right,var(--bg),transparent 14%),
- linear-gradient(to top,var(--bg),transparent 12%),linear-gradient(to bottom,var(--bg),transparent 12%)}
-.m .edge{background:linear-gradient(to right,var(--bg),transparent 12%),
- linear-gradient(to left,var(--bg),transparent 12%),
- linear-gradient(to top,var(--bg),transparent 12%),linear-gradient(to bottom,var(--bg),transparent 12%)}
-.r .edge{background:linear-gradient(to left,var(--bg),transparent 14%),
- linear-gradient(to top,var(--bg),transparent 12%),linear-gradient(to bottom,var(--bg),transparent 12%)}
-.label{position:absolute;left:34px;bottom:30px;text-shadow:0 2px 14px #000}
-.m .label{left:50%;transform:translateX(-50%);text-align:center}
-.r .label{left:auto;right:34px;text-align:right}
-.label h1{font-size:36px;margin:0 0 4px;letter-spacing:.02em}
-.label span{color:var(--dim);font-size:14px}
-.cut{position:absolute;top:0;bottom:0;width:2px;background:var(--bg);z-index:3}
-</style></head><body>
-<a class="tile l" href="/animation">
- <img src="{{ANIM_THUMB}}" alt="" onerror="this.style.opacity=0">
- <div class="edge"></div>
- <div class="label"><h1>Animations</h1><span>{{ANIM_CLIPS}} clips · {{ANIM_FOLDERS}} folders · live 3D preview</span></div>
-</a>
-<a class="tile m" href="/assets">
- <img src="{{ASSET_THUMB}}" alt="" onerror="this.style.opacity=0">
- <div class="edge"></div>
- <div class="label"><h1>Assets</h1><span>{{ASSET_PACKS}} purchases · galleries · store links</span></div>
-</a>
-<a class="tile m" href="/textures">
- <img src="{{TEX_THUMB}}" alt="" onerror="this.style.opacity=0">
- <div class="edge"></div>
- <div class="label"><h1>Textures</h1><span>{{TEX_COUNT}} texture sets · 4K maps · local files</span></div>
-</a>
-<a class="tile r" href="/audio">
- <img src="{{AUDIO_THUMB}}" alt="" onerror="this.style.opacity=0">
- <div class="edge"></div>
- <div class="label"><h1>Audio</h1><span>{{AUDIO_COUNT}} sounds · {{AUDIO_HOURS}}h · click to preview</span></div>
-</a>
-<div class="cut" style="left:25%"></div><div class="cut" style="left:50%"></div>
-<div class="cut" style="left:75%"></div>
-<a href="/tags" style="position:fixed;bottom:6px;right:66px;font-size:12px;letter-spacing:.04em;color:#8b93a1;text-decoration:none;z-index:9">pack tags</a>
-<a href="/registry" style="position:fixed;bottom:6px;right:10px;font-size:10px;letter-spacing:.04em;color:#333a44;text-decoration:none;z-index:9">registry</a>
-</body></html>"""
-
-
-BATCH_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Batch preview renderer</title>
-<style>body{background:#111;color:#eee;font:15px monospace;padding:24px}
-#big{font-size:26px;color:#7cc4ff;margin-bottom:14px}
-#bar{height:14px;background:#222;border-radius:7px;overflow:hidden;margin-bottom:14px;max-width:900px}
-#bar i{display:block;height:100%;background:#6ea8fe;width:0%}
-.err{color:#ff8a8a}.ok{color:#7dff9b}div.e{margin:2px 0}</style>
-<script type="importmap">
-{"imports":{"three":"/static/three.module.js","three/addons/":"/static/jsm/"}}
-</script>
-<script>window.__errs=[];window.addEventListener('error',e=>window.__errs.push(String(e.message||e).slice(0,200)));window.addEventListener('unhandledrejection',e=>window.__errs.push('REJ: '+String(e.reason&&(e.reason.message||e.reason)).slice(0,200)));</script></head><body>
-<h2>batch preview renderer &mdash; 4 parallel lanes, 2x recording</h2>
-<div id="big">starting&hellip;</div><div id="bar"><i></i></div><div id="log"></div>
-<script type="module">
-import * as THREE from 'three';
-import {FBXLoader} from 'three/addons/loaders/FBXLoader.js';
-const $=id=>document.getElementById(id);
-const big=$('big'),bar=$('bar').firstElementChild,logEl=$('log');
-const el=(t,cls)=>{const d=document.createElement('div');if(cls)d.className=cls;d.textContent=t;logEl.appendChild(d);if(logEl.children.length>12)logEl.firstChild.remove();return d;};
-const PW=480,PH=270,FPS=30,MAXDUR=6,SPEED=2,DUMMY="{{RIG_REL}}";  // from the server; '' = no rig
-const RATE=(1/SPEED).toFixed(3);
-function loadF(rel,dir){
- const L=new FBXLoader();
- L.setResourcePath('/res/'+encodeURIComponent(dir)+"/");
- return new Promise((res,rej)=>L.load("/file?path="+encodeURIComponent(rel),res,undefined,rej));}
-async function makeLane(i){
- if(!DUMMY)throw new Error("no retarget rig in this library");
- const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
- renderer.setSize(PW,PH);renderer.setPixelRatio(1);
- const scene=new THREE.Scene();
- scene.background=new THREE.Color(0x101216);
- scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.9));
- const key=new THREE.DirectionalLight(0xffffff,2.8);key.position.set(3,6,4);scene.add(key);
- const fill=new THREE.DirectionalLight(0xcfe0ff,1.1);fill.position.set(-4,2,5);scene.add(fill);
- const dummy=await loadF(DUMMY,DUMMY.split("/").slice(0,-1).join("/"));
- const bind=new Map();
- dummy.traverse(o=>{if(o.isBone||o===dummy)bind.set(o,[o.position.clone(),o.quaternion.clone(),o.scale.clone()]);});
- return {renderer,scene,dummy,bind};}
-function pfit(cam,holder){
- holder.updateMatrixWorld(true);
- const box=new THREE.Box3().setFromObject(holder);
- if(box.isEmpty())return;
- const s=box.getSize(new THREE.Vector3()),c=box.getCenter(new THREE.Vector3());
- const r=Math.max(s.x,s.y,s.z)||1;
- cam.near=r/100;cam.far=r*40;cam.updateProjectionMatrix();
- cam.position.copy(c).add(new THREE.Vector3(r*1.1,r*0.8,r*1.9));
- cam.lookAt(c);}
-async function renderPreview(rel,lane){
- const {renderer,dummy,bind}=lane;
- dummy.traverse(o=>{const b=bind.get(o);
-  if(b){o.position.copy(b[0]);o.quaternion.copy(b[1]);o.scale.copy(b[2]);}});
- const obj=await loadF(rel,rel.split("/").slice(0,-1).join("/"));
- const clips=obj.animations||[];
- if(!clips.length)throw new Error("no animation in file");
- let root=obj,hasMesh=false,helper=null;
- obj.traverse(o=>{if(o.isMesh)hasMesh=true;});
- if(!hasMesh){
-  const db=new Set();dummy.traverse(o=>{if(o.isBone)db.add(o.name);});
-  const cb=new Set();
-  for(const t of clips[0].tracks){const m=t.name.match(/bones\\[([^\\]]+)\\]/);cb.add(m?m[1]:t.name.split(".")[0]);}
-  let common=0;for(const b of cb)if(db.has(b))common++;
-  if(common>=6)root=dummy;else helper=obj;}
- if(root===obj&&!hasMesh)helper=obj;
- const fixMeshes=o=>{o.traverse(n=>{
-  if(n.isMesh){n.frustumCulled=false;
-   const mats=Array.isArray(n.material)?n.material:[n.material];
-   for(const m of mats){if(!m.map&&(!m.color||m.color.getHex()===0))m.color=new THREE.Color(0xb8c0cc);
-     if(m.map)m.color=new THREE.Color(0xffffff);}}});};
- fixMeshes(root);
- const scene=new THREE.Scene();
- scene.background=new THREE.Color(0x101216);
- scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.9));
- const key=new THREE.DirectionalLight(0xffffff,2.8);key.position.set(3,6,4);scene.add(key);
- const fill=new THREE.DirectionalLight(0xcfe0ff,1.1);fill.position.set(-4,2,5);scene.add(fill);
- const holder=new THREE.Group();holder.add(root);scene.add(holder);
- if(helper)holder.add(new THREE.SkeletonHelper(helper));
- root.rotation.set(-Math.PI/2,0,0);
- root.updateMatrixWorld(true);
- let head=null,hip=null;
- root.traverse(o=>{if(o.isBone){const n=o.name.toLowerCase();
-   if(!head&&n.includes("head"))head=o;if(!hip&&/pelvis|hips/.test(n))hip=o;}});
- if(head&&hip){const v=head.getWorldPosition(new THREE.Vector3()).sub(hip.getWorldPosition(new THREE.Vector3()));
-   const ax=Math.abs(v.x),ay=Math.abs(v.y),az=Math.abs(v.z);
-   if(v.y<0&&ay>=ax&&ay>=az)holder.rotation.z+=Math.PI;
-   else if(az>ay&&az>=ax)holder.rotation.x+=(v.z>0?-Math.PI/2:Math.PI/2);
-   else if(ax>ay&&ax>=az)holder.rotation.z+=(v.x>0?Math.PI/2:-Math.PI/2);}
- const cam=new THREE.PerspectiveCamera(40,PW/PH,0.01,1e7);
- pfit(cam,holder);
- const clip=clips[0];
- const mixer=new THREE.AnimationMixer(root);
- mixer.clipAction(clip).play();
- const dur=Math.min(clip.duration||3,MAXDUR);
- const mime=["video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"]
-   .find(m=>window.MediaRecorder&&MediaRecorder.isTypeSupported(m));
- if(!mime)throw new Error("MediaRecorder/webm unsupported");
- const stream=renderer.domElement.captureStream(FPS);
- const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:1500000});
- const chunks=[];rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
- const stopped=new Promise(res=>rec.onstop=res);
- rec.start(100);
- let mixT=0;const t0=performance.now();
- await new Promise(res=>{
-  (function step(){
-   const wallTotal=Math.max(1.0,dur/SPEED);
-   mixT=(performance.now()-t0)/1000;
-   if(mixT>=wallTotal||mixT>wallTotal*6+2){res();return;}
-   mixer.setTime((mixT*SPEED)%dur);
-   holder.updateMatrixWorld(true);
-   renderer.render(scene,cam);
-   requestAnimationFrame(step);})();
- });
- rec.stop();await stopped;
- const blob=new Blob(chunks,{type:"video/webm"});
- if(blob.size<1024)throw new Error("recording empty ("+blob.size+"B)");
- const r=await fetch("/api/preview/store?clip="+encodeURIComponent(rel)+"&rate="+RATE,
-   {method:"POST",body:blob});
- if(!r.ok)throw new Error("store failed: "+r.status);
- scene.remove(holder);}
-async function main(){
- let todo=[];
- try{
-  for(let p=1;;p++){
-   const d=await(await fetch("/api/anim/clips?page="+p+"&size=120")).json();
-   for(const c of d.clips)if(!c.preview)todo.push({rel:c.rel,title:c.title});
-   if(p*120>=d.total||d.clips.length===0)break;}
- }catch(e){big.textContent="cannot list clips: "+(e&&e.message||e);return;}
- const total=todo.length;
- if(!total){big.textContent="nothing to do -- every clip already has a preview.";return;}
- big.textContent="0 / "+total;
- const lanes=(await Promise.all([0,1,2,3].map(i=>makeLane(i).catch(e=>{
-   el("lane "+i+" unavailable: "+(e&&e.message||e),"err");return null;})))).filter(Boolean);
- if(!lanes.length){   // no lane = every clip failed, never "DONE, 0 failed"
-  big.textContent="FAILED — 0 rendered, "+total+" failed (of "+total+"): no render lane started. "
-   +"The /animation page renders bones-only previews without a rig.";return;}
- el(lanes.length+" parallel lanes running (2x recording speed)");
- let done=0,failed=0,cursor=0;
- async function worker(lane){
-  while(cursor<todo.length){
-   const item=todo[cursor++];
-   try{await renderPreview(item.rel,lane);done++;
-    if(done%5===0)el("ok: "+item.title,"ok");}
-   catch(e){failed++;el("FAIL "+item.title+" -- "+(e&&e.message||e),"err");}
-   big.textContent=done+" rendered · "+failed+" failed · "+total+" total";
-   bar.style.width=Math.round((done+failed)/total*100)+"%";}}
- await Promise.all(lanes.map(l=>worker(l)));
- big.textContent="DONE — "+done+" rendered, "+failed+" failed (of "+total+"). You can close this tab.";
- el("all done — previews are cached on disk and show on the animation page","ok");}
-main();
-</script></body></html>"""
-
-
-
-
-
-
-
-
-
-
-PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<title>AI Asset Registry</title><style>
-:root{--bg:#14161a;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1}
-*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui;background:var(--bg);color:var(--fg)}
-header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;gap:12px;flex-wrap:wrap;align-items:center}
-h1{font-size:16px;margin:0}input,select{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 9px}
-#status{padding:8px 20px;border-bottom:1px solid var(--line);color:var(--dim);font-size:12.5px;white-space:pre-wrap}
-main{padding:16px 20px;display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-.card img{width:100%;height:150px;object-fit:cover;display:block;background:#000}
-.badge{height:150px;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700;color:#fff}
-.card .body{padding:10px 12px}
-.name{font-weight:600;margin-bottom:4px;word-break:break-word}
-.chips{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0}
-.chip{background:#2a2f39;border-radius:20px;padding:1px 9px;font-size:11.5px;color:var(--dim)}
-.chip.domain{color:#7cc4ff}.chip.style{color:#ffd479}.chip.human{color:#7dff9b}
-.meta{color:var(--dim);font-size:12px}
-.meta a{color:inherit}
-.bar{height:4px;background:#2a2f39;border-radius:2px;margin-top:8px}
-.bar i{display:block;height:100%;border-radius:2px;background:#6ea8fe}
-.detail{padding:0 12px 12px;color:var(--dim);font-size:12px;word-break:break-all}
-.card{position:relative;cursor:pointer}
-.card:hover{border-color:#3a4250}
-.card.selected{outline:2px solid #6ea8fe}
-.selbox{position:absolute;top:8px;left:8px;width:18px;height:18px;accent-color:#6ea8fe;z-index:2}
-#bar{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);
-padding:10px 20px;display:none;gap:10px;align-items:center;flex-wrap:wrap}
-#bar.show{display:flex}
-#bar .meta{margin-right:4px}
-#msg{padding:6px 20px;color:#7dff9b;font-size:12.5px;display:none}
-.btn3d{background:#243040;color:#7cc4ff;border:1px solid #31506e;border-radius:6px;
-padding:2px 10px;margin-top:7px;cursor:pointer;font-size:12px}
-.btn3d:hover{background:#2b3b50}
-</style></head><body>
-<header><a href="/" style="color:#8b93a1;text-decoration:none;margin-right:2px">&larr; home</a><h1>AI Asset Registry</h1><a href="/animation" style="color:#7cc4ff;text-decoration:none">Animations</a><a href="/tags" style="color:#7cc4ff;text-decoration:none">Pack tags</a>
-<input id="q" placeholder="search name / tags / path ..." size="34">
-<select id="domain"><option value="">all domains</option></select>
-<select id="style"><option value="">all styles</option></select>
-<label class="meta"><input type="checkbox" id="selAll"> select all shown</label>
-<span class="meta" id="count"></span></header>
-<div id="status"></div><div id="msg"></div><main id="grid"></main>
-<div id="bar"><span class="meta" id="selcount"></span>
-<select id="setDomain"><option value="">set domain…</option></select>
-<select id="setStyle"><option value="">set style…</option></select>
-<button onclick="markValidated('validated_blender')">Mark Validated (Blender)</button>
-<button onclick="markValidated('validated_unreal')">Mark Validated (Unreal)</button>
-<button onclick="clearSel()">clear selection</button></div>
-<script>
-let packs=[];const sel=new Set();
-const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const COLORS={Environment:'#3f7d4e','Human Animations':'#7a5fb5',Archviz:'#b5823f',Props:'#b5455f',Characters:'#3f7db5','Textures_HDRI':'#8a6db0'};
-const open=id=>location.href='/pack?id='+encodeURIComponent(id);
-async function loadStats(){const r=await(await fetch('/api/stats')).json();
- for(const d of r.domains){domain.insertAdjacentHTML('beforeend',`<option>${esc(d)}</option>`);setDomain.insertAdjacentHTML('beforeend',`<option>${esc(d)}</option>`)}
- for(const s of r.styles){style.insertAdjacentHTML('beforeend',`<option>${esc(s)}</option>`);setStyle.insertAdjacentHTML('beforeend',`<option>${esc(s)}</option>`)}
- const st=r.extension_status&&r.extension_status[0];
- status.textContent=st?`last extension action: ${st.action} ${st.ok?'OK':'FAILED'} — ${st.target} — ${st.at}${st.detail?('\\n'+st.detail.replace(/\\n/g,' | ')):''}`:`no extension activity recorded yet`;
- status.style.color=st&&!st.ok?'#ff8a8a':'var(--dim)';}
-async function load(){const p=new URLSearchParams({q:q.value,domain:domain.value,style:style.value});
- packs=await(await fetch('/api/packs?'+p)).json();count.textContent=packs.length+' packs';
- for(const id of[...sel])if(!packs.some(a=>a.id===id))sel.delete(id);
- // every interpolated value is esc()'d and ids travel in data-id
- // attributes read by the delegated listener below -- NEVER inside inline
- // onclick strings (pack ids are folder paths; ' is a legal filename
- // character on Windows and broke out of the old string splices)
- grid.innerHTML=packs.map((a)=>`<div class="card${sel.has(a.id)?' selected':''}" data-id="${esc(a.id)}">
- <input type="checkbox" class="selbox" ${sel.has(a.id)?'checked':''}>
- <div class="open" title="open file list">
- ${a.thumb?`<img loading="lazy" src="${esc(a.thumb)}">`:`<div class="badge" style="background:${COLORS[a.domain]||'#444'}">${esc((a.domain||'?')[0])}</div>`}
- <div class="body"><div class="name">${esc(a.name)}</div>
- <div class="chips">
- <span class="chip domain">${esc(a.domain)}</span><span class="chip">${esc(a.sub_category)}</span>
- <span class="chip style">${esc(a.style)}</span>${a.styles.includes('Low Poly')?'<span class="chip style">Low Poly</span>':''}${a.owner_tagged?'<span class="chip human">yours</span>':''}</div>
- <div class="meta">${esc(a.vendor||'—')} · <a href="/pack?id=${encodeURIComponent(a.id)}">${a.files} files</a> · ${(a.bytes/1e9).toFixed(1)} GB · ${esc(a.formats.slice(0,4).join(', '))}</div>
- <div class="bar"><i style="width:${Math.round((a.confidence||0)*100)}%"></i></div>
- ${a.formats.some(f=>f==='fbx'||f==='bvh')?`<button class="btn3d">3D &gt; play</button>`:''}</div></div>
- <div class="detail" style="display:none">${esc(a.hero)}<br>tags: ${esc(a.tags.slice(0,8).join(', '))}<br>confidence ${(a.confidence||0).toFixed(2)} · updated ${esc(a.updated_at)} · status ${esc(a.status||'')}</div></div>`).join('');
- grid.querySelectorAll('.card').forEach(card=>{
-  card.querySelector('.selbox').addEventListener('click',e=>{e.stopPropagation();toggle(card.dataset.id);});
-  const chips=card.querySelector('.chips');
-  chips.addEventListener('click',e=>{e.stopPropagation();
-   const d=card.querySelector('.detail');d.style.display=d.style.display==='block'?'none':'block';});
-  const b3=card.querySelector('.btn3d');
-  if(b3)b3.addEventListener('click',e=>{e.stopPropagation();
-   location.href='/viewer?pack='+encodeURIComponent(card.dataset.id);});
-  card.querySelector('.open').addEventListener('click',()=>open(card.dataset.id));});
- selAll.checked=packs.length>0&&packs.every(a=>sel.has(a.id));renderBar();}
-function toggle(id){sel.has(id)?sel.delete(id):sel.add(id);
- const card=grid.querySelector(`.card:nth-child(${packs.findIndex(a=>a.id===id)+1})`);
- if(card){card.classList.toggle('selected',sel.has(id));card.querySelector('.selbox').checked=sel.has(id)}
- selAll.checked=packs.length>0&&packs.every(a=>sel.has(a.id));renderBar();}
-selAll.onchange=()=>{if(selAll.checked)packs.forEach(a=>sel.add(a.id));else packs.forEach(a=>sel.delete(a.id));load();};
-function clearSel(){sel.clear();load();}
-function renderBar(){selcount.textContent=sel.size+' pack(s) selected';bar.classList.toggle('show',sel.size>0)}
-async function retag(body){if(!sel.size)return;
- const r=await(await fetch('/api/retag',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
- msg.style.display='block';msg.textContent=`updated ${r.updated} pack(s) at ${new Date().toLocaleTimeString()}`;
- setDomain.value='';setStyle.value='';setTimeout(load,300);}
-setDomain.onchange=()=>{if(setDomain.value)retag({ids:[...sel],set:{domain:setDomain.value}})};
-setStyle.onchange=()=>{if(setStyle.value)retag({ids:[...sel],set:{style:setStyle.value}})};
-function markValidated(status){retag({ids:[...sel],status})}
-q.oninput=()=>{clearTimeout(window._t);window._t=setTimeout(load,250)};
-domain.onchange=style.onchange=load;loadStats();load();
-</script></body></html>"""
+BATCH_PAGE = _load_tpl("batchrender.html")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3624,19 +2474,10 @@ class Handler(BaseHTTPRequestHandler):
                     answer, code = setup_flow.api_fs_list((params.get("path") or [""])[0])
                     self._json(answer, code)
             elif url.path == "/":
-                _prefix = _anim_prefix()
-                # the rig's pack thumbnail (under the configured section)
-                anim = _pack_thumb.get(
-                    _prefix + "/" + _RIG_SUBPATH.split("/")[0])
+                _clips = _clip_rows()
+                aclips = len(_clips)
+                afold = len({c["pack"] for c in _clips})
                 conn = db.connect(_DB_PATH)
-                aclips = conn.execute(
-                    "SELECT COUNT(*) FROM asset_files f JOIN assets a ON a.id=f.asset_id "
-                    "WHERE substr(a.id, 1, ?) = ? AND (lower(f.relative_path) "
-                    "LIKE '%.fbx' OR lower(f.relative_path) LIKE '%.bvh')",
-                    (len(_prefix), _prefix)).fetchone()[0]
-                afold = conn.execute(
-                    "SELECT COUNT(*) FROM assets WHERE substr(id, 1, ?) = ?",
-                    (len(_prefix), _prefix)).fetchone()[0]
                 apacks = conn.execute("SELECT COUNT(*) FROM collection").fetchone()[0]
                 tcount = conn.execute("SELECT COUNT(*) FROM textures").fetchone()[0]
                 acount = conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]
@@ -3682,9 +2523,8 @@ class Handler(BaseHTTPRequestHandler):
                 html = (DASH_PAGE
                         .replace("{{ANIM_THUMB}}",
                                  "/cimg?path=" + _pq(anim_pick.as_posix())
-                                 if anim_pick is not None else
-                                 ("/thumb/" + str(anim) if anim is not None
-                                  else "/static/heroes/animation.svg"))
+                                 if anim_pick is not None
+                                 else "/static/heroes/animation.svg")
                         .replace("{{ASSET_THUMB}}",
                                  "/cimg?path=" + _pq(asset_img)
                                  if asset_img
@@ -3707,14 +2547,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._html(TEXTURES_PAGE.encode("utf-8"))
             elif url.path == "/audio":
                 self._html(AUDIO_PAGE.encode("utf-8"))
-            elif url.path == "/registry":
-                self._html(PAGE.encode("utf-8"))
             elif url.path == "/tags":
                 self._html(TAGS_PAGE.encode("utf-8"))
             elif url.path == "/api/pack_tags":
                 self._json(api_pack_tags())
-            elif url.path == "/pack":
-                self._html(PACK_PAGE.encode("utf-8"))
             elif url.path == "/animation":
                 self._html(_with_rig(ANIM_PAGE).encode("utf-8"))
             elif url.path == "/batchrender":
@@ -3894,10 +2730,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self._write(data)
-            elif url.path == "/api/packs":
-                self._json(api_packs(params))
-            elif url.path == "/api/pack_files":
-                self._json(api_pack_files(params))
             elif url.path == "/api/clips":
                 self._json(api_clips(params))
             elif url.path in ("/api/folders", "/api/folders/item"):
@@ -3967,29 +2799,11 @@ class Handler(BaseHTTPRequestHandler):
                 if directory and name:
                     target = _safe_asset_file(
                         str(Path(directory) / unquote(name)), TEXTURE_EXTS)
-                if target is None and name:
-                    base = unquote(name).replace("\\", "/").rsplit("/", 1)[-1]
-                    with _thumb_lock:
-                        entry = next((t for t in _thumbs
-                                      if t["key"].rsplit("/", 1)[-1] == base), None)
-                    if entry and Path(entry["abs"]).suffix.lower() in TEXTURE_EXTS:
-                        target = Path(entry["abs"])
                 if not target or not target.is_file():
                     return self._json({"error": "not found"}, 404)
                 self._bytes(target.read_bytes(),
                             mimetypes.guess_type(str(target))[0]
                             or "application/octet-stream")
-            elif url.path.startswith("/thumb/"):
-                try:
-                    index = int(url.path.rsplit("/", 1)[1])
-                except ValueError:
-                    return self._json({"error": "bad index"}, 400)
-                with _thumb_lock:
-                    entry = next((t for t in _thumbs if t["index"] == index), None)
-                if not entry or not Path(entry["abs"]).is_file():
-                    return self._json({"error": "not found"}, 404)
-                self._bytes(Path(entry["abs"]).read_bytes(),
-                            mimetypes.guess_type(entry["abs"])[0] or "image/jpeg")
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as exc:  # noqa: BLE001
@@ -4000,9 +2814,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad host"}, 403)
         if not self._origin_ok():
             return self._json({"error": "cross-origin request rejected"}, 403)
-        """Bulk re-tagging: {"ids": [...], "set": {domain|style} | "status"}.
-        Domain and style are written to the pack tag file; a status marks
-        the pack 'human_verified' with confidence 1.0 in the registry."""
         params = parse_qs(urlparse(self.path).query)
         try:
             path = urlparse(self.path).path
@@ -4047,24 +2858,6 @@ class Handler(BaseHTTPRequestHandler):
                     (PREVIEW_DIR / (key + ".json")).write_text(
                         json.dumps({"rate": rate}), encoding="utf-8")
                 return self._json({"ok": True, "key": key})
-            if path == "/api/pack_source":
-                # link a pack to the store page it was bought from
-                body, err = self._json_body()
-                if err:
-                    return self._json({"error": err}, 415)
-                pid = body.get("id") or ""
-                surl = (body.get("url") or "").strip()
-                if not re.fullmatch(r"pack::[\w .()&!',#%/+-]+", pid):
-                    return self._json({"error": "bad pack id"}, 400)
-                if surl and not (surl.startswith("http://") or surl.startswith("https://")) \
-                        or len(surl) > 500:
-                    return self._json({"error": "url must start with http(s)://"}, 400)
-                conn = db.connect(_DB_PATH)
-                cur = conn.execute("UPDATE assets SET source_url=? WHERE id=?",
-                                   (surl or None, pid))
-                conn.commit()
-                conn.close()
-                return self._json({"ok": True, "updated": cur.rowcount})
             if path == "/api/collection/thumb":
                 body, err = self._json_body()
                 if err:
@@ -4109,55 +2902,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": err}, 415)
                 answer, code = api_pack_tags_set(body)
                 return self._json(answer, code)
-            if path != "/api/retag":
-                return self._json({"error": "not found"}, 404)
-            body, err = self._json_body()
-            if err:
-                return self._json({"error": err}, 415)
-            ids = [i for i in body.get("ids", [])
-                   if isinstance(i, str) and re.fullmatch(r"pack::[\w .()&!',#%/+-]+", i)]
-            payload = body.get("set") or {}
-            dom = payload.get("domain") if payload.get("domain") in DOMAINS else None
-            sty = payload.get("style")
-            sty = (library_map.marker(sty) or (sty if sty in STYLES else None)
-                   if isinstance(sty, str) else None)
-            status = body.get("status")
-            if status not in ("validated_blender", "validated_unreal"):
-                status = None
-            if not ids or not (dom or sty or status):
-                return self._json({"error": "nothing to do"}, 400)
-            updated = 0
-            if dom or sty:
-                # domain and style are the owner's pack tags: they go to
-                # the tag file, which survives a registry rebuild
-                _sync_pack_tags()
-                rows = _tag_rows()
-                for i in ids:
-                    r = rows.get(i[len("pack::"):].lower())
-                    if r is None:
-                        continue
-                    keep = [s for s in r["styles"] if s not in _LOOKS]
-                    styles = (None if not sty else
-                              r["styles"] + ["Low Poly"] if sty == "Low Poly"
-                              else [sty] + keep if sty in _LOOKS else keep)
-                    try:
-                        library_map.update(r["folder"], styles=styles,
-                                         domain=dom)
-                    except library_map.TagFileBusy as exc:
-                        return self._json({"error": str(exc)}, 409)
-                    updated += 1
-            if status:
-                conn = db.connect(_DB_PATH)
-                cur = conn.execute(
-                    f"UPDATE assets SET status=?, "
-                    f"validation_status='human_verified', confidence_score=1.0, "
-                    f"updated_at=CURRENT_TIMESTAMP "
-                    f"WHERE id IN ({','.join('?' * len(ids))})",
-                    [status] + ids)
-                conn.commit()
-                updated = max(updated, cur.rowcount)
-                conn.close()
-            self._json({"updated": updated})
+            return self._json({"error": "not found"}, 404)
         except Exception as exc:  # noqa: BLE001
             self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
 
@@ -4177,28 +2922,110 @@ def _loopback_warning(host: str) -> Optional[str]:
         "  metadata, filenames and thumbnails. When in doubt: 127.0.0.1.")
 
 
-def _startup_imports(db_path: str) -> dict:
-    """What the server does before it answers: thumbnails, schema, every
-    importer (each failing on its own), the map, the registry stamp, the
-    preview cache. Returns the per-section counts for the banner."""
-    build_thumb_index()
-    db.init_db(db_path)   # applies schema migrations (source_url etc.)
+def _source_files() -> list:
+    """The files whose change means the importers must run again."""
+    af = config.AGENT_FILES
+    files = [config._CONFIG_FILE, library_map.PATH, config.CSV_PATH,
+             config.TEX_ROOT / "library_index.json", config.AUDIO_ROOT / "library_files.jsonl",
+             config.AUDIO_ROOT / "library_index.json",
+             af / "models.jsonl", af / "kb3d_models.jsonl", af / "native_models.jsonl",
+             af / "availability.jsonl"]
+    # the folders textures_import, audio_import and collection_import walk
+    # themselves: a folder's mtime moves when a set or a file is added
+    # directly in it, so the folders two levels down see new sets
+    for root in (config.TEX_ROOT, config.AUDIO_ROOT, config.COLLECTION_ROOT):
+        files += _dirs_below(root, 2)
+    for root in config.MANIFEST_ROOTS:
+        try:                   # the importer reads manifests at any depth
+            files += list(Path(root).rglob("Exports/manifest.json"))
+            files += list(Path(root).rglob("Exports/kit_manifest.json"))
+        except OSError:
+            pass
+    return files
+
+
+def _dirs_below(root, depth: int) -> list:
+    """`root` and its sub-folders down to `depth` levels (folders only)."""
+    out = []
+    root = Path(root)
+    if not root.is_dir():
+        return out
+    out.append(root)
+    frontier = [root]
+    for _ in range(depth):
+        nxt = []
+        for d in frontier:
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        if e.is_dir(follow_symlinks=False) and not e.name.startswith((".", "_")):
+                            nxt.append(Path(e.path))
+            except OSError:
+                continue
+        out += nxt
+        frontier = nxt
+        if len(out) > 5000:
+            break
+    return out
+
+
+def _startup_imports(db_path: str, force: bool = False) -> dict:
+    """What the server does before it answers: schema, every importer
+    (each failing on its own), the folders table, the map, the registry
+    stamp, the preview cache. Returns the per-section counts for the
+    banner. A registry whose sources did not change since the last start
+    (nothing ingested, scanned or measured; no index, map, CSV or config
+    edit) is served as it is: a warm start takes well under a second
+    instead of every importer again (`serve --rebuild` forces them)."""
+    db.init_db(db_path)   # applies schema migrations
     counts = {"collection": 0, "textures": 0, "audio": 0, "meshes": 0}
-    steps = (("collection", lambda: collection_import.import_collection(db_path), "assets"),
-             ("textures", lambda: textures_import.import_textures(db_path), "sets"),
-             ("audio", lambda: audio_import.import_audio(db_path), "files"),
-             ("meshes", lambda: meshes_import.import_meshes(db_path), "records"))
-    for name, fn, unit in steps:
+    sig = db.sources_signature(db_path, _source_files())
+    conn = db.connect(db_path)
+    served = db.get_meta(conn, "served_signature")
+    conn.close()
+    if sig == served and not force:
+        conn = db.connect(db_path)
+        for tbl in ("collection", "textures", "audio", "meshes"):
+            try:
+                counts[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            except sqlite3.OperationalError:
+                counts[tbl] = 0
+        conn.close()
+        print("registry up to date -- importers skipped (sources unchanged since "
+              "the last start; python pharos.py serve --rebuild runs them again)", flush=True)
+    else:
+        failed = False
+        steps = (("collection", lambda: collection_import.import_collection(db_path), "assets"),
+                 ("textures", lambda: textures_import.import_textures(db_path), "sets"),
+                 ("audio", lambda: audio_import.import_audio(db_path), "files"),
+                 ("meshes", lambda: meshes_import.import_meshes(db_path), "records"))
+        for name, fn, unit in steps:
+            try:
+                counts[name] = fn()
+                print(f"{name} imported: {counts[name]} {unit}", flush=True)
+            except Exception as exc:  # noqa: BLE001 -- a missing source must not kill the app
+                print(f"{name} import skipped: {exc}", flush=True)
+                # an absent purchase CSV is a state, not a failure
+                if not (name == "collection" and isinstance(exc, FileNotFoundError)):
+                    failed = True
         try:
-            counts[name] = fn()
-            print(f"{name} imported: {counts[name]} {unit}", flush=True)
-        except Exception as exc:  # noqa: BLE001 -- a missing source must not kill the app
-            print(f"{name} import skipped: {exc}", flush=True)
-    try:
-        n_f = folders_import.build(db_path, config.LIBRARY_ROOT)
-        print(f"folders: {n_f} node(s) with measured facts", flush=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"folders skipped: {exc}", flush=True)
+            n_f = folders_import.build(db_path, config.LIBRARY_ROOT)
+            print(f"folders: {n_f} node(s) with measured facts", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"folders skipped: {exc}", flush=True)
+            failed = True
+        try:
+            conn = db.connect(db_path)
+            # a pass with a failed step is not "served": the next start
+            # runs the importers again (an empty signature matches nothing)
+            db.set_meta(conn, "served_signature", "" if failed else sig)
+            if not db.get_meta(conn, "sources_stamp_at"):
+                import time as _time
+                db.set_meta(conn, "sources_stamp_at",
+                            _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime()))
+            conn.close()
+        except Exception:                                 # noqa: BLE001
+            pass
     try:
         added = _sync_pack_tags()
         if added:
@@ -4227,10 +3054,8 @@ def _startup_imports(db_path: str) -> dict:
                     pass
     try:
         _c = db.connect(db_path)
-        _prefix = _anim_prefix()
-        counts["anim_packs"] = _c.execute(
-            "SELECT COUNT(*) FROM assets WHERE substr(id, 1, ?) = ?",
-            (len(_prefix), _prefix)).fetchone()[0]
+        counts["anim_packs"] = db.anim_clip_count(
+            _c, config.SECTIONS.get("animation"), packs=True)
         _c.close()
     except Exception:                                     # noqa: BLE001
         counts["anim_packs"] = 0
@@ -4283,6 +3108,8 @@ def main(argv=None) -> int:
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--setup", action="store_true",
                         help="open the setup page (pick the library, correct the map, index)")
+    parser.add_argument("--rebuild", action="store_true",
+                        help="run every importer at start even when no source changed")
     parser.add_argument("--init", action="store_true",
                         help="first-run: detect folders and write pharos_config.json")
     args = parser.parse_args(argv)
@@ -4307,7 +3134,7 @@ def main(argv=None) -> int:
             print(db.foreign_registry_message(_DB_PATH, _owner,
                                               config.LIBRARY_ROOT), flush=True)
             return 2
-        _startup_imports(_DB_PATH)
+        _startup_imports(_DB_PATH, force=args.rebuild)
         warn = _loopback_warning(host)
         if warn:
             print("!" * 70 + "\n" + warn + "\n" + "!" * 70, flush=True)
@@ -4321,8 +3148,7 @@ def main(argv=None) -> int:
                   f"{', '.join(strays)}", flush=True)
             print('  -> python pharos.py map set "<folder>" kind=<kind>  '
                   "(or include=no), then pharos.py ingest", flush=True)
-        print(f"registry browser: http://{host}:{args.port}  "
-              f"(db={_DB_PATH}, thumbs={len(_thumbs)})", flush=True)
+        print(f"registry browser: http://{host}:{args.port}  (db={_DB_PATH})", flush=True)
     server = ThreadingHTTPServer((host, args.port), Handler)
     if not args.no_open or args.setup:
         page = "/setup" if (_SETUP_MODE or args.setup) else ""

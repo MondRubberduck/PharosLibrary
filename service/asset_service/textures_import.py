@@ -345,8 +345,9 @@ def import_textures(db_path: str | Path, root=None) -> int:
                 unique_rows.append(r)
             scan_rows = unique_rows
         # px measured by the previous run, keyed by what identifies an
-        # unchanged set. This importer runs at every server start, and
-        # the header read per set is the one cost a restart can skip.
+        # unchanged set. This importer runs at a server start when a
+        # source changed, and the header read per set is the one cost a
+        # rerun can skip.
         # Only successes are kept: an unreadable file is tried again.
         old_px: dict = {}
         for name, folder, count, size, meta in conn.execute(

@@ -20,7 +20,7 @@ token cost.** Operating manual (setup + build doctrine):
 | MCP server | `python -m service.pharos_mcp_server` (stdio, 10 tools) | agents with MCP support (Claude Desktop, Cursor, …) |
 | Web dashboard | `http://127.0.0.1:8765` in a browser | human verification of what the agent found |
 | Setup page | `http://127.0.0.1:8765/setup` (`python pharos.py setup` opens it); API `/api/setup/state`, `/api/setup/survey`, `/api/setup/map`, `/api/setup/confirm`, `/api/setup/progress`, `/api/fs/drives`, `/api/fs/list` (folder browsing on loopback binds only) | picking the library, correcting the survey, deciding, indexing; a server without a config serves only this |
-| CLI | `python pharos.py setup/init/survey/map/ingest/serve/doctor`, `scanner.py`, `indexer.py`, `scene_manifest.py` | onboarding, ingestion, validation, builds |
+| CLI | `python pharos.py setup/init/survey/map/ingest/measure/serve/doctor`, `scanner.py`, `scene_manifest.py` | onboarding, ingestion, validation, builds |
 | Agent index files | `<library_root>/_Agent_Files/*.md`, `*.jsonl` | offline reading when the server is down |
 
 ## 2. What the agent can ask
@@ -93,9 +93,9 @@ token cost.** Operating manual (setup + build doctrine):
 | Content | Ingestion path | Notes |
 |---|---|---|
 | Any mesh folder (FBX/OBJ/GLB/STL/BLEND) | `python service/asset_service/scanner.py <folder>` | FBX: real bbox in metres + exact triangle/vertex counts via the stdlib binary walker (`fbx_dims.py`, ground-truth verified vs Blender measurements, 197/200 within 5%); OBJ, glTF/GLB and STL measured by the stdlib `measure.py` (size, triangles, materials, pivot); .blend indexed as name+path placeholder until the Blender chain measures it |
-| Texture folders (PBR sets, loose map families) | `textures_import` at server start, or scanner | sets grouped per leaf folder / stripped map-channel suffixes |
+| Texture folders (PBR sets, loose map families) | `textures_import` at a server start when a source changed (`serve --rebuild` or `ingest` picks up folders added by hand), or scanner | sets grouped per leaf folder / stripped map-channel suffixes |
 | Audio folders | `scanner.py` (WAV duration from header) or crawler `library_files.jsonl` | jsonl path additionally brings categories, keywords, sample rates |
-| Animation clip packs (FBX/BVH) | `indexer.py --root <library_root>` | builds the pack grid; previews are rendered once by the browser |
+| Animation clip packs (FBX/BVH) | `python pharos.py measure --clips <animation folder>` (ingest runs it) | the clips table: duration, fps, frames, root motion, skeleton signature and family per clip; previews are rendered once by the browser |
 | Purchase catalog | any CSV with Name/URL/Price-ish headers (`collection_csv` config key names it) | three-state availability via optional `availability.jsonl` |
 | Unreal `.uasset` packs | `pipeline/conversion/` (optional; needs UE 5.x + Git Bash) | exports FBX+textures+manifest per pack, metres @ scale 1.0, engine-exact material wiring; source libraries stay read-only (sandbox copy + tree fingerprints) |
 | KitBash-style `.blend` kits | `pipeline/kitbash/` (optional; needs Blender) | one FBX per `_grp` assembly + `kit_manifest.json` |
@@ -122,8 +122,11 @@ token cost.** Operating manual (setup + build doctrine):
    missing decisions. `python pharos.py convert | extract | previews`
    run the engine chains the map allows (`--dry-run` prints the
    commands); without the decision they refuse.
-3. `python pharos.py serve` — all importers run at start; **every missing
-   source degrades gracefully**: absent sections serve empty results
+3. `python pharos.py serve` — the importers run at start when a source
+   changed since the last start (an ingest, a scan, a clip measure, an
+   edited index, map, CSV or config, a folder added under a section);
+   `serve --rebuild` forces them. **Every missing source degrades
+   gracefully**: absent sections serve empty results
    (HTTP 200 with `total: 0`), never errors. Verified against a fixture
    library with no audio index, no crawler JSONLs, no manifest packs.
 
@@ -167,8 +170,9 @@ guide: scene-file format, how search results go in, the commands.
 
 One JSON file (`pharos_config.json`, created by init or copied from
 `pharos_config.example.json`): `library_root`, `registry_dir`,
-`previews_dir`, `agent_files`, `thumb_cache_dirs`,
-`extension_status_file`, `network`, `dashboard` curation. The keys
+`previews_dir`, `agent_files`, `extension_status_file`, `network`,
+`dashboard` curation. `PHAROS_CONFIG` names a config outside the
+package. The keys
 `sections`, `scan_folders`, `manifest_roots`, `kitbash_root`,
 `indexer_skip_dirs` and `collection_csv` are written by `ingest` from
 `_Agent_Files/library_map.csv`; change the map, not these keys.
@@ -178,10 +182,9 @@ engines (Blender: `BLENDER_EXE`, then PATH, then the newest version under
 Program Files or /Applications; Unreal: `UE_EXE`), every one of them
 env-overridable. `python pharos.py
 init` defaults the registry and previews to `~/.pharos/`. Asset files are
-never written: the only writes inside the library root are generated index
-files (`<agent_files>/`, plus `library_index.json` / `library_files.jsonl`
-in the audio and texture roots) and the `Exports/` folders the conversion
-pipelines own.
+never written: the only writes inside the library root are the generated
+index files and the library map under `<agent_files>/` and the `Exports/`
+folders the conversion pipelines own.
 
 ## 7. Limits (honest list)
 
@@ -202,35 +205,27 @@ pipelines own.
   only caches webm files); headless servers never render previews.
 - The `pipeline/` index writers refuse to overwrite a live index with a
   near-empty one: `build_agent_index.py` (`models.jsonl`),
-  `build_availability_catalog.py`, `build_kb3d_index.py`, `gen_index.py`,
-  `gen_tex_index.py`, `promote_native.py` and `promote_blends.py` all stop
+  `build_availability_catalog.py`, `build_kb3d_index.py`,
+  `promote_native.py` and `promote_blends.py` stop
   with `FATAL: only N ... -- refusing to overwrite the live index` when a
   result of **fewer than 10 records, and under half of the live index**,
   would replace a live index that holds 10 or more. The guard is
   deliberate (a wrong root once overwrote a real library's index with
   fixture data). A first build, a small library, or one that lost a pack
   or two is written normally.
-- The audio taxonomy cannot be overridden: `classify()` in
-  `pipeline/agent_index/classify.py` consults only its RULES table.
-  Hand-checked re-categorisations of known misfiles exist, but they live
-  in the GITIGNORED `pipeline/agent_index/audio_overrides.json` (kept
-  out of the repo because they carry library-specific file titles) and
-  are loaded by nothing -- no entry there reaches a published category.
 - Two servers on one port: `python pharos.py serve` does not detect an
   already-running instance. The stdlib server allows address reuse, so on
   Windows a second run binds 8765 successfully (observed: two processes
   LISTENING on 8765 at the same time) and which one answers a request is
   not deterministic. Stop the old server first.
 - One library root at a time (by design, owner decision 2026-09-19):
-  pack ids are root-relative (`pack::<folder path>`). Cross-root PRUNING
-  is scoped correctly (indexing root B cannot delete root A's packs),
-  but indexing two roots whose packs share the same relative path
-  overwrites one registry row with the other. Pharos assumes a single
-  `library_root`; point it at one root and keep it there.
+  Pharos assumes a single `library_root`; point it at one root and keep
+  it there. Several unrelated folders are a later phase.
 
 ## 8. Regenerating everything
 
 The SQLite registry is derived data. Delete `assets.sqlite` and run
-`python pharos.py ingest`: it re-runs the scanner and the animation
-indexer, rebuilds the model/kit indexes and every table from the library.
+`python pharos.py ingest`: it measures every model and clip file again
+(cached per folder), rebuilds the model/kit indexes and every table from
+the library.
 Previews re-render on view.

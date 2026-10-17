@@ -159,8 +159,7 @@ def run_doctor(argv=None) -> int:
     else:
         empty_fill = {
             "meshes": 'python service/asset_service/scanner.py "<mesh folder>"',
-            "textures": 'python pharos.py serve (importer runs at startup); '
-                        'or the pipeline/agent_index texture chain',
+            "textures": 'python pharos.py ingest  (or pharos.py serve --rebuild)',
             "audio": 'python service/asset_service/scanner.py "<audio folder>"',
             "collection": "provide the purchase CSV named in "
                           "pharos_config.json (collection_csv)",

@@ -228,58 +228,6 @@ def _jpeg(w=3, h=2):
     return b"\xff\xd8" + sof + b"\xff\xd9"
 
 
-def test_tex_index_self_builds_cache():
-    """gen_tex_index required a hand-made tex_meta.json that NO script
-    produced -- the chain was author-machine-only. The self-builder must
-    create the cache from the root, parse real image dims from headers
-    (PNG/JPEG/GIF/BMP), mark unparseable files as unknown, and reuse the
-    cache on the next run."""
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        tex = tmp / "tex"
-        (tex / "Wood").mkdir(parents=True)
-        (tex / "Metal").mkdir()
-        names = ([f"plank_{i:02d}" for i in range(4)]
-                 + [f"steel_{i:02d}" for i in range(4)])
-        for i, base in enumerate(names):
-            sub = tex / ("Wood" if base.startswith("plank") else "Metal")
-            (sub / f"{base}_albedo.png").write_bytes(_png(1, 1))
-            (sub / f"{base}_normal.png").write_bytes(_png(1, 1))
-        (tex / "Wood" / "odd_dim.jpg").write_bytes(_jpeg(3, 2))
-        (tex / "Metal" / "odd.gif").write_bytes(
-            b"GIF89a" + struct.pack("<HH", 5, 7) + b"\x00\x00;")
-        (tex / "Metal" / "odd.bmp").write_bytes(
-            b"BM" + b"\x00" * 16 + struct.pack("<ii", 9, -4))
-        (tex / "Wood" / "junk.png").write_bytes(b"\x89PNG garbage")
-        r = _run("pipeline/agent_index/gen_tex_index.py", {
-            "AGENT_TEX_ROOT": str(tex),
-            "AGENT_TEX_META": str(tmp / "tex_meta.json"),
-            "PHAROS_CONFIG": str(tmp / "missing.json"),
-        })
-        assert r.returncode == 0, (r.stderr or "")[-400:]
-        assert "cache missing" in (r.stdout or ""), (r.stdout or "")[:300]
-        assert "wrote library_index.json" in (r.stdout or "")
-        files_jsonl = tex / "library_files.jsonl"
-        assert files_jsonl.is_file()
-        assert not (tex / "material_sets.jsonl").exists(), \
-            "material_sets.jsonl is written although nothing reads it"
-        rows = {json.loads(l)["p"]: json.loads(l)
-                for l in files_jsonl.read_text(
-                    encoding="utf-8").splitlines() if l.strip()}
-        assert len(rows) >= 10
-        assert rows["Wood/odd_dim.jpg"]["w"] == 3, rows["Wood/odd_dim.jpg"]
-        assert rows["Metal/odd.gif"]["h"] == 7
-        assert rows["Metal/odd.bmp"]["w"] == 9
-        assert rows["Metal/odd.bmp"]["h"] == 4          # negative height abs
-        assert rows["Wood/junk.png"]["w"] is None       # unknown, never guessed
-        # second run reuses the cache (no rebuild chatter)
-        r2 = _run("pipeline/agent_index/gen_tex_index.py", {
-            "AGENT_TEX_ROOT": str(tex),
-            "AGENT_TEX_META": str(tmp / "tex_meta.json"),
-            "PHAROS_CONFIG": str(tmp / "missing.json"),
-        })
-        assert r2.returncode == 0, (r2.stderr or "")[-300:]
-        assert "cache missing" not in (r2.stdout or "")
 
 
 def _poison_fbx() -> bytes:
@@ -345,7 +293,7 @@ def test_one_table_of_file_kinds():
     assert not (kinds.MODEL & kinds.UNREAL) and not (kinds.MODEL & kinds.BLEND)
     own = re.compile(r'^\s*[A-Z_]*EXTS?\s*=\s*\{\s*"\.', re.M)
     for rel in ("service/asset_service/init.py", "service/asset_service/scanner.py",
-                "service/asset_service/indexer.py",
+                "service/asset_service/measure.py",
                 "pipeline/native/make_native_manifest2.py",
                 "pipeline/agent_index/build_availability_catalog.py",
                 "pipeline/agent_index/build_agent_index.py"):
@@ -458,15 +406,11 @@ def test_templates_have_no_extraction_artifacts():
         data = f.read_bytes()
         assert b"\\\\" not in data, \
             f"{f.name} still carries Python-string escape artifacts"
-    pk = (REPO / "service" / "asset_service" / "templates"
-          / "pack.html").read_text(encoding="utf-8")
-    assert "data-e=" in pk and "setExt('${" not in pk, \
-        "pack page still splices raw ext into inline onclick"
     src = (REPO / "service" / "asset_service" / "browse.py").read_text(
         encoding="utf-8")
-    assert "toggle('${" not in src and "open('${" not in src, \
-        "registry grid still splices pack ids into inline handlers"
-    assert 'data-id="${esc(a.id)}"' in src, "registry grid lost esc/data-id"
+    assert '"""<!doctype' not in src, "a page is still inline in browse.py"
+    for name in ("viewer", "animation", "dashboard", "batchrender", "tags", "setup"):
+        assert (REPO / "service" / "asset_service" / "templates" / f"{name}.html").is_file(), name
 
 
 def test_mcp_db_preflight_and_clip_scope():
@@ -504,17 +448,17 @@ def test_mcp_db_preflight_and_clip_scope():
 
         dbp = Path(tmp) / "t.sqlite"
         conn = sqlite3.connect(str(dbp))
+        from asset_service import clips_import
+        clips_import.ensure_table(conn)
         conn.executescript("""
-        CREATE TABLE assets(id TEXT PRIMARY KEY, name TEXT);
-        CREATE TABLE asset_files(asset_id TEXT, relative_path TEXT);
-        INSERT INTO assets VALUES('pack::Animation/A','A');
-        INSERT INTO assets VALUES('pack::Stuff/B','B');
-        INSERT INTO asset_files VALUES('pack::Animation/A','x.fbx');
-        INSERT INTO asset_files VALUES('pack::Stuff/B','y.fbx');
+        INSERT INTO clips (rel, folder, name, ext, bone_names, facts, measured_at)
+          VALUES ('Animation/A/x.fbx', 'Animation/A', 'x', '.fbx', '[]', '{}', 't');
+        INSERT INTO clips (rel, folder, name, ext, bone_names, facts, measured_at)
+          VALUES ('Stuff/B/y.fbx', 'Stuff/B', 'y', '.fbx', '[]', '{}', 't');
         """)
         conn.commit()
         assert srv._animation_clip_count(conn) == 1, \
-            "clip count must be scoped to pack::Animation/%"
+            "clip count must be scoped to the animation section"
         conn.close()
 
 
@@ -637,42 +581,6 @@ def test_kb3d_key_symmetry():
         kit_key_from_texture_dir("kb3d_Apocalypse.png.2k") == "apocalypse"
 
 
-def test_gen_index_cache_is_root_stamped():
-    """The audio cache had no root stamp: switching roots served the old
-    root's paths into a live index. Now: stamped, --rescan forces, and a
-    root change rescans."""
-    mk = _wav()
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        cache = tmp / "aa_meta.json"
-        roots = []
-        for n in (1, 2):
-            r = tmp / f"aud{n}" / "Alarms"
-            r.mkdir(parents=True)
-            # distinct names per root: the jsonl stores RELATIVE paths, so
-            # same-named files cannot prove which root was served
-            for i in range(12):
-                mk(r / f"root{n}_beep_{i:02d}.wav")
-            roots.append(r.parent)
-        env = {"PHAROS_CONFIG": str(tmp / "missing.json"),
-               "AGENT_AUDIO_META": str(cache)}
-        for n, r in enumerate(roots, 1):
-            e = {**env, "AGENT_AUDIO_ROOT": str(r)}
-            res = _run("pipeline/agent_index/gen_index.py", e)
-            assert res.returncode == 0, (res.stderr or "")[-300:]
-            rows = [json.loads(l) for l in
-                    (r / "library_files.jsonl").read_text(
-                        encoding="utf-8").splitlines() if l.strip()]
-            assert len(rows) >= 10
-            # the served file list must be THIS root's, not the cache's
-            assert all(f"root{n}_beep_" in x["p"] for x in rows), \
-                [x["p"] for x in rows[:3]]
-        # cache carries the stamp of the LAST root; re-running root 1
-        # must detect the mismatch and rescan, not serve root-2 paths
-        res = _run("pipeline/agent_index/gen_index.py",
-                   {**env, "AGENT_AUDIO_ROOT": str(roots[0])})
-        assert res.returncode == 0
-        assert "stale" in (res.stdout or ""), (res.stdout or "")[:200]
 
 
 def _native_copy(dest=None) -> Path:
@@ -752,53 +660,6 @@ def test_native_driver_fails_loudly():
         assert r_ok.returncode == 0, (r_ok.stdout or "")[-200:]
 
 
-def test_indexer_prune_scoped_to_its_root():
-    """Pack rows are root-relative; the prune pass used to delete EVERY
-    row whose hero path was gone -- an offline second root was wiped the
-    moment root A got re-indexed."""
-    from asset_service import indexer
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        dbp = tmp / "reg.sqlite"
-        roots = []
-        for n in ("A", "B"):
-            # DISTINCT relpaths per root: identical ones collide on the
-            # same pack id (the documented multi-root limitation) and
-            # would make this test assert the wrong thing
-            r = tmp / n / "Animation" / f"Packs{n}"
-            r.mkdir(parents=True)
-            (r / f"pack_{n.lower()}.fbx").write_bytes(b"stubfbx")
-            roots.append(tmp / n)
-        indexer.index_root(roots[0], dbp)
-        indexer.index_root(roots[1], dbp)
-        import sqlite3
-        conn = sqlite3.connect(str(dbp))
-        n_before = conn.execute(
-            "SELECT COUNT(*) FROM assets WHERE canonical_root LIKE ?",
-            (f"%/{roots[0].name}",)).fetchone()[0]
-        conn.close()
-        assert n_before >= 1, "root A pack not indexed"
-        # root A goes offline (folder deleted); re-indexing root B must
-        # NOT prune root A's rows
-        import shutil
-        shutil.rmtree(roots[0])
-        indexer.index_root(roots[1], dbp)
-        conn = sqlite3.connect(str(dbp))
-        n_after = conn.execute(
-            "SELECT COUNT(*) FROM assets WHERE canonical_root LIKE ?",
-            (f"%/{roots[0].name}",)).fetchone()[0]
-        conn.close()
-        assert n_after == n_before, \
-            f"root A rows wiped by root B's run: {n_before} -> {n_after}"
-        # but a NEW run against (the now-empty) root A prunes its own
-        roots[0].mkdir()
-        indexer.index_root(roots[0], dbp)
-        conn = sqlite3.connect(str(dbp))
-        n_final = conn.execute(
-            "SELECT COUNT(*) FROM assets WHERE canonical_root LIKE ?",
-            (f"%/{roots[0].name}",)).fetchone()[0]
-        conn.close()
-        assert n_final == 0, "root A's own stale row not pruned"
 
 
 def test_no_replace_checks_the_real_target():
@@ -1214,8 +1075,6 @@ def test_not_indexed_dirs_claims_absolute_sections():
 
 _GUARDED_WRITERS = ("pipeline/agent_index/build_agent_index.py",
                     "pipeline/agent_index/build_availability_catalog.py",
-                    "pipeline/agent_index/gen_index.py",
-                    "pipeline/agent_index/gen_tex_index.py",
                     "pipeline/kitbash/build_kb3d_index.py",
                     "pipeline/native/promote_blends.py",
                     "pipeline/native/promote_native.py")
@@ -1548,14 +1407,6 @@ def test_scan_rows_of_a_later_converted_pack_are_removed():
             f"scan rows after the pack was converted: {names}"
 
 
-def test_tex_index_is_library_neutral():
-    """Release check: the texture index wrote the AUTHOR's folder layout
-    ("4K_Textures_Gumroad holds the bulk ...") into every user's library,
-    sending their agent to a folder that does not exist."""
-    src = (REPO / "pipeline" / "agent_index" / "gen_tex_index.py").read_text(
-        encoding="utf-8")
-    assert "Gumroad" not in src and "earlier downsize" not in src, \
-        "gen_tex_index.py still ships the author's library layout"
 
 
 def test_purchase_csv_headers_people_type():
@@ -1852,20 +1703,16 @@ def test_anim_counts_follow_configured_section():
     with tempfile.TemporaryDirectory() as td:
         dbp = Path(td) / "a.sqlite"
         conn = db.init_db(dbp)
-        packs = {"pack::Mocap/Walks": ("Mocap/Walks/w1.fbx",
-                                       "Mocap/Walks/w2.BVH",
-                                       "Mocap/Walks/notes.txt"),
-                 "pack::Mocap": ("Mocap/loose.fbx",),
-                 "pack::Props/Crates": ("Props/Crates/crate.fbx",)}
-        for pid, files in packs.items():
+        from asset_service import clips_import
+        clips_import.ensure_table(conn)
+        for rel, folder in (("Mocap/Walks/w1.fbx", "Mocap/Walks"),
+                            ("Mocap/Walks/w2.BVH", "Mocap/Walks"),
+                            ("Mocap/loose.fbx", "Mocap"),
+                            ("Props/Crates/crate.fbx", "Props/Crates")):
             conn.execute(
-                "INSERT INTO assets (id, name, canonical_root, "
-                "hero_file_path, domain, sub_category, content_hash) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (pid, pid[6:], td, files[0], "Props", "Misc", pid))
-            conn.executemany(
-                "INSERT INTO asset_files (asset_id, relative_path, file_type)"
-                " VALUES (?,?,?)", [(pid, f, "anim") for f in files])
+                "INSERT INTO clips (rel, folder, name, ext, bone_names, facts, measured_at) "
+                "VALUES (?,?,?,?,'[]','{}','t')",
+                (rel, folder, rel.rsplit("/", 1)[-1].rsplit(".", 1)[0], rel[-4:].lower()))
         conn.execute("CREATE TABLE meshes (pack TEXT, max_dim REAL)")
         conn.executemany("INSERT INTO meshes VALUES (?,?)",
                          [("P", None), ("P", 0), ("P", 1.5)])

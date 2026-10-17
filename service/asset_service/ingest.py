@@ -13,7 +13,7 @@ never asked again.
 What runs AUTOMATICALLY (no engine, no consent needed):
     scanner.py   on every included 3d-assets folder AND on the audio section
                  (when no crawl index exists yet)
-    indexer.py   on the library root (animation clip packs)
+    measure.py   --clips on the animation section (the clips table)
     agent index  build_agent_index.py / build_kb3d_index.py when a converted
                  pack's Exports manifest is newer than its _Agent_Files index
                  (detected manifest roots are ADDED to pharos_config.json)
@@ -26,8 +26,6 @@ these are printed as QUESTIONS for the running agent to relay:
     chain 1      UE pack crawl (needs UE 5.x + the local sandbox)
     chain 2      KitBash3D kit export (needs Blender; restructures nothing)
     chain 3      .blend / native container enumeration (needs Blender)
-    chain 4      richer audio/texture indexes from file and folder names
-                 (pure Python, minutes; writes index files into those sections)
 
 Safety: same rules as the app -- the library is read-only except
 _Agent_Files/ and Exports/; the registry is derived data; scanner rows
@@ -214,9 +212,6 @@ def run_ingest(argv=None) -> int:
         failed_steps += 1 if _run([py, str(
             Path(REPO) / "service" / "asset_service" / "measure.py"),
             "--clips", str(root / _section("animation"))], dry) else 0
-        failed_steps += 1 if _run([py, str(
-            Path(REPO) / "service" / "asset_service" / "indexer.py"),
-            "--root", str(root)], dry) else 0
     else:
         print("\n  animation: no clip folder detected -- skipping the clip measure")
 
@@ -364,6 +359,7 @@ def run_ingest(argv=None) -> int:
         return 4
     try:
         db.stamp_registry(config.DB_PATH, root)    # this library's registry
+        db.touch_sources(config.DB_PATH)           # the server imports again
     except Exception as exc:                              # noqa: BLE001
         print(f"  registry stamp skipped: {exc}", flush=True)
     try:
@@ -376,17 +372,10 @@ def run_ingest(argv=None) -> int:
                     f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
             except sqlite3.OperationalError:
                 totals[tbl] = 0
-        try:      # the clips table, else the legacy pack table
+        try:
             anim = conn.execute("SELECT COUNT(*) FROM clips").fetchone()[0]
         except sqlite3.OperationalError:
             anim = 0
-        if not anim:
-            try:
-                anim = conn.execute(
-                    "SELECT COUNT(*) FROM assets WHERE id LIKE 'pack::%'"
-                ).fetchone()[0]
-            except sqlite3.OperationalError:
-                anim = 0
         conn.close()
     except Exception:                                     # noqa: BLE001
         return 0

@@ -120,6 +120,8 @@ def write_clips(db_path, root, section, verbose: bool = False) -> tuple:
         conn.commit()
     finally:
         conn.close()
+    from asset_service import db
+    db.touch_sources(db_path)
     return len(rows), stats
 
 

@@ -12,7 +12,18 @@ import os
 import sys
 from pathlib import Path
 
-_CONFIG_FILE = Path(__file__).resolve().parent / "pharos_config.json"
+# PHAROS_CONFIG points the whole app at a config outside the package
+# (several libraries on one machine, a config kept with the registry)
+_CONFIG_FILE = Path(os.environ.get("PHAROS_CONFIG") or
+                    Path(__file__).resolve().parent / "pharos_config.json").resolve()
+if os.environ.get("PHAROS_CONFIG"):
+    # the children this process starts (init, ingest, doctor) must read
+    # the same file whatever their working directory
+    os.environ["PHAROS_CONFIG"] = str(_CONFIG_FILE)
+if os.environ.get("PHAROS_CONFIG"):
+    # the children this process starts (init, ingest, doctor) must read
+    # the same file whatever their working directory
+    os.environ["PHAROS_CONFIG"] = str(_CONFIG_FILE)
 
 # Machine-neutral defaults: the roots start EMPTY and are filled by init
 # or by hand. Section names are just relative folder names — importers
@@ -28,12 +39,11 @@ _DEFAULTS = {
         "collection": "Collected Files",
     },
     "agent_files": "_Agent_Files",
-    # external thumbnail cache dir NAMES mirrored into the thumb index
-    # (e.g. a host library app's caches); empty = no thumbnail mirroring
-    "thumb_cache_dirs": [],
-    # optional path to a host-app extension status file (shown on /registry)
+    # optional path to a host-app extension status file (echoed as
+    # extension_status by /api/stats)
     "extension_status_file": "",
-    # extra top-level dir names the pack indexer must skip
+    # top-level folders the native chain and the scanner skip; written
+    # by ingest from the library map
     "indexer_skip_dirs": [],
     # directories whose CHILDREN may carry Exports/manifest.json (pack
     # exports) or Exports/kit_manifest.json (kit exports) produced by the
@@ -41,7 +51,7 @@ _DEFAULTS = {
     "manifest_roots": [],
     "network": {"host": "127.0.0.1", "port": 8765},
     # optional dashboard curation; every value may be empty, pages fall
-    # back to generic picks (thumb index / first available image)
+    # back to generic picks (the first available image)
     "dashboard": {
         "animation_hero": "",
         "asset_hero_names": [],
@@ -114,22 +124,20 @@ MANIFEST_ROOTS: list = []
 
 def _bind(cfg: dict) -> None:
     """Derive every root from `cfg` into the module globals."""
-    global _CFG, LIBRARY_ROOT, REGISTRY_DIR, DB_PATH, PREVIEW_DIR, SECTIONS
-    global AGENT_FILES, THUMB_CACHE_DIRS, EXTENSION_STATUS_FILE, INDEXER_SKIP_DIRS
+    global _CFG, LIBRARY_ROOT, DB_PATH, PREVIEW_DIR, SECTIONS
+    global AGENT_FILES, EXTENSION_STATUS_FILE
     global NETWORK, DASHBOARD, TEX_ROOT, AUDIO_ROOT, COLLECTION_ROOT, CSV_PATH
     global AVAILABILITY_JSONL
     _CFG = cfg
     LIBRARY_ROOT = Path(cfg["library_root"] or ".").resolve()
-    REGISTRY_DIR = Path(cfg["registry_dir"] or ".").resolve()
-    DB_PATH = str(REGISTRY_DIR / "assets.sqlite")
+    registry_dir = Path(cfg["registry_dir"] or ".").resolve()
+    DB_PATH = str(registry_dir / "assets.sqlite")
     # previews default to a sibling of the registry DB (both are derived data)
-    PREVIEW_DIR = Path(cfg["previews_dir"] or (REGISTRY_DIR / "previews")).resolve()
+    PREVIEW_DIR = Path(cfg["previews_dir"] or (registry_dir / "previews")).resolve()
     SECTIONS = cfg["sections"]
     AGENT_FILES = (LIBRARY_ROOT / cfg["agent_files"]).resolve()
     MANIFEST_ROOTS[:] = [Path(r).resolve() for r in cfg["manifest_roots"]]
-    THUMB_CACHE_DIRS = list(cfg["thumb_cache_dirs"])
     EXTENSION_STATUS_FILE = cfg["extension_status_file"]
-    INDEXER_SKIP_DIRS = list(cfg["indexer_skip_dirs"])
     NETWORK = cfg["network"]
     DASHBOARD = cfg["dashboard"]
     # per-section absolute roots

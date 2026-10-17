@@ -599,6 +599,7 @@ def main(argv=None) -> int:
         # rows from a folder OUTSIDE the library root must not make this
         # registry read as foreign later: stamp it for this library now
         _db.stamp_registry(dbp, config.LIBRARY_ROOT)
+        _db.touch_sources(dbp)
     mode = "DRY RUN — nothing written" if args.dry_run else "written to registry"
     print(f"\n{mode}")
     print(f"  meshes:        {summary['meshes']}")

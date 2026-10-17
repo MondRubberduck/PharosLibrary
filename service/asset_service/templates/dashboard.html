@@ -1,0 +1,48 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>Library — Dashboard</title><style>
+:root{--bg:#14161a;--fg:#dfe3ea;--dim:#8b93a1}
+*{box-sizing:border-box}body{margin:0;font:15px/1.4 system-ui;background:var(--bg);color:var(--fg);height:100vh;overflow:hidden;display:flex}
+a.tile{position:relative;flex:1;overflow:hidden;display:block;text-decoration:none;color:var(--fg)}
+a.tile img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+filter:grayscale(.85) brightness(.5);transition:filter .3s ease,transform .3s ease;transform:scale(1.001)}
+a.tile:hover img{filter:grayscale(0) brightness(1);transform:scale(1.06)}
+.edge{position:absolute;inset:0;pointer-events:none;transition:opacity .3s}
+.l .edge{background:linear-gradient(to right,var(--bg),transparent 14%),
+ linear-gradient(to top,var(--bg),transparent 12%),linear-gradient(to bottom,var(--bg),transparent 12%)}
+.m .edge{background:linear-gradient(to right,var(--bg),transparent 12%),
+ linear-gradient(to left,var(--bg),transparent 12%),
+ linear-gradient(to top,var(--bg),transparent 12%),linear-gradient(to bottom,var(--bg),transparent 12%)}
+.r .edge{background:linear-gradient(to left,var(--bg),transparent 14%),
+ linear-gradient(to top,var(--bg),transparent 12%),linear-gradient(to bottom,var(--bg),transparent 12%)}
+.label{position:absolute;left:34px;bottom:30px;text-shadow:0 2px 14px #000}
+.m .label{left:50%;transform:translateX(-50%);text-align:center}
+.r .label{left:auto;right:34px;text-align:right}
+.label h1{font-size:36px;margin:0 0 4px;letter-spacing:.02em}
+.label span{color:var(--dim);font-size:14px}
+.cut{position:absolute;top:0;bottom:0;width:2px;background:var(--bg);z-index:3}
+</style></head><body>
+<a class="tile l" href="/animation">
+ <img src="{{ANIM_THUMB}}" alt="" onerror="this.style.opacity=0">
+ <div class="edge"></div>
+ <div class="label"><h1>Animations</h1><span>{{ANIM_CLIPS}} clips · {{ANIM_FOLDERS}} folders · live 3D preview</span></div>
+</a>
+<a class="tile m" href="/assets">
+ <img src="{{ASSET_THUMB}}" alt="" onerror="this.style.opacity=0">
+ <div class="edge"></div>
+ <div class="label"><h1>Assets</h1><span>{{ASSET_PACKS}} purchases · galleries · store links</span></div>
+</a>
+<a class="tile m" href="/textures">
+ <img src="{{TEX_THUMB}}" alt="" onerror="this.style.opacity=0">
+ <div class="edge"></div>
+ <div class="label"><h1>Textures</h1><span>{{TEX_COUNT}} texture sets · 4K maps · local files</span></div>
+</a>
+<a class="tile r" href="/audio">
+ <img src="{{AUDIO_THUMB}}" alt="" onerror="this.style.opacity=0">
+ <div class="edge"></div>
+ <div class="label"><h1>Audio</h1><span>{{AUDIO_COUNT}} sounds · {{AUDIO_HOURS}}h · click to preview</span></div>
+</a>
+<div class="cut" style="left:25%"></div><div class="cut" style="left:50%"></div>
+<div class="cut" style="left:75%"></div>
+<a href="/tags" style="position:fixed;bottom:6px;right:66px;font-size:12px;letter-spacing:.04em;color:#8b93a1;text-decoration:none;z-index:9">pack tags</a>
+
+</body></html>

@@ -101,14 +101,18 @@ def _animation_clip_count(conn: sqlite3.Connection) -> int:
 @mcp.tool()
 def pharos_stats() -> str:
     """Get a library overview: total counts per section (meshes, textures,
-    audio, collection, animations). Call this FIRST to understand scale.
+    audio, collection, animations; `packs` = the library map's indexed
+    folders). Call this FIRST to understand scale.
     Doctrine for everything you find: prefer assets already in the
     library; owned-not-downloaded -> ask the user (requisition list,
     never silent substitution); absent -> model it yourself and SAY SO
     in your report."""
     conn = _db()
     try:
-        packs = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+        try:
+            packs = conn.execute("SELECT COUNT(*) FROM folders WHERE include = 1").fetchone()[0]
+        except sqlite3.OperationalError:
+            packs = 0
         meshes = conn.execute("SELECT COUNT(*) FROM meshes").fetchone()[0]
         textures = conn.execute("SELECT COUNT(*) FROM textures").fetchone()[0]
         audio = conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]

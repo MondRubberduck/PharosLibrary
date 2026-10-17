@@ -1,8 +1,8 @@
 """Import a purchase-crawler CSV into the `collection` table.
 
-This is the ground truth for the Assets section -- detached from the
-pack indexing (the `assets`/`asset_files` tables stay the source for
-the Animation page only).
+This is the ground truth for the purchases section, an optional module:
+a library without a purchase CSV has no `collection` rows and no
+purchases page.
 
 CSV: <library_root>/<collection section>/<collection_csv> -- the filename
 comes from config.CSV_PATH, whose default is the owner-library name

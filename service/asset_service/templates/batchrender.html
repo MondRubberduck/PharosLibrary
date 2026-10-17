@@ -1,0 +1,148 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Batch preview renderer</title>
+<style>body{background:#111;color:#eee;font:15px monospace;padding:24px}
+#big{font-size:26px;color:#7cc4ff;margin-bottom:14px}
+#bar{height:14px;background:#222;border-radius:7px;overflow:hidden;margin-bottom:14px;max-width:900px}
+#bar i{display:block;height:100%;background:#6ea8fe;width:0%}
+.err{color:#ff8a8a}.ok{color:#7dff9b}div.e{margin:2px 0}</style>
+<script type="importmap">
+{"imports":{"three":"/static/three.module.js","three/addons/":"/static/jsm/"}}
+</script>
+<script>window.__errs=[];window.addEventListener('error',e=>window.__errs.push(String(e.message||e).slice(0,200)));window.addEventListener('unhandledrejection',e=>window.__errs.push('REJ: '+String(e.reason&&(e.reason.message||e.reason)).slice(0,200)));</script></head><body>
+<h2>batch preview renderer &mdash; 4 parallel lanes, 2x recording</h2>
+<div id="big">starting&hellip;</div><div id="bar"><i></i></div><div id="log"></div>
+<script type="module">
+import * as THREE from 'three';
+import {FBXLoader} from 'three/addons/loaders/FBXLoader.js';
+const $=id=>document.getElementById(id);
+const big=$('big'),bar=$('bar').firstElementChild,logEl=$('log');
+const el=(t,cls)=>{const d=document.createElement('div');if(cls)d.className=cls;d.textContent=t;logEl.appendChild(d);if(logEl.children.length>12)logEl.firstChild.remove();return d;};
+const PW=480,PH=270,FPS=30,MAXDUR=6,SPEED=2,DUMMY="{{RIG_REL}}";  // from the server; '' = no rig
+const RATE=(1/SPEED).toFixed(3);
+function loadF(rel,dir){
+ const L=new FBXLoader();
+ L.setResourcePath('/res/'+encodeURIComponent(dir)+"/");
+ return new Promise((res,rej)=>L.load("/file?path="+encodeURIComponent(rel),res,undefined,rej));}
+async function makeLane(i){
+ if(!DUMMY)throw new Error("no retarget rig in this library");
+ const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
+ renderer.setSize(PW,PH);renderer.setPixelRatio(1);
+ const scene=new THREE.Scene();
+ scene.background=new THREE.Color(0x101216);
+ scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.9));
+ const key=new THREE.DirectionalLight(0xffffff,2.8);key.position.set(3,6,4);scene.add(key);
+ const fill=new THREE.DirectionalLight(0xcfe0ff,1.1);fill.position.set(-4,2,5);scene.add(fill);
+ const dummy=await loadF(DUMMY,DUMMY.split("/").slice(0,-1).join("/"));
+ const bind=new Map();
+ dummy.traverse(o=>{if(o.isBone||o===dummy)bind.set(o,[o.position.clone(),o.quaternion.clone(),o.scale.clone()]);});
+ return {renderer,scene,dummy,bind};}
+function pfit(cam,holder){
+ holder.updateMatrixWorld(true);
+ const box=new THREE.Box3().setFromObject(holder);
+ if(box.isEmpty())return;
+ const s=box.getSize(new THREE.Vector3()),c=box.getCenter(new THREE.Vector3());
+ const r=Math.max(s.x,s.y,s.z)||1;
+ cam.near=r/100;cam.far=r*40;cam.updateProjectionMatrix();
+ cam.position.copy(c).add(new THREE.Vector3(r*1.1,r*0.8,r*1.9));
+ cam.lookAt(c);}
+async function renderPreview(rel,lane){
+ const {renderer,dummy,bind}=lane;
+ dummy.traverse(o=>{const b=bind.get(o);
+  if(b){o.position.copy(b[0]);o.quaternion.copy(b[1]);o.scale.copy(b[2]);}});
+ const obj=await loadF(rel,rel.split("/").slice(0,-1).join("/"));
+ const clips=obj.animations||[];
+ if(!clips.length)throw new Error("no animation in file");
+ let root=obj,hasMesh=false,helper=null;
+ obj.traverse(o=>{if(o.isMesh)hasMesh=true;});
+ if(!hasMesh){
+  const db=new Set();dummy.traverse(o=>{if(o.isBone)db.add(o.name);});
+  const cb=new Set();
+  for(const t of clips[0].tracks){const m=t.name.match(/bones\[([^\]]+)\]/);cb.add(m?m[1]:t.name.split(".")[0]);}
+  let common=0;for(const b of cb)if(db.has(b))common++;
+  if(common>=6)root=dummy;else helper=obj;}
+ if(root===obj&&!hasMesh)helper=obj;
+ const fixMeshes=o=>{o.traverse(n=>{
+  if(n.isMesh){n.frustumCulled=false;
+   const mats=Array.isArray(n.material)?n.material:[n.material];
+   for(const m of mats){if(!m.map&&(!m.color||m.color.getHex()===0))m.color=new THREE.Color(0xb8c0cc);
+     if(m.map)m.color=new THREE.Color(0xffffff);}}});};
+ fixMeshes(root);
+ const scene=new THREE.Scene();
+ scene.background=new THREE.Color(0x101216);
+ scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.9));
+ const key=new THREE.DirectionalLight(0xffffff,2.8);key.position.set(3,6,4);scene.add(key);
+ const fill=new THREE.DirectionalLight(0xcfe0ff,1.1);fill.position.set(-4,2,5);scene.add(fill);
+ const holder=new THREE.Group();holder.add(root);scene.add(holder);
+ if(helper)holder.add(new THREE.SkeletonHelper(helper));
+ root.rotation.set(-Math.PI/2,0,0);
+ root.updateMatrixWorld(true);
+ let head=null,hip=null;
+ root.traverse(o=>{if(o.isBone){const n=o.name.toLowerCase();
+   if(!head&&n.includes("head"))head=o;if(!hip&&/pelvis|hips/.test(n))hip=o;}});
+ if(head&&hip){const v=head.getWorldPosition(new THREE.Vector3()).sub(hip.getWorldPosition(new THREE.Vector3()));
+   const ax=Math.abs(v.x),ay=Math.abs(v.y),az=Math.abs(v.z);
+   if(v.y<0&&ay>=ax&&ay>=az)holder.rotation.z+=Math.PI;
+   else if(az>ay&&az>=ax)holder.rotation.x+=(v.z>0?-Math.PI/2:Math.PI/2);
+   else if(ax>ay&&ax>=az)holder.rotation.z+=(v.x>0?Math.PI/2:-Math.PI/2);}
+ const cam=new THREE.PerspectiveCamera(40,PW/PH,0.01,1e7);
+ pfit(cam,holder);
+ const clip=clips[0];
+ const mixer=new THREE.AnimationMixer(root);
+ mixer.clipAction(clip).play();
+ const dur=Math.min(clip.duration||3,MAXDUR);
+ const mime=["video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"]
+   .find(m=>window.MediaRecorder&&MediaRecorder.isTypeSupported(m));
+ if(!mime)throw new Error("MediaRecorder/webm unsupported");
+ const stream=renderer.domElement.captureStream(FPS);
+ const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:1500000});
+ const chunks=[];rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
+ const stopped=new Promise(res=>rec.onstop=res);
+ rec.start(100);
+ let mixT=0;const t0=performance.now();
+ await new Promise(res=>{
+  (function step(){
+   const wallTotal=Math.max(1.0,dur/SPEED);
+   mixT=(performance.now()-t0)/1000;
+   if(mixT>=wallTotal||mixT>wallTotal*6+2){res();return;}
+   mixer.setTime((mixT*SPEED)%dur);
+   holder.updateMatrixWorld(true);
+   renderer.render(scene,cam);
+   requestAnimationFrame(step);})();
+ });
+ rec.stop();await stopped;
+ const blob=new Blob(chunks,{type:"video/webm"});
+ if(blob.size<1024)throw new Error("recording empty ("+blob.size+"B)");
+ const r=await fetch("/api/preview/store?clip="+encodeURIComponent(rel)+"&rate="+RATE,
+   {method:"POST",body:blob});
+ if(!r.ok)throw new Error("store failed: "+r.status);
+ scene.remove(holder);}
+async function main(){
+ let todo=[];
+ try{
+  for(let p=1;;p++){
+   const d=await(await fetch("/api/anim/clips?page="+p+"&size=120")).json();
+   for(const c of d.clips)if(!c.preview)todo.push({rel:c.rel,title:c.title});
+   if(p*120>=d.total||d.clips.length===0)break;}
+ }catch(e){big.textContent="cannot list clips: "+(e&&e.message||e);return;}
+ const total=todo.length;
+ if(!total){big.textContent="nothing to do -- every clip already has a preview.";return;}
+ big.textContent="0 / "+total;
+ const lanes=(await Promise.all([0,1,2,3].map(i=>makeLane(i).catch(e=>{
+   el("lane "+i+" unavailable: "+(e&&e.message||e),"err");return null;})))).filter(Boolean);
+ if(!lanes.length){   // no lane = every clip failed, never "DONE, 0 failed"
+  big.textContent="FAILED — 0 rendered, "+total+" failed (of "+total+"): no render lane started. "
+   +"The /animation page renders bones-only previews without a rig.";return;}
+ el(lanes.length+" parallel lanes running (2x recording speed)");
+ let done=0,failed=0,cursor=0;
+ async function worker(lane){
+  while(cursor<todo.length){
+   const item=todo[cursor++];
+   try{await renderPreview(item.rel,lane);done++;
+    if(done%5===0)el("ok: "+item.title,"ok");}
+   catch(e){failed++;el("FAIL "+item.title+" -- "+(e&&e.message||e),"err");}
+   big.textContent=done+" rendered · "+failed+" failed · "+total+" total";
+   bar.style.width=Math.round((done+failed)/total*100)+"%";}}
+ await Promise.all(lanes.map(l=>worker(l)));
+ big.textContent="DONE — "+done+" rendered, "+failed+" failed (of "+total+"). You can close this tab.";
+ el("all done — previews are cached on disk and show on the animation page","ok");}
+main();
+</script></body></html>

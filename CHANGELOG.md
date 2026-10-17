@@ -2,6 +2,15 @@
 
 ## Unreleased (towards 1.0)
 
+Phase 4 of the 1.0 plan: slim down.
+
+- **The Kiosk-era pack layer is gone.** The `assets` / `asset_files` / FTS tables, the pack indexer and its two-tier classifier, the `/registry` and `/pack` pages, `/api/packs`, `/api/pack_files`, `/api/retag`, `/api/pack_source` and the host-app thumbnail mirror. The clips and folders tables answer everything those did: the animation pages, the tags page, the dashboard, doctor, the agent docs and the MCP tools read them. A registry that still carries the old tables drops them at the next start (schema 6). The owner's domain and style words live in `library_map.py`; the vendor of a folder comes from its name.
+- **Warm start.** The server runs its importers only when a source changed since the last start (an ingest, a scan, a clip measure, an edited index, map, CSV or config): a warm start takes well under a second instead of ten; `pharos.py serve --rebuild` forces the importers.
+- **HTML out of the server.** The viewer, animation, dashboard and batch-renderer pages are templates; `browse.py` lost 1,200 lines.
+- **Retired with their readers:** `pipeline/agent_index/classify.py`, `gen_index.py`, `gen_tex_index.py` (a `library_index.json` left in a section by an earlier crawl is still read as optional category data), `docs/AGENT_SETUP_BRIEF.md` and `docs/STARTING_PROMPT.md` (the README's paste prompt and `docs/AGENT_SETUP.md` are the setup documents; `AGENT_PLAYBOOK.md` keeps the build doctrine).
+- **Packaging.** `pyproject.toml` with the `pharos` console script; `PHAROS_CONFIG` points the app at a config outside the package.
+- Not in this phase: relative paths in the registry and the per-node materials table (the registry size target), the split of `browse.py` into route/search/file modules, and the pipeline scratch files outside the repo. Listed as follow-ups.
+
 Phase 3 of the 1.0 plan: knowing more.
 
 - **One measure for every model and clip file** (`measure.py`, standard library, every FBX version, OBJ, glTF/GLB, STL, BVH): size and placement corners in metres, triangles, vertices, materials, UV layers, skin and bones, LOD level and group, collision hulls, variant group, the file's units and up axis (a Y-up file with a mesh turned about X keeps its Z-up geometry: height stays height), the pivot class (`base-centre`, `corner`, `centre`, `top`, `outside`), animation stacks with duration, fps and frames, a root-motion flag, whether a clip file also carries a mesh, a scale warning. Cached per folder under `_Agent_Files/index/` by size and mtime: a re-scan reads only changed files (176 clips: 6 s, then 0.04 s). The scanner takes its geometry from it; `pharos.py measure <file>` prints a record.

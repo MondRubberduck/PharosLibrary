@@ -17,7 +17,7 @@ One row per folder the survey or the owner looked at. Columns:
     confirmed       x once the owner confirmed the row (or the survey KNEW)
     name            display name
     photorealistic / stylized / low_poly   x = the pack's look
-    domain          one of auto_classifier.DOMAINS, or empty
+    domain          one of DOMAINS below, or empty
     tags            the owner's words, comma separated
     note            free text
 
@@ -42,7 +42,12 @@ from pathlib import Path
 
 from . import config
 from . import textmatch as tm
-from .auto_classifier import DOMAINS
+
+# the owner's domain words (the map's `domain` column and the pages'
+# dropdown) and the look words beside the style markers
+DOMAINS = ("Human Animations", "Archviz", "Props", "Environment",
+           "Characters", "Textures_HDRI")
+STYLES = ("Photorealistic", "Stylized", "Neutral/Unclassified")
 from .survey import DECISIONS, KINDS, survey
 
 FILE = "library_map.csv"

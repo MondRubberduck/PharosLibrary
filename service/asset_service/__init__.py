@@ -3,14 +3,12 @@
 Modules:
     agent_docs          Generate markdown documentation for AI agents
     audio_import        Audio crawler / scanner importer
-    auto_classifier     2-tier non-destructive auto-categorizer
     browse              Localhost web UI and REST API
     collection_import   Collection CSV metadata importer
     config              Library configuration and directory paths
     db                  SQLite schema, FTS5 search, migrations
     fbx_dims            Bounding box and dimension extraction for FBX
     imgmeta             Image pixel size from header bytes; map role of a file name
-    indexer             Crawler and registry filler
     init                Initial library setup and auto-configuration
     meshes_import       Mesh manifest importer and linker
     scanner             Direct disk scanner for meshes and audio

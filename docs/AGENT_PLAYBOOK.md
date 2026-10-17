@@ -12,45 +12,13 @@ Phase 2 only with their answers.
 
 ---
 
-## PHASE 1 — INITIAL SETUP (learn the system, crawl, then INTERVIEW)
+## PHASE 1 — SETUP
 
-The goal is not "run the commands"; it is that BOTH of you know what
-exists. Do not skip the interview — a user who was never asked is a
-user who cannot trust the result.
-
-1. **Learn the system first** (≤ 10 minutes):
-   - `docs/CAPABILITIES.md` (what can/cannot be done — the honest list)
-   - `pipeline/README.md` (which chain needs which engine)
-   - the generated `AGENT_START_HERE.md` + `AGENT_API.md` in the library
-     (if absent: run Phase-1 step 2 first, then `python pharos.py docs`)
-2. **Onboard + crawl** (full contract: `docs/STARTING_PROMPT.md` +
-   `docs/AGENT_SETUP.md`; the decisions live in the library map,
-   `_Agent_Files/library_map.csv`):
-   - `python pharos.py doctor`, then `python pharos.py init "<library
-     root>"` — read its library-map summary; correct a wrong row with
-     `python pharos.py map set "<folder>" kind=<kind> include=yes
-     confirmed=yes` (or on the server's `/tags` page). Never edit
-     `sections` / `scan_folders` in `pharos_config.json`: `ingest`
-     rewrites them from the map.
-   - `python pharos.py ingest` — runs the scanner, the animation indexer,
-     the model/kit index builds and every importer, rewrites the agent
-     docs, and prints the ASK YOUR USER block. Record every answer with
-     `python pharos.py map set "<folder>" action=<answer>`.
-   - Start the server and READ the startup banner: it ends with
-     `INGESTION COMPLETE -- collection=N textures=N audio=N meshes=N`
-     plus a `NOT INDEXED` list. That banner is the definition of
-     "ingestion is done" — relay it to your user verbatim.
-3. **INTERVIEW the user** (mandatory — do not build anything yet):
-   - "These folders were NOT indexed: … — should I scan/ignore them?"
-   - "Are these ALL your assets, or is there more on other drives?"
-   - "Crawl the Unreal packs for material recipes? (needs UE installed;
-     ~minutes per pack)" — only if `.uasset` content exists.
-   - "Do you have a purchase CSV for the Assets section?"
-   - "Animation previews render once in a browser tab — OK?"
-   - Report the final counts and get an explicit "yes, that's
-     everything" before Phase 2.
-
----
+The setup contract is `docs/AGENT_SETUP.md`: pick the library (the
+setup page or `pharos.py init`), show the user what the survey found,
+record the decisions in the library map, index, reach `doctor` READY.
+Nothing with an engine runs without the user's decision in the map. Do
+not build anything before the user confirmed the counts.
 
 ## PHASE 2 — BUILD (the doctrine)
 

@@ -1,13 +1,14 @@
 """SQLite registry schema for the Pharos asset library.
 
-Tables:
-    assets       one row per logical asset pack; the entire virtual taxonomy
-                 (style / domain / sub_category / confidence) lives here --
-                 classification is virtual, files on disk are never touched
-    asset_files  physical files belonging to a pack (meshes, anims, textures,
-                 .uasset, licenses, archives)
-    assets_fts   FTS5 full-text index over name/vendor/taxonomy/tags, kept in
-                 sync with `assets` via triggers
+The registry is derived data, rebuilt from the library by the importers:
+    meshes / meshes_parked   one row per model (scanner, Blender, manifests)
+    textures, audio          the texture sets and sounds
+    clips                    one row per animation clip (clips_import)
+    folders                  the library map's nodes with measured facts
+    collection               the purchase catalogue (optional)
+    registry_meta            which library it belongs to, the source stamps
+The Kiosk-era pack tables (assets, asset_files, assets_fts) are dropped
+at the first start of a registry that still carries them.
 
 Safety: this module only ever writes to the registry database under the
 configured registry dir -- never to files under the canonical asset roots.
@@ -19,111 +20,30 @@ CLI:
 
 from __future__ import annotations
 
-import json
-import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from asset_service import config
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Optional
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
-STYLE_VALUES = ("Photorealistic", "Stylized", "Neutral/Unclassified")
-DOMAIN_VALUES = (
-    "Human Animations",
-    "Archviz",
-    "Props",
-    "Environment",
-    "Characters",
-    "Textures_HDRI",
-)
-# Statuses an agent may set itself; 'human_verified' / 'validated_*' transitions
-# are reserved for the human owner.
-VALIDATION_STATUSES = ("auto_tagged", "needs_review", "flagged")
-ASSET_STATUSES = ("indexed", "broken")
-
+# The registry holds derived data only: meshes, textures, audio, clips,
+# folders (built by their importers), collection (optional) and
+# registry_meta (which library it belongs to, the source stamps).
 SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS assets (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    canonical_root TEXT NOT NULL,
-    hero_file_path TEXT NOT NULL,
-    vendor TEXT,
-    license_path TEXT,
-    license_status TEXT,
-
-    -- Virtual taxonomy (projection only; disk stays untouched)
-    style TEXT CHECK (style IN ('Photorealistic', 'Stylized', 'Neutral/Unclassified')),
-    domain TEXT NOT NULL,
-    sub_category TEXT NOT NULL,
-    confidence_score REAL,
-    validation_status TEXT DEFAULT 'auto_tagged',
-
-    -- Technical & DCC (host_* fields mirror the host library app's own
-    -- categorization where one was imported from)
-    formats TEXT,
-    targets TEXT,
-    technical_meta TEXT,
-    host_category TEXT,
-    host_tags TEXT,
-    host_thumbnail_path TEXT,
-
-    unreal_recipe TEXT,
-    blender_recipe TEXT,
-    status TEXT DEFAULT 'indexed',
-    content_hash TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS asset_files (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE,
-    relative_path TEXT NOT NULL,
-    file_type TEXT NOT NULL,
-    file_size INTEGER,
-    sha256 TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_assets_domain        ON assets(domain);
-CREATE INDEX IF NOT EXISTS idx_assets_style         ON assets(style);
-CREATE INDEX IF NOT EXISTS idx_assets_vendor        ON assets(vendor);
-CREATE INDEX IF NOT EXISTS idx_assets_status        ON assets(status);
-CREATE INDEX IF NOT EXISTS idx_asset_files_asset   ON asset_files(asset_id);
-
--- Full-text search over the taxonomy-facing columns. `assets` is a plain
--- rowid table (TEXT primary key), so external-content FTS5 can hang off rowid.
-CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
-    name, vendor, style, domain, sub_category, host_tags, hero_file_path,
-    content='assets', content_rowid='rowid'
-);
-
-CREATE TRIGGER IF NOT EXISTS assets_fts_ai AFTER INSERT ON assets BEGIN
-    INSERT INTO assets_fts(rowid, name, vendor, style, domain, sub_category,
-                           host_tags, hero_file_path)
-    VALUES (new.rowid, new.name, new.vendor, new.style, new.domain,
-            new.sub_category, new.host_tags, new.hero_file_path);
-END;
-
-CREATE TRIGGER IF NOT EXISTS assets_fts_ad AFTER DELETE ON assets BEGIN
-    INSERT INTO assets_fts(assets_fts, rowid, name, vendor, style, domain,
-                           sub_category, host_tags, hero_file_path)
-    VALUES ('delete', old.rowid, old.name, old.vendor, old.style, old.domain,
-            old.sub_category, old.host_tags, old.hero_file_path);
-END;
-
-CREATE TRIGGER IF NOT EXISTS assets_fts_au AFTER UPDATE ON assets BEGIN
-    INSERT INTO assets_fts(assets_fts, rowid, name, vendor, style, domain,
-                           sub_category, host_tags, hero_file_path)
-    VALUES ('delete', old.rowid, old.name, old.vendor, old.style, old.domain,
-            old.sub_category, old.host_tags, old.hero_file_path);
-    INSERT INTO assets_fts(rowid, name, vendor, style, domain, sub_category,
-                           host_tags, hero_file_path)
-    VALUES (new.rowid, new.name, new.vendor, new.style, new.domain,
-            new.sub_category, new.host_tags, new.hero_file_path);
-END;
+CREATE TABLE IF NOT EXISTS registry_meta (key TEXT PRIMARY KEY, value TEXT);
+"""
+# the Kiosk-era pack tables (1.0: the clips and folders tables replaced
+# them; dropped at the next start of a registry that still has them)
+_LEGACY_SQL = """
+DROP TRIGGER IF EXISTS assets_fts_ai;
+DROP TRIGGER IF EXISTS assets_fts_ad;
+DROP TRIGGER IF EXISTS assets_fts_au;
+DROP TABLE IF EXISTS assets_fts;
+DROP TABLE IF EXISTS asset_files;
+DROP TABLE IF EXISTS assets;
+DROP TABLE IF EXISTS operations;
 """
 
 
@@ -154,10 +74,6 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
     # The `collection` table is owned by collection_import.py (it creates the
     # table after init_db on a fresh registry, with these columns included),
     # so an empty PRAGMA result means "not created yet" -- never ALTER it.
-    if current < 2:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(assets)")}
-        if "source_url" not in cols:
-            conn.execute("ALTER TABLE assets ADD COLUMN source_url TEXT")
     if current < 3:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(collection)")}
         if cols and "thumb_override" not in cols:
@@ -166,40 +82,9 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(collection)")}
         if cols and "meta" not in cols:
             conn.execute("ALTER TABLE collection ADD COLUMN meta TEXT")
-    if current < 5:
-        # kiosk_* -> host_*: drop the old-name FTS/triggers first (their SQL
-        # text names both tables' columns), rename, recreate, rebuild index
-        #
-        # The kiosk_* identifiers below are the PRE-RENAME column names, read
-        # from and written back to databases that were created before the
-        # rename: the PRAGMA check and the three ALTERs must spell the old name
-        # or the migration silently skips the columns an existing registry
-        # still has. This is a required legacy-migration identifier -- an
-        # allowed exception to the no-kiosk-names rule. Do not "clean" them.
-        acols = {r[1] for r in conn.execute("PRAGMA table_info(assets)")}
-        if "kiosk_tags" in acols:
-            conn.executescript("""
-            DROP TRIGGER IF EXISTS assets_fts_ai;
-            DROP TRIGGER IF EXISTS assets_fts_ad;
-            DROP TRIGGER IF EXISTS assets_fts_au;
-            DROP TABLE IF EXISTS assets_fts;
-            """)
-            conn.execute(
-                "ALTER TABLE assets RENAME COLUMN kiosk_category "
-                "TO host_category")
-            conn.execute(
-                "ALTER TABLE assets RENAME COLUMN kiosk_tags TO host_tags")
-            conn.execute(
-                "ALTER TABLE assets RENAME COLUMN kiosk_thumbnail_path "
-                "TO host_thumbnail_path")
-            conn.executescript(SCHEMA_SQL)
-            conn.execute("INSERT INTO assets_fts(assets_fts) VALUES('rebuild')")
-    # no query looks assets up by content hash or files by checksum
-    # (the indexer no longer computes either): drop their indexes
+    conn.executescript(_LEGACY_SQL)
     conn.execute("DROP INDEX IF EXISTS idx_assets_content_hash")
     conn.execute("DROP INDEX IF EXISTS idx_asset_files_sha256")
-    # the 'operations' audit trail never had a writer outside its own test
-    conn.execute("DROP TABLE IF EXISTS operations")
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
     return conn
@@ -313,196 +198,61 @@ def stamp_registry(db_path: str | Path, library_root: str | Path) -> None:
 # Write helpers
 # ---------------------------------------------------------------------------
 
-def _json_or_none(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False)
+def get_meta(conn: sqlite3.Connection, key: str, default=None):
+    try:
+        row = conn.execute("SELECT value FROM registry_meta WHERE key = ?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        return default
+    return row[0] if row else default
 
 
-def upsert_asset(conn: sqlite3.Connection, asset: Mapping[str, Any]) -> None:
-    """Insert or update one logical asset pack row (id is the key)."""
-    required = ("id", "name", "canonical_root", "hero_file_path", "domain", "content_hash")
-    missing = [k for k in required if not asset.get(k)]
-    if missing:
-        raise ValueError(f"upsert_asset: missing required fields: {missing}")
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    row = {
-        "id": asset["id"],
-        "name": asset["name"],
-        "canonical_root": asset["canonical_root"],
-        "hero_file_path": asset["hero_file_path"],
-        "vendor": asset.get("vendor"),
-        "license_path": asset.get("license_path"),
-        "license_status": asset.get("license_status"),
-        "style": asset.get("style", "Neutral/Unclassified"),
-        "domain": asset["domain"],
-        "sub_category": asset.get("sub_category", "Uncategorized"),
-        "confidence_score": asset.get("confidence_score"),
-        "validation_status": asset.get("validation_status", "auto_tagged"),
-        "formats": _json_or_none(asset.get("formats")),
-        "targets": _json_or_none(asset.get("targets")),
-        "technical_meta": _json_or_none(asset.get("technical_meta")),
-        "host_category": asset.get("host_category"),
-        "host_tags": _json_or_none(asset.get("host_tags")),
-        "host_thumbnail_path": asset.get("host_thumbnail_path"),
-        "unreal_recipe": asset.get("unreal_recipe"),
-        "blender_recipe": asset.get("blender_recipe"),
-        "status": asset.get("status", "indexed"),
-        "content_hash": asset["content_hash"],
-        "updated_at": now,
-    }
-    columns = ",".join(row)
-    placeholders = ",".join(f":{c}" for c in row)
-    # human verdicts survive re-indexing: anything the owner set while a pack
-    # was 'human_verified' (domain/style/sub_category/status + validation) is
-    # kept; classifier output only fills non-verified packs
-    HUMAN = ("validation_status", "confidence_score", "domain", "style",
-             "sub_category", "status")
-    updates = []
-    for c in row:
-        if c in ("id", "created_at"):
-            continue
-        if c in HUMAN:
-            updates.append(
-                f"{c}=CASE WHEN assets.validation_status='human_verified' "
-                f"THEN assets.{c} ELSE excluded.{c} END")
-        else:
-            updates.append(f"{c}=excluded.{c}")
-    conn.execute(
-        f"INSERT INTO assets ({columns}) VALUES ({placeholders}) "
-        f"ON CONFLICT(id) DO UPDATE SET {','.join(updates)}",
-        row,
-    )
+def set_meta(conn: sqlite3.Connection, key: str, value) -> None:
+    conn.execute(REGISTRY_META_DDL)
+    conn.execute("INSERT OR REPLACE INTO registry_meta (key, value) VALUES (?, ?)",
+                 (key, None if value is None else str(value)))
     conn.commit()
 
 
-def replace_asset_files(
-    conn: sqlite3.Connection, asset_id: str, files: Iterable[Mapping[str, Any]]
-) -> None:
-    """Replace the file list of one asset pack (indexer refresh path)."""
-    conn.execute("DELETE FROM asset_files WHERE asset_id = ?", (asset_id,))
-    conn.executemany(
-        "INSERT INTO asset_files (asset_id, relative_path, file_type, file_size, sha256) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [
-            (
-                asset_id,
-                f["relative_path"],
-                f["file_type"],
-                f.get("file_size"),
-                f.get("sha256"),
-            )
-            for f in files
-        ],
-    )
-    conn.commit()
+def touch_sources(db_path: str | Path) -> None:
+    """A writer (ingest, the scanner, the clip measure) changed the
+    registry's sources: the server's warm start must import again."""
+    import time
+    conn = sqlite3.connect(str(db_path))
+    try:
+        set_meta(conn, "sources_stamp", time.time_ns())
+        set_meta(conn, "sources_stamp_at", time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()))
+    finally:
+        conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Read helpers
-# ---------------------------------------------------------------------------
-
-def _fts_query(query: str) -> str:
-    """Turn free text into a safe FTS5 prefix query (no syntax injection)."""
-    tokens = re.findall(r'[\w.-]+', query)
-    if not tokens:
-        return ""
-    return " ".join(f'"{t}"*' for t in tokens)
-
-
-def search_assets(
-    conn: sqlite3.Connection,
-    query: Optional[str] = None,
-    *,
-    style: Optional[str] = None,
-    domain: Optional[str] = None,
-    sub_category: Optional[str] = None,
-    fmt: Optional[str] = None,
-    vendor: Optional[str] = None,
-    validated_only: bool = False,
-    limit: int = 50,
-) -> list[dict[str, Any]]:
-    """Search the registry. Free-text `query` hits the FTS5 index; the rest are
-    structured filters. `validated_only` restricts to human-verified packs."""
-    where: list[str] = []
-    params: dict[str, Any] = {}
-
-    if query and query.strip():
-        fts = _fts_query(query)
-        if fts:
-            where.append(
-                "(a.rowid IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH :fts) "
-                "OR a.name LIKE :like OR a.hero_file_path LIKE :like)")
-            params["fts"] = fts
-            params["like"] = f"%{query.strip()}%"
-    if style:
-        where.append("a.style = :style")
-        params["style"] = style
-    if domain:
-        where.append("a.domain = :domain")
-        params["domain"] = domain
-    if sub_category:
-        where.append("a.sub_category = :sub_category")
-        params["sub_category"] = sub_category
-    if vendor:
-        where.append("a.vendor = :vendor")
-        params["vendor"] = vendor
-    if fmt:
-        where.append("a.formats LIKE :fmt")
-        params["fmt"] = f'%"{fmt}"%'
-    if validated_only:
-        where.append("(a.validation_status = 'human_verified' OR a.status LIKE 'validated_%')")
-
-    sql = "SELECT a.* FROM assets a"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY a.updated_at DESC LIMIT :limit"
-    params["limit"] = max(1, min(int(limit), 500))
-    return [dict(r) for r in conn.execute(sql, params)]
-
-
-def get_asset_details(conn: sqlite3.Connection, asset_id: str) -> Optional[dict[str, Any]]:
-    row = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
-    if row is None:
-        return None
-    detail = dict(row)
-    detail["files"] = [
-        dict(r)
-        for r in conn.execute(
-            "SELECT * FROM asset_files WHERE asset_id = ? ORDER BY relative_path", (asset_id,)
-        )
-    ]
-    return detail
+def sources_signature(db_path: str | Path, files) -> str:
+    """One string that changes when a writer touched the registry or one
+    of the files the importers read changed (size or mtime)."""
+    import hashlib
+    conn = sqlite3.connect(str(db_path))
+    try:
+        parts = [str(get_meta(conn, "sources_stamp", ""))]
+    finally:
+        conn.close()
+    for f in files:
+        try:
+            st = Path(f).stat()
+            parts.append(f"{f}:{st.st_size}:{st.st_mtime_ns}")
+        except OSError:
+            parts.append(f"{f}:absent")
+    return hashlib.sha1("\n".join(parts).encode("utf-8", "replace")).hexdigest()
 
 
 def db_stats(conn: sqlite3.Connection) -> dict[str, Any]:
-    def one(sql: str) -> Any:
-        return conn.execute(sql).fetchone()[0]
+    """Row counts per table (0 for a table its importer did not create)."""
+    out: dict = {"schema_version": conn.execute("PRAGMA user_version").fetchone()[0]}
+    for tbl in ("meshes", "textures", "audio", "clips", "folders", "collection"):
+        try:
+            out[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+        except sqlite3.OperationalError:
+            out[tbl] = 0
+    return out
 
-    return {
-        "schema_version": conn.execute("PRAGMA user_version").fetchone()[0],
-        "assets": one("SELECT COUNT(*) FROM assets"),
-        "asset_files": one("SELECT COUNT(*) FROM asset_files"),
-        "domains": {
-            r["domain"]: r["n"]
-            for r in conn.execute(
-                "SELECT domain, COUNT(*) AS n FROM assets GROUP BY domain ORDER BY n DESC"
-            )
-        },
-        "styles": {
-            r["style"]: r["n"]
-            for r in conn.execute(
-                "SELECT style, COUNT(*) AS n FROM assets GROUP BY style ORDER BY n DESC"
-            )
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# Self test (also validates FTS5 availability on this interpreter)
-# ---------------------------------------------------------------------------
 
 def main(argv: Optional[list[str]] = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
@@ -525,33 +275,17 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 def anim_clip_count(conn: sqlite3.Connection, section: Optional[str],
                     packs: bool = False) -> int:
-    """FBX/BVH clips under the animation section (packs=True: its packs).
-
-    `section` is the configured folder name (config.SECTIONS["animation"]);
-    pack ids start with 'pack::<section>' -- the same substr-prefix rule
-    as browse._anim_prefix, so doctor, agent docs and MCP agree with the
-    API. A hard-coded 'Animation' read 0 on any other folder name."""
-    # the measured clips table answers first (one row per clip, written
-    # by `pharos.py measure --clips`); the legacy pack tables otherwise
+    """Clips (packs=True: their folders) of the configured animation
+    section in the clips table (`section` = config.SECTIONS["animation"];
+    doctor, the agent docs, MCP and the API count the same rows)."""
     sec = section or "Animation"
+    sql = ("SELECT COUNT(DISTINCT folder) FROM clips" if packs
+           else "SELECT COUNT(*) FROM clips")
     try:
-        sql = ("SELECT COUNT(DISTINCT folder) FROM clips" if packs
-               else "SELECT COUNT(*) FROM clips")
-        n = conn.execute(sql + " WHERE folder = ? OR substr(folder, 1, ?) = ?",
-                         (sec, len(sec) + 1, sec + "/")).fetchone()[0]
-        if n:
-            return n
+        return conn.execute(sql + " WHERE folder = ? OR substr(folder, 1, ?) = ?",
+                            (sec, len(sec) + 1, sec + "/")).fetchone()[0]
     except sqlite3.OperationalError:
-        pass
-    prefix = "pack::" + (section or "Animation")
-    if packs:
-        sql = "SELECT COUNT(*) FROM assets a WHERE substr(a.id, 1, ?) = ?"
-    else:
-        sql = ("SELECT COUNT(*) FROM asset_files f JOIN assets a "
-               "ON a.id = f.asset_id WHERE substr(a.id, 1, ?) = ? "
-               "AND (lower(f.relative_path) LIKE '%.fbx' "
-               "OR lower(f.relative_path) LIKE '%.bvh')")
-    return conn.execute(sql, (len(prefix), prefix)).fetchone()[0]
+        return 0
 
 
 if __name__ == "__main__":

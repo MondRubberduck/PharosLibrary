@@ -114,12 +114,12 @@ when a library has more than one.
 cd pipeline/agent_index
 python build_agent_index.py          # models.jsonl
 python build_availability_catalog.py # availability.jsonl: owned vs on disk
-python gen_index.py                  # audio (section folder)
-python gen_tex_index.py              # textures (section folder)
 ```
-Audio/texture roots come from the config sections
-(`AGENT_AUDIO_ROOT` / `AGENT_TEX_ROOT` override). After any of these:
-restart the app — importers rebuild the registry from the new files.
+(A `library_index.json` left in the audio or texture section by an
+earlier crawl is read as optional category data; nothing generates it
+any more.)
+After any of these: run `python pharos.py ingest` (or restart the server:
+a changed index file makes the importers run again).
 Every writer here refuses to let a near-empty result (fewer than 10
 records, under half of the live index) replace a live index of 10 or more
 (`FATAL: only N ...`); first builds and small libraries are written — see
@@ -128,9 +128,9 @@ and `build_kb3d_index.py` itself whenever converted packs or kits exist.
 
 ## Order of operations for brand-new downloads
 
-convert packs (chain 1) and/or export kits (chain 2) → enumerate natives (chain 3) → optional richer audio/texture
-indexes (chain 4) → `python pharos.py ingest` (builds the model/kit
-indexes, imports everything, rewrites the agent docs) → restart the server.
+convert packs (chain 1) and/or export kits (chain 2) → enumerate natives
+(chain 3) → `python pharos.py ingest` (builds the model/kit indexes,
+imports everything, rewrites the agent docs) → restart the server.
 
 ## Standing rules carried over from production
 

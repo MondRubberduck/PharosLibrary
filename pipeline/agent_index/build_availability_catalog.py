@@ -117,13 +117,6 @@ cur.execute("""select name, store, type_group, type_raw, seller, price, purchase
                       image_count, folder, url, tags from collection""")
 rows = cur.fetchall()
 
-# pack-level truth from the registry (targets/formats) for on-disk correspondence
-cur.execute("select id, name, formats, targets, vendor, style, domain, sub_category from assets")
-reg_packs = []
-for pid, name, fmts, targets, vendor, style, domain, sub in cur.fetchall():
-    reg_packs.append({"id": pid, "name": name, "formats": fmts, "targets": targets,
-                      "vendor": vendor, "style": style, "domain": domain, "sub": sub})
-
 records = []
 counts = collections.Counter()
 

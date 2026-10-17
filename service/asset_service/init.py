@@ -66,6 +66,19 @@ def _census(folder: Path) -> tuple[dict[str, int], list[Path]]:
     return counts, fbx_samples
 
 
+_FBX_MARKERS = {b"AnimationStack": "anim", b"Takes": "takes",
+                b"LimbNode": "bones", b"Geometry": "mesh", b"Deformer": "skin"}
+
+
+def probe_fbx_markers(blob: bytes) -> dict:
+    """FBX evidence from raw bytes (binary and ASCII FBX alike)."""
+    hits = {label: pattern in blob for pattern, label in _FBX_MARKERS.items()}
+    return {"has_anim": hits["anim"] or hits["takes"],
+            "has_anim_stack": hits["anim"],       # a 'Takes' node alone is not one
+            "has_bones": hits["bones"], "has_mesh": hits["mesh"],
+            "has_skin": hits["skin"]}
+
+
 def _fbx_is_animation(samples: list[Path]) -> bool:
     """Binary evidence: an FBX is an animation clip when it carries an
     AnimationStack AND either no mesh geometry or an armature (LimbNode:
@@ -73,10 +86,6 @@ def _fbx_is_animation(samples: list[Path]) -> bool:
     carry an AnimationStack too, and every exporter writes a 'Takes'
     node, so 'any animation marker' once made a folder of converted
     static meshes the ANIMATION section."""
-    try:
-        from asset_service.auto_classifier import probe_fbx_markers
-    except Exception:
-        return False
     for p in samples:
         try:
             with open(p, "rb") as fh:
@@ -509,9 +518,9 @@ def run_init(argv=None) -> int:
         print('    -> fix their row: python pharos.py map set "<folder>" kind=<kind> '
               "include=yes  (or include=no to leave them out)")
     if picks.get("animation"):
-        print(f"  animation     : run indexer.py to index the clip packs ->"
-              f" \"{sys.executable}\" \"{_REPO / 'service' / 'asset_service' / 'indexer.py'}\""
-              f" --root \"{root}\"")
+        print(f"  animation     : measure the clips ->"
+              f" \"{sys.executable}\" \"{_REPO / 'pharos.py'}\" measure --clips"
+              f" \"{root / picks['animation'][0]}\"")
     if picks.get("audio"):
         ap = root / picks["audio"][0]
         print(f"  audio         : scanner.py indexes durations + folder"
@@ -535,7 +544,7 @@ def run_init(argv=None) -> int:
           "decision questions to your user)")
     print(f'  start the server: "{py}" "{_REPO / "pharos.py"}" serve'
           "   (or python service/asset_service/browse.py)")
-    print("  agent setup flow: docs/STARTING_PROMPT.md + docs/AGENT_SETUP.md")
+    print("  agent setup flow: docs/AGENT_SETUP.md")
     if report["mesh_folders"]:
         print(f'  index model folders: "{py}" '
               f"\"{_REPO / 'service' / 'asset_service' / 'scanner.py'}\" "

@@ -27,8 +27,9 @@ availability — without walking the filesystem.
 ```
 Clone https://github.com/MondRubberduck/PharosLibrary and set up Pharos
 for my asset library. Setup only, no scenes yet.
-Read README.md, then docs/STARTING_PROMPT.md, and follow it exactly.
-Show me what the survey found before indexing anything.
+Read README.md, then docs/AGENT_SETUP.md, and follow it exactly.
+Open the setup page for me, or show me what the survey found before
+indexing anything.
 My assets live at: D:\path\to\my\assets
 ```
 
@@ -53,7 +54,7 @@ follow <the Pharos folder>/docs/AGENT_PLAYBOOK.md, phase 2.
 
 **Next day, or after adding new assets?** Tell your agent to "run `python pharos.py ingest`, then start the Pharos server". The dashboard opens at http://127.0.0.1:8765.
 
-**Your files stay untouched.** Pharos only reads your assets. Inside your library it writes its index folder `_Agent_Files` and an `Exports` folder for Unreal or Blender conversions you approved. If you say yes to the optional richer audio and texture indexes during setup, it also writes three index files into those two folders.
+**Your files stay untouched.** Pharos only reads your assets. Inside your library it writes its index folder `_Agent_Files` and an `Exports` folder for Unreal or Blender conversions you approved. 
 
 
 ## Why it pays off
@@ -89,8 +90,7 @@ serves that page and prints its address.
 
 ## What your agent does
 
-**Setup** — driven by `docs/STARTING_PROMPT.md`; the agent's contract is
-`docs/AGENT_SETUP.md`:
+**Setup** — the agent's contract is `docs/AGENT_SETUP.md`:
 
 1. `pharos.py doctor` probes the machine and reports every gap with the
    exact command that fixes it.
@@ -152,8 +152,9 @@ tools/ tests/ docs/       PII gate, test suite, documentation
 pharos.py                 CLI: init | doctor | ingest | serve | docs
 ```
 
-The SQLite registry is derived data: importers rebuild it from crawler
-outputs and disk on every start. Crawler-sourced tables rebuild
+The SQLite registry is derived data: the importers rebuild it from the
+index files and disk at a server start when a source changed (`pharos.py
+serve --rebuild` forces them; `pharos.py ingest` rebuilds everything). Crawler-sourced tables rebuild
 automatically; scanner-indexed rows return on the next
 `pharos.py ingest`.
 Asset files are never modified — the only writes into a library are
@@ -163,9 +164,8 @@ generated index files.
 
 | For | Read |
 |---|---|
-| The paste-ready setup prompt | [docs/STARTING_PROMPT.md](docs/STARTING_PROMPT.md) |
 | The agent's setup contract: the library map, the decisions, the steps | [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md) |
-| The two-phase doctrine and priority ladders | [docs/AGENT_PLAYBOOK.md](docs/AGENT_PLAYBOOK.md) |
+| The build doctrine and priority ladders | [docs/AGENT_PLAYBOOK.md](docs/AGENT_PLAYBOOK.md) |
 | Every capability and limit, verifiable | [docs/CAPABILITIES.md](docs/CAPABILITIES.md) |
 | MCP client configuration | [docs/MCP_SETUP.md](docs/MCP_SETUP.md) |
 

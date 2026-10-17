@@ -593,7 +593,7 @@ def _measure_bvh(path: Path, rec: dict) -> None:
 
 
 # ------------------------------------------------------------------ driver
-_BY_EXT = {".fbx": _measure_fbx, ".obj": _measure_obj, ".stl": _measure_stl,
+_READERS = {".fbx": _measure_fbx, ".obj": _measure_obj, ".stl": _measure_stl,
            ".glb": _measure_gltf, ".gltf": _measure_gltf, ".bvh": _measure_bvh}
 
 
@@ -613,7 +613,7 @@ def measure_file(path, rel: str | None = None) -> dict:
         return rec
     rec.update(name_facts(path.stem))
     rec["category_hint"] = category_hint(rel)
-    fn = _BY_EXT.get(ext)
+    fn = _READERS.get(ext)
     if fn is None:
         rec["error"] = f"no reader for {ext or 'this file'}"
         return rec
@@ -810,9 +810,13 @@ def main(argv=None) -> int:
                 rc = 2
                 continue
             if args.clips:
-                from asset_service import clips_import
-                n, stats = clips_import.write_clips(args.db or config.DB_PATH, root, folder,
-                                                    verbose=args.verbose)
+                from asset_service import clips_import, db
+                dbp = args.db or config.DB_PATH
+                owner = db.registry_foreign(dbp, root)
+                if owner:          # a registry of another library: never written
+                    print(db.foreign_registry_message(dbp, owner, root))
+                    return 2
+                n, stats = clips_import.write_clips(dbp, root, folder, verbose=args.verbose)
                 print(f"clips: {n} in {folder.name} "
                       f"({stats['measured']} measured, {stats['cached']} cached, "
                       f"{stats['errors']} unreadable, {stats['seconds']} s) -> {stats['index']}")

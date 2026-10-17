@@ -84,16 +84,13 @@ def _fill_registry(conn, meshes, audio, clips, meshes_import, audio_import):
             "48000,2,1,'','[]',?,'crawl')",
             (name, cat, f"{cat}/{name}.wav", dur, _SEARCH_META))
     if clips:
-        conn.execute(
-            "INSERT INTO assets (id,name,canonical_root,hero_file_path,"
-            "domain,sub_category,content_hash) VALUES "
-            "('pack::Animation/Moves','Moves','x','x','Human Animations',"
-            "'Locomotion','h')")
+        from asset_service import clips_import
+        clips_import.ensure_table(conn)
         for rel in clips:
             conn.execute(
-                "INSERT INTO asset_files (asset_id,relative_path,file_type,"
-                "file_size) VALUES ('pack::Animation/Moves',?,'mesh',1)",
-                (rel,))
+                "INSERT INTO clips (rel,folder,name,ext,bytes,bone_names,facts,measured_at) "
+                "VALUES (?,'Animation/Moves',?,?,1,'[]','{}','t')",
+                (rel, rel.rsplit("/", 1)[-1].rsplit(".", 1)[0], rel[-4:]))
 
 
 def _names(resp, key="items"):
@@ -705,13 +702,6 @@ def test_routes_status_codes_and_nested_pack_ids():
             ("Lid B", "Kit", {"fbx": "x://Kit/all.blend", "object_name": "Lid_B"})]
 
     def run(browse):
-        conn = sqlite3.connect(browse._DB_PATH)
-        conn.execute(
-            "INSERT INTO assets (id,name,canonical_root,hero_file_path,"
-            "domain,sub_category,content_hash) VALUES ('pack::Props/Crates',"
-            "'Crates','x','x','Props','General','h')")
-        conn.commit()
-        conn.close()
         assert _drive("/api/audio/item?id=999")[0] == 404
         assert _drive("/api/audio/item?id=abc")[0] == 400
         assert _drive("/api/meshes/item")[0] == 400
@@ -722,8 +712,8 @@ def test_routes_status_codes_and_nested_pack_ids():
         assert st == 404 and body.get("candidates"), (st, body)
         st, body = _drive("/api/meshes/item?key=" + quote(key, safe=""))
         assert st == 200 and body["items"][0]["name"] == "Lid A", (st, body)
-        st, body = _drive("/api/pack_files?id=pack::Props/Crates")
-        assert body.get("error") != "bad pack id", body
+        assert _drive("/registry")[0] == 404 and _drive("/pack")[0] == 404, "legacy pages gone"
+        assert _drive("/api/packs")[0] == 404 and _drive("/api/pack_files?id=x")[0] == 404
         assert "c.tier===3" in browse.ANIM_PAGE and "c.tier===2" not in browse.ANIM_PAGE
     _with_registry(rows, run)
 
@@ -2053,165 +2043,10 @@ def test_primary_skips_default_roughness_and_height():
 # work nobody used: hashing, dead tier, dead constants
 # ---------------------------------------------------------------------------
 
-def test_indexer_never_opens_or_hashes_the_hero():
-    """The hero file is only ever used as a PATH (pack page, prune check).
-    Hashing it read gigabytes per ingest into content_hash / sha256, and
-    nothing in the app reads either column."""
-    import builtins
-    import contextlib
-    import io
-    import re
-    import sqlite3
-    from asset_service import indexer
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        pack = tmp / "lib" / "Animation" / "WallMoves"
-        pack.mkdir(parents=True)
-        # .blend wins the hero priority and no classifier probe reads it
-        (pack / "rig_scene.blend").write_bytes(b"BLENDER-v300" + bytes(64))
-        (pack / "climb_up_01.fbx").write_bytes(_min_fbx())
-        opened = []
-        real_path_open, real_open = Path.open, builtins.open
-
-        def path_open(self, *a, **k):
-            opened.append(self.name)
-            return real_path_open(self, *a, **k)
-
-        def plain_open(file, *a, **k):
-            if isinstance(file, (str, os.PathLike)):
-                opened.append(Path(file).name)
-            return real_open(file, *a, **k)
-
-        Path.open, builtins.open = path_open, plain_open
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                indexer.index_root(tmp / "lib", tmp / "reg.sqlite")
-        finally:
-            Path.open, builtins.open = real_path_open, real_open
-        conn = sqlite3.connect(str(tmp / "reg.sqlite"))
-        row = conn.execute(
-            "SELECT content_hash, hero_file_path, technical_meta FROM assets "
-            "WHERE id = 'pack::Animation/WallMoves'").fetchone()
-        hashed = conn.execute(
-            "SELECT COUNT(*) FROM asset_files WHERE sha256 IS NOT NULL"
-        ).fetchone()[0]
-        conn.close()
-        assert row is not None, "pack not indexed"
-        assert row[1].endswith("/rig_scene.blend"), row[1]
-        problems = []
-        if "rig_scene.blend" in opened:
-            problems.append("the hero file was opened")
-        if re.fullmatch("[0-9a-f]{64}", row[0] or ""):
-            problems.append("assets.content_hash holds a file digest")
-        if hashed:
-            problems.append(f"{hashed} asset_files row(s) carry a sha256")
-        if "hashed_partially" in json.loads(row[2] or "{}"):
-            problems.append("technical_meta still records hashed_partially")
-        assert not problems, "; ".join(problems)
 
 
-def test_indexer_keeps_pack_whose_hero_is_unreadable():
-    """A hero whose BYTES cannot be read (locked by another program, no
-    permission) used to skip the whole pack: every other file in it
-    disappeared from the registry with it."""
-    import contextlib
-    import io
-    import sqlite3
-    from asset_service import indexer
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        pack = tmp / "lib" / "Animation" / "WallMoves"
-        pack.mkdir(parents=True)
-        (pack / "rig_scene.blend").write_bytes(b"BLENDER-v300" + bytes(64))
-        (pack / "climb_up_01.fbx").write_bytes(_min_fbx())
-        real_path_open = Path.open
-
-        def path_open(self, *a, **k):
-            if self.name == "rig_scene.blend":
-                raise PermissionError(13, "Permission denied", str(self))
-            return real_path_open(self, *a, **k)
-
-        Path.open = path_open
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                indexer.index_root(tmp / "lib", tmp / "reg.sqlite")
-        finally:
-            Path.open = real_path_open
-        conn = sqlite3.connect(str(tmp / "reg.sqlite"))
-        row = conn.execute(
-            "SELECT hero_file_path FROM assets "
-            "WHERE id = 'pack::Animation/WallMoves'").fetchone()
-        n_files = conn.execute("SELECT COUNT(*) FROM asset_files").fetchone()[0]
-        conn.close()
-        assert row is not None, "pack skipped because its hero is unreadable"
-        assert row[0].endswith("/rig_scene.blend"), row[0]
-        assert n_files == 2, n_files
 
 
-def test_sub_category_follows_the_majority_of_files():
-    """A pack of climb clips with a few idle clips was labelled "Idle"
-    because Idle is listed before Locomotion: one file was enough to claim
-    the pack."""
-    from asset_service.auto_classifier import PackInput, classify_pack
-
-    def pack(folder, names):
-        return PackInput(name=folder, rel_path=f"Animation/{folder}", files=[
-            {"relpath": f"Animation/{folder}/{n}", "ext": ".fbx",
-             "size": 10, "file_type": "mesh"} for n in names])
-
-    climbs = [f"climb_up_{i:02d}.fbx" for i in range(1, 7)]
-    result = classify_pack(pack("WallMoves", climbs + ["hang_idle.fbx"]))
-    assert result.domain == "Human Animations", result.domain
-    assert result.sub_category == "Locomotion", result.sub_category
-    # a tie keeps the existing list order (Idle is listed before Locomotion)
-    tie = classify_pack(pack("WallMoves", ["climb_up_01.fbx", "hang_idle.fbx"]))
-    assert tie.sub_category == "Idle", tie.sub_category
-    # the pack folder's own name breaks a tie, and decides when no file
-    # name helps -- it does not outvote what most files say
-    assert classify_pack(pack("ClimbSet", ["climb_up_01.fbx", "hang_idle.fbx"])
-                         ).sub_category == "Locomotion"
-    assert classify_pack(pack("DanceFloor", ["take_01.fbx", "take_02.fbx"])
-                         ).sub_category == "Dance"
-    assert classify_pack(pack("DanceFloor", climbs)).sub_category == "Locomotion"
-    # whole words: 'stand' is not in 'Standard', 'bow' is not in 'bowl'
-    from asset_service.auto_classifier import _sub_category
-    walks = PackInput(name="Walks", rel_path="Standard Animations/Walks",
-                      files=[{"relpath": f"Standard Animations/Walks/walk_{i}.fbx"}
-                             for i in range(5)])
-    assert _sub_category("Human Animations", set(), walks) == "Locomotion"
-    bowls = PackInput(name="Kitchen_Bowls", rel_path="Props/Kitchen_Bowls",
-                      files=[{"relpath": "Props/Kitchen_Bowls/bowl_a.fbx"}])
-    assert _sub_category("Props", set(), bowls) != "Weapons"
-
-
-def test_host_tags_keep_the_most_frequent_tokens():
-    """An alphabetical cut at 12 dropped "walk" from packs full of walk
-    clips, so a pack search for walk missed them."""
-    from asset_service.auto_classifier import PackInput, classify_pack
-    names = [f"walk_fwd_{i:02d}.fbx" for i in range(1, 9)]
-    names += [f"{w}.fbx" for w in (
-        "attack", "chat", "climb", "combat", "dance", "fight", "gesture",
-        "idle", "jump", "kick", "punch", "sitting", "sword", "talk")]
-    pack = PackInput(name="Street Moves", rel_path="Animation/StreetMoves", files=[
-        {"relpath": f"Animation/StreetMoves/{n}", "ext": ".fbx",
-         "size": 10, "file_type": "mesh"} for n in names])
-    tags = classify_pack(pack).host_tags
-    assert len(tags) == 12, tags
-    assert "walk" in tags, f"most frequent filename token cut: {tags}"
-    assert "street" in tags, f"pack-name token cut: {tags}"
-
-
-def test_classifier_has_no_network_tier():
-    """The vision tier could never run (the indexer passed no preview and
-    no config ever carried its endpoint) but kept urllib in a module whose
-    contract is that nothing leaves the workstation."""
-    import inspect
-    from asset_service import auto_classifier as ac
-    assert not hasattr(ac, "OllamaVision"), "dead vision tier still defined"
-    assert not hasattr(ac, "get_vision_classifier")
-    assert "urllib" not in vars(ac), "classifier still imports urllib"
-    params = list(inspect.signature(ac.classify_pack).parameters)
-    assert params == ["pack"], params
 
 
 def test_config_constants_all_have_a_reader():
@@ -2219,15 +2054,18 @@ def test_config_constants_all_have_a_reader():
     filename can drift from the importer that really owns it."""
     import re
     cfg_py = REPO / "service" / "asset_service" / "config.py"
-    text = cfg_py.read_text(encoding="utf-8")
-    names = re.findall("^([A-Z][A-Z0-9_]*) = ", text, re.M)
+    cfg_text = cfg_py.read_text(encoding="utf-8")
+    # the constants are bound inside _bind() (indented) or annotated
+    names = sorted(set(re.findall(r"^\s*([A-Z][A-Z0-9_]*)(?::[^=\n]+)? = ", cfg_text, re.M))
+                   - {"SCHEMA", "FBX_TIME"})
+    assert {"LIBRARY_ROOT", "TEX_ROOT", "MANIFEST_ROOTS", "DB_PATH"} <= set(names), names
+    text = ""
     for folder in ("service", "pipeline", "tools", "extensions", "tests"):
         if (REPO / folder).is_dir():
             for p in (REPO / folder).rglob("*.py"):
                 if p != cfg_py:
                     text += p.read_text(encoding="utf-8", errors="replace")
-    # one hit is the definition itself
-    orphans = [n for n in names if len(re.findall(rf"\b{n}\b", text)) < 2]
+    orphans = [n for n in names if not re.search(rf"\b{n}\b", text)]
     assert not orphans, f"config constants nothing references: {orphans}"
 
 
@@ -2313,7 +2151,7 @@ def test_model_search_uses_the_owners_pack_tags():
             library_map.PATH = old
 
 
-def test_tag_page_and_retag_write_the_tag_file_not_the_registry():
+def test_tag_page_writes_the_tag_file_not_the_registry():
     """Labels set on the registry page lived only in the registry, which
     users are told to delete and rebuild. The map page and the bulk retag
     write the library map, whose rows come from a survey of the library
@@ -2326,14 +2164,6 @@ def test_tag_page_and_retag_write_the_tag_file_not_the_registry():
         return _drive(path, "POST", json.dumps(obj).encode("utf-8"))
 
     def run(browse):
-        conn = sqlite3.connect(browse._DB_PATH)
-        conn.execute(
-            "INSERT INTO assets (id,name,canonical_root,hero_file_path,"
-            "domain,style,sub_category,validation_status,content_hash) "
-            "VALUES ('pack::Env/Town','Town','x','x','Environment',"
-            "'Photorealistic','General','auto_tagged','h')")
-        conn.commit()
-        conn.close()
         st, body = _drive("/api/pack_tags")
         assert st == 200, body
         got = {p["folder"]: p for p in body["packs"]}
@@ -2341,7 +2171,6 @@ def test_tag_page_and_retag_write_the_tag_file_not_the_registry():
         assert got["Props/Crates"]["kind"] == "3d-assets", got["Props/Crates"]
         assert got["Purchases"]["kind"] == "purchases" and got["Purchases"]["confirmed"]
         assert got["Env/Town"]["survey"]["kind"] == "3d-assets", got["Env/Town"]
-        assert got["Env/Town"]["guess"]["style"] == "Photorealistic", got["Env/Town"]
         st, body = post("/api/pack_tags", {"folder": "Env/Town",
                                            "styles": ["Photorealistic", "low poly"],
                                            "tags": "wild west; dusty"})
@@ -2360,20 +2189,9 @@ def test_tag_page_and_retag_write_the_tag_file_not_the_registry():
         assert st == 200 and body["pack"]["include"] is False, body
         assert post("/api/pack_tags", {"folder": "Env/Town", "styles": ["Cel"]})[0] == 400
         assert post("/api/pack_tags", {"folder": "Nope", "styles": []})[0] == 404
-        st, body = post("/api/retag", {"ids": ["pack::Env/Town"],
-                                       "set": {"style": "Stylized", "domain": "Props"}})
-        assert st == 200 and body["updated"] == 1, body
         row = library_map.load()["env/town"]
-        assert row["styles"] == ["Stylized", "Low Poly"], row
-        assert row["domain"] == "Props", row
-        conn = sqlite3.connect(browse._DB_PATH)
-        assert conn.execute("SELECT style, domain FROM assets WHERE "
-                            "id='pack::Env/Town'").fetchone() == (
-            "Photorealistic", "Environment"), "retag wrote the registry"
-        conn.close()
-        packs = browse.api_packs({"style": ["Low Poly"]})
-        assert [p["id"] for p in packs] == ["pack::Env/Town"], packs
-        assert packs[0]["owner_tagged"] and packs[0]["domain"] == "Props", packs
+        assert row["styles"] == ["Photorealistic", "Low Poly"], row
+        assert _drive("/api/retag", "POST", b"{}")[0] == 404, "the legacy retag route is gone"
         st, page = _drive("/tags")
         assert st == 200 and b"/api/pack_tags" in page
         # the config mirrors the map: the excluded folder left the scan

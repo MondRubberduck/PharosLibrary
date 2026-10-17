@@ -469,8 +469,8 @@ def main() -> int:
             audio_import, meshes_import
         dbp = str(reg / "assets.sqlite")
         conn = db.init_db(dbp)
-        check("fresh db bootstraps (schema v5)",
-              conn.execute("PRAGMA user_version").fetchone()[0] == 5)
+        check("fresh db bootstraps (schema v6)",
+              conn.execute("PRAGMA user_version").fetchone()[0] == 6)
         conn.close()
         check("collection imports", collection_import.import_collection(dbp) == 1)
         check("textures import", textures_import.import_textures(dbp) >= 1)
@@ -860,17 +860,15 @@ def main() -> int:
                 capture_output=True, text=True, cwd=str(REPO), timeout=120)
             check(f"direct-script {mod}", r.returncode == 0,
                   (r.stderr or "")[-100:])
-        # indexer.py is quoted verbatim by the app's own INGESTION SUMMARY
-        # ("python service/asset_service/indexer.py --root <lib>") and in
-        # CAPABILITIES: its sys.path bootstrap sat BELOW the first
-        # `from asset_service import ...`, so the documented command died
-        # with ModuleNotFoundError
+        # measure.py is quoted verbatim by doctor's fix line
+        # ("python pharos.py measure --clips <animation folder>"): the
+        # documented command must run as a script too
         r = subprocess.run(
-            [sys.executable, str(REPO / "service/asset_service/indexer.py"),
-             "--root", str(lib)],
+            [sys.executable, str(REPO / "service/asset_service/measure.py"),
+             "--clips", str(lib / "Animation")],
             capture_output=True, text=True, cwd=str(REPO), timeout=300)
-        check("direct-script indexer.py --root (INGESTION SUMMARY form)",
-              r.returncode == 0, (r.stderr or "")[-140:])
+        check("direct-script measure.py --clips (doctor's fix form)",
+              r.returncode == 0 and "clips:" in (r.stdout or ""), (r.stderr or "")[-140:])
         r = subprocess.run(
             [sys.executable,
              str(REPO / "service/asset_service" / "audio_import.py"), dbp],
@@ -1053,7 +1051,7 @@ def main() -> int:
             # JSON request must pass the guard and reach the handler
             # (handler-level 400 "nothing to do" proves it got through).
             def _post(headers, body=b"{}"):
-                req2 = _ur.Request("http://127.0.0.1:8844/api/retag",
+                req2 = _ur.Request("http://127.0.0.1:8844/api/pack_tags",
                                    data=body, headers=headers, method="POST")
                 try:
                     return _ur.urlopen(req2, timeout=3).status
@@ -1197,8 +1195,8 @@ def main() -> int:
               and "UE Packs" not in _q6 and "Animation" not in _q6,
               f"line={_q6.strip()[:160]!r}")
         _c = _sq.connect(dbp)
-        _anim = _c.execute("SELECT COUNT(*) FROM assets WHERE "
-                           "id LIKE 'pack::Animation/%'").fetchone()[0]
+        _anim = _c.execute("SELECT COUNT(*) FROM clips WHERE "
+                           "folder LIKE 'Animation%'").fetchone()[0]
         _mesh_n = _c.execute("SELECT COUNT(*) FROM meshes").fetchone()[0]
         _c.close()
         check("ingest indexed animation packs",
@@ -1368,7 +1366,7 @@ def main() -> int:
         db.init_db(_fdb).close()
         _c = _sq.connect(_fdb)
         _c.executescript(meshes_import.MESHES_DDL)
-        _c.execute("CREATE TABLE registry_meta (key TEXT PRIMARY KEY, "
+        _c.execute("CREATE TABLE IF NOT EXISTS registry_meta (key TEXT PRIMARY KEY, "
                    "value TEXT)")
         _c.execute("INSERT INTO registry_meta VALUES ('library_root', ?)",
                    (str(tmp / "other_root"),))
@@ -1388,11 +1386,12 @@ def main() -> int:
                              timeout=60).returncode
         except subprocess.TimeoutExpired:
             srv_rc = None          # the server booted on the foreign registry
-        # doctor's own fix line for the anim gap: one indexer run used to
-        # write into the foreign registry and flip doctor to READY
+        # doctor's own fix line for the anim gap: the clip measure must
+        # refuse the foreign registry too (one writer once flipped doctor
+        # to READY by writing into it)
         r_idx = subprocess.run(
-            [sys.executable, str(REPO / "service" / "asset_service"
-                                 / "indexer.py"), "--root", str(lib)],
+            [sys.executable, str(REPO / "pharos.py"), "measure", "--clips",
+             str(lib / "Animation")],
             capture_output=True, text=True, cwd=str(REPO), timeout=120)
         try:
             _doc = {c["name"] + ":" + c["status"] for c in json.loads(
@@ -1407,12 +1406,12 @@ def main() -> int:
               and "derived data" in r.stdout and "--registry-dir" in r.stdout
               and _fn == (1,),
               f"rc={r.returncode} meshes={_fn} out={r.stdout.strip()[:240]!r}")
-        check("R1: scanner CLI, indexer and server boot refuse the foreign "
+        check("R1: scanner CLI, clip measure and server boot refuse the foreign "
               "registry (exit 2); doctor fails its registry check",
               r_scan.returncode == 2 and srv_rc == 2
               and r_idx.returncode == 2 and "registry:fail" in _doc,
               f"scanner={r_scan.returncode} serve={srv_rc} "
-              f"indexer={r_idx.returncode} "
+              f"measure={r_idx.returncode} "
               f"doctor={sorted(d for d in _doc if d.startswith('registry'))}")
         # the laptop's exact case: an OLD, UNSTAMPED registry whose rows all
         # lie under another root

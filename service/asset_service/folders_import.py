@@ -36,6 +36,27 @@ CREATE TABLE IF NOT EXISTS folders (
 );
 """
 _LICENSE_WORDS = ("license", "licence", "eula", "terms")
+# the vendor from the folder words: a creator's name says what a pack
+# is, a marketplace's where it was bought (the creator wins)
+_VENDOR_TOKENS = {
+    "Quixel": ("quixel", "megascans"), "Gumroad": ("gumroad",), "CGTrader": ("cgtrader",),
+    "TurboSquid": ("turbosquid",), "Reallusion": ("reallusion", "actorcore", "actor-core"),
+    "Mixamo": ("mixamo",), "Sketchfab": ("sketchfab", "uploads_files"),
+    "KitBash3D": ("kitbash3d", "kb3d"), "PolyHaven": ("polyhaven", "poly haven"),
+    "Leartes": ("leartes",), "Fab": ("fab",)}
+_MARKETPLACES = {"Gumroad", "Sketchfab", "Fab", "CGTrader", "TurboSquid"}
+
+
+def vendor_of(folder: str):
+    """The vendor a folder path names, or None."""
+    low = (folder or "").replace("\\", "/").lower()
+    segments = {seg for seg in re.split(r"[/_\-. ]+", low) if seg}
+    creators, markets = [], []
+    for vendor, toks in _VENDOR_TOKENS.items():
+        hit = any((tok in segments) if vendor == "Fab" else (tok in low) for tok in toks)
+        if hit:
+            (markets if vendor in _MARKETPLACES else creators).append(vendor)
+    return (creators or markets or [None])[0]
 
 
 def _norm(p: str) -> str:
@@ -168,13 +189,6 @@ def build(db_path, root, rows=None) -> int:
         if table_cols("mesh_pack_wiring"):
             wiring = {r["pack"]: r["wiring_ratio"] for r in
                       conn.execute("SELECT pack, wiring_ratio FROM mesh_pack_wiring")}
-        vendors = {}
-        if table_cols("assets"):
-            try:
-                vendors = {r["id"][len("pack::"):].lower(): r["vendor"] for r in
-                           conn.execute("SELECT id, vendor FROM assets WHERE vendor IS NOT NULL")}
-            except sqlite3.OperationalError:
-                vendors = {}
         # a child's facts count for its parents too (a folder of packs
         # reports its packs' units and categories): deepest first, one
         # depth at a time, so a parent that only appears through its
@@ -227,7 +241,7 @@ def build(db_path, root, rows=None) -> int:
                  (b["pivot"].most_common(1) or [(None, 0)])[0][0],
                  lod_groups, variant_groups,
                  json.dumps(b["cats"].most_common(8), ensure_ascii=False),
-                 vendors.get(r["folder"].lower()),
+                 vendor_of(r["folder"]),
                  _license_file(root, r["folder"]) if r["include"] else None,
                  round(sum(wr) / len(wr), 3) if wr else None,
                  _prefabs(root, r["folder"]) if r["kind"] == "unity" and r["include"] else 0,

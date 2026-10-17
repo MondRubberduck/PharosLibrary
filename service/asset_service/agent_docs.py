@@ -141,8 +141,7 @@ Phase 1 = setup + crawl + INTERVIEW your user (are these all the
 folders? crawl UE? purchase CSV? what to do with .blend files?) until
 the server banner says INGESTION COMPLETE and the user confirmed. If
 setup was never finished, `{repo}/docs/AGENT_SETUP.md` is the
-contract (the library map holds the decisions) and
-`{repo}/docs/STARTING_PROMPT.md` the paste-ready flow. Phase 2 = build, following the priority lists:
+contract (the library map holds the decisions). Phase 2 = build, following the priority lists:
 
 1. Asset on disk → use it. 2. On demand (owned-not-downloaded) → ask
 the user with a requisition list, never substitute silently. 3. Not in
@@ -171,9 +170,9 @@ generate procedurally and say so.
 
 ## Step 4 — fallback if the server is down
 
-The machine indexes (when present) let you work offline:
-`library_index.json` / `library_files.jsonl` inside the audio and texture
-section folders (paths relative to that folder, see `pharos_config.json`);
+The machine indexes (when present) let you work offline: a crawl's
+`library_index.json` / `library_files.jsonl` left inside the audio and
+texture section folders (optional inputs, paths relative to that folder);
 `models.jsonl` / `native_models.jsonl` for meshes and `availability.jsonl`
 for ownership beside this file (absolute paths). The model index files carry NO per-slot material
 recipe and unchecked sizes — the API is the better source.
@@ -214,7 +213,7 @@ the configured roots — outside paths return 404/403.
 | `/api/anim/clips` | `q`, `packs` (pack ids or folders from `/api/anim/tree`, pipe-separated), `min_dur`/`max_dur` (seconds), `root_motion=1|0`, `family` (cc, mixamo, ue-mannequin), `page`, `size` | `clips` (NOT `items`): each with `duration_s`, `fps`, `frames`, `root_motion` (true / false / null = not readable), `family`, `bones`, `has_mesh` (measured; absent on an index from before `pharos.py measure`); the answer's `root` + `/` + `rel` is the file, and `bodies` lists, keyed like each clip's `pack`, the character files the clips play on: one record per skeleton (`family`, the `subfolders` of the pack that use it, `bodies`) |
 | `/api/anim/tree` | — | folders, clip counts, `skeletons` per folder |
 | `/api/folders` | `folder=` (one folder) | `folders` + `total` (every node); with `folder=` the answer is `folder` (one record, with its `facts`) and an unknown folder is a 404 `{"error": "not found"}`. Each node: the library map's row with what was measured under each: `meshes` / `clips` / `textures` / `audio` counts, `units`, `up_axis`, `pivot` (the common ones), `lod_groups`, `variant_groups`, `category_hints` (the vendor's own folder words), `vendor`, `license` (file path), `wiring_ratio`, `prefabs` |
-| `/api/stats` | — | `stats` (legacy packs) + `sections` (live totals) |
+| `/api/stats` | — | `stats` (row counts per table, `last_write`) + `sections` (live totals) |
 
 Styles and `pack_tags` are the owner's own labels per pack (kept in
 `library_map.csv` beside this file). A pack the owner has not tagged has no
@@ -375,8 +374,7 @@ paths resolve against the section roots).
 
 `/api/collection/tag` add/remove a tag · `/api/collection/thumb` set
 thumbnail · `/api/pack_tags` set one pack's styles / domain / tags ·
-`/api/retag` bulk pack domain / style · `/api/preview/store`
-upload rendered preview · `/api/pack_source` set a pack's store URL.
+`/api/preview/store` upload a rendered preview.
 
 ## F. MCP alternative
 
