@@ -2,6 +2,13 @@
 
 ## Unreleased (towards 1.0)
 
+Phase 5 of the 1.0 plan: seeing.
+
+- **Contact sheets.** `pharos.py previews --sheets` renders, in one headless Blender pass per folder, a picture of up to 36 representative models of every folder node that holds models (full models only: no lower LODs, collision hulls or impostor cards; one per variant group; dealt out across the folder's sub-folders), each labelled with its file name, and lays them out as one PNG under `<previews_dir>/sheets/` (6 per row; the keys in reading order come with `/api/folders?folder=`). Resumable: rendered tiles are kept under `<previews_dir>/models/`, a folder with a sheet is skipped. `--keys <key> ...` renders the models of a shortlist on demand. Served as `/sheet/<name>.png` and `/render/<hash>.png`; `/api/folders` carries `sheet` (and `sheet_keys` for one folder), a mesh item `render`. A crashed or timed-out Blender run keeps the tiles it finished; a folder whose tiles all failed gets no sheet and is tried again. The tiles are 256 px, 3/4 view, Workbench studio light, textures where the file has them. The composition is standard library (a BMP reader, a PNG reader and writer), no image package.
+- **Models page** (`/models`): every model folder with its contact sheet, its models with their measured facts, and the 3D viewer for FBX files. The dashboard gained a Models tile; the purchases tile appears only when the library has a purchase list. `/api/meshes` filters by `folder=`.
+- `pharos.py ingest` asks (question 7) whether to render the missing sheets when Blender is present; the agent docs and the MCP overview name the pictures and say that the owner renders them.
+- The clip batch renderer is unchanged: clip duration now comes from the clips table (Phase 3), so it no longer needs to store it.
+
 Phase 4 of the 1.0 plan: slim down.
 
 - **The Kiosk-era pack layer is gone.** The `assets` / `asset_files` / FTS tables, the pack indexer and its two-tier classifier, the `/registry` and `/pack` pages, `/api/packs`, `/api/pack_files`, `/api/retag`, `/api/pack_source` and the host-app thumbnail mirror. The clips and folders tables answer everything those did: the animation pages, the tags page, the dashboard, doctor, the agent docs and the MCP tools read them. A registry that still carries the old tables drops them at the next start (schema 6). The owner's domain and style words live in `library_map.py`; the vendor of a folder comes from its name.

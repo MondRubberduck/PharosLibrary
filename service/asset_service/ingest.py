@@ -341,6 +341,24 @@ def run_ingest(argv=None) -> int:
                   f"Pharos recognises): {', '.join(stray)} -- what are they? "
                   f'(pharos.py map set "<folder>" kind=<kind>, or include=no '
                   f"to leave them out)")
+    # pictures: a contact sheet per model folder, for the owner's eye and
+    # the agents' shortlists; Blender renders them on request
+    try:
+        from asset_service import sheets
+        from asset_service.doctor import _find_blender
+        if not dry and _find_blender():
+            per_node = sheets.mesh_keys(config.DB_PATH, root, rows)
+            no_sheet = [f for f in sheets.sheet_nodes(rows)
+                        if sheets.pick_keys(per_node.get(f, [])) and not sheets.sheet_path(f).is_file()]
+            if no_sheet:
+                qs.append(f"7. {len(no_sheet)} model folder(s) have no contact sheet yet (a "
+                          f"picture of up to 36 models per folder, labelled with their file "
+                          f"names, for you and the agents; Blender, about a minute per "
+                          f"folder): render them now?")
+                qs.append("   answer: python pharos.py previews --sheets   "
+                          "(or --sheets --folder \"<folder>\" for one)")
+    except Exception:                                     # noqa: BLE001
+        pass
     for q in qs:
         print("  " + q)
     print("-" * 66)

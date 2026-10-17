@@ -4,6 +4,8 @@ the library map.
     python pharos.py convert  [--dry-run] [--pack <folder>]   Unreal -> FBX
     python pharos.py extract  [--dry-run]                     .blend -> FBX
     python pharos.py previews [--dry-run]                     clip previews
+    python pharos.py previews --sheets [--folder F] [--force] contact sheets (Blender)
+    python pharos.py previews --keys K [K ...]                renders on demand (Blender)
 
 Nothing here starts without the owner's decision in the map:
     unreal    action=export      (pharos.py map set "<folder>" action=export)
@@ -188,9 +190,21 @@ def extract(argv: list) -> int:
 def previews(argv: list) -> int:
     ap = argparse.ArgumentParser(prog="pharos previews",
                                  description="record browser previews of the animation "
-                                             "folders the owner approved")
+                                             "folders the owner approved; render contact "
+                                             "sheets of the model folders (--sheets) or "
+                                             "pictures of given models (--keys) in Blender")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--sheets", action="store_true",
+                    help="one contact sheet per folder node that holds models")
+    ap.add_argument("--keys", nargs="+", metavar="KEY",
+                    help="render these mesh keys (as /api/meshes serves them)")
+    ap.add_argument("--folder", action="append", metavar="FOLDER",
+                    help="with --sheets: only this map folder (repeatable)")
+    ap.add_argument("--force", action="store_true", help="render again what exists")
+    ap.add_argument("--limit", type=int, default=36, help="models per sheet (max 36)")
     args = ap.parse_args(argv)
+    if args.sheets or args.keys:
+        return _render_models(args)
     ready, undecided = _rows("animation", "previews")
     if not ready:
         return _refuse(undecided, "previews", "animation")
@@ -211,6 +225,44 @@ def previews(argv: list) -> int:
         return 2
     import webbrowser
     webbrowser.open(url)
+    return 0
+
+
+def _render_models(args) -> int:
+    """Contact sheets per folder node, or tiles for given keys: one
+    Blender pass per run, resumable (rendered tiles are kept)."""
+    from . import sheets
+    blender = sheets.find_blender()
+    if not blender and not args.dry_run:
+        _say("cannot render: Blender not found (set BLENDER_EXE, or install Blender 4.x/5.x)")
+        return 2
+    root = config.LIBRARY_ROOT
+    if args.keys:
+        if args.dry_run:
+            todo = [k for k in args.keys if args.force or not sheets.tile_path(k).is_file()]
+            _say(f"{len(todo)} of {len(args.keys)} picture(s) would be rendered -> {sheets.tiles_dir()}")
+            for k in todo:
+                _say(f"  {k}")
+            return 0
+        res = sheets.render_keys(args.keys, root, blender=blender, log=_say, force=args.force)
+        for k, v in res.items():
+            _say(f"  {'ok     ' if v.get('ok') else 'FAILED '} {k}"
+                 + ("" if v.get("ok") else f"  ({v.get('error')})")
+                 + ("  (cached)" if v.get("cached") else ""))
+        n_ok = sum(1 for v in res.values() if v.get("ok"))
+        _say(f"{n_ok} of {len(res)} picture(s) under {sheets.tiles_dir()}; "
+             f"served as /render/<hash>.png (the mesh item's `render`)")
+        return 0 if n_ok == len(res) else 4
+    stats = sheets.build_sheets(config.DB_PATH, root, folders=args.folder, force=args.force,
+                                limit=min(max(args.limit, 1), sheets.LIMIT), blender=blender,
+                                log=_say, dry_run=args.dry_run)
+    if args.dry_run:
+        _say(f"{len(stats['nodes'])} folder(s) would get a sheet; {stats['skipped']} have one")
+        return 0
+    _say(f"sheets: {stats['sheets']} rendered, {stats['skipped']} kept, "
+         f"{stats['tiles']} new tile(s), {stats['failed']} model(s) failed -> {sheets.sheets_dir()}")
+    if stats["failed"] and not stats["tiles"] and not stats["skipped"]:
+        return 4                    # nothing came out of Blender
     return 0
 
 

@@ -1,0 +1,58 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Models</title><style>
+:root{--bg:#14161a;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1;--link:#7cc4ff;--warn:#ffd479}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui;background:var(--bg);color:var(--fg);display:flex;height:100vh;overflow:hidden}
+header{position:fixed;top:0;left:0;right:0;z-index:5;background:var(--bg);padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center}
+header a{color:var(--link);text-decoration:none}h1{font-size:15px;margin:0}
+#side{width:320px;flex:none;margin-top:49px;overflow:auto;border-right:1px solid var(--line);padding:8px 0}
+#side div.n{padding:6px 14px;cursor:pointer;display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #1c2027}
+#side div.n:hover,#side div.n.on{background:#191c22}
+#side .f{color:var(--dim);font-size:11.5px;word-break:break-all}
+#side .c{color:var(--dim);font-size:12px;white-space:nowrap}
+#main{flex:1;margin-top:49px;overflow:auto;padding:14px 18px}
+.meta{color:var(--dim);font-size:12.5px}
+#sheet{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#0f1114;display:block;margin:8px 0 14px}
+#nosheet{padding:14px;border:1px dashed var(--line);border-radius:8px;color:var(--dim);margin:8px 0 14px}
+#nosheet code{color:var(--fg)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px;display:flex;gap:8px}
+.card img,.card .ph{width:72px;height:72px;border-radius:5px;background:#0f1114;flex:none;object-fit:cover}
+.card .n{font-weight:600;word-break:break-word;font-size:13px}
+.card .k{color:var(--dim);font-size:11px;word-break:break-all}
+.card .facts{color:var(--dim);font-size:11.5px;margin-top:3px}
+.card a{color:var(--link);text-decoration:none;font-size:12px}
+input,select{background:#14161a;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit}
+.pages{margin:12px 0;color:var(--dim);font-size:12.5px}.pages a{margin-right:10px}
+</style></head><body>
+<header><a href="/">&larr; home</a><h1>Models</h1><input id="q" placeholder="search this folder ..." size="24">
+<span class="meta" id="count"></span><span style="flex:1"></span><a href="/tags">library map</a><a href="/setup">setup</a></header>
+<div id="side"></div>
+<div id="main"><p class="meta">Pick a folder on the left. A contact sheet shows up to 36 of its models; every model lists its measured facts, and FBX files open in the viewer.</p></div>
+<script>
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $=id=>document.getElementById(id);
+let folders=[],cur=null,page=1;
+async function j(u){const r=await fetch(u);const d=await r.json();if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;}
+async function loadFolders(){const d=await j('/api/folders');folders=d.folders.filter(f=>f.meshes>0&&f.include);
+ $('side').innerHTML=folders.map(f=>`<div class="n" data-f="${esc(f.folder)}"><div><div>${esc(f.name||f.folder.split('/').pop())}</div><div class="f">${esc(f.folder)}</div></div><div class="c">${Number(f.meshes).toLocaleString()}${f.sheet?' 🖼':''}</div></div>`).join('')||'<div class="meta" style="padding:12px">no model folders indexed yet</div>';
+ const want=new URLSearchParams(location.search).get('folder');const first=folders.find(f=>f.folder===want)||folders[0];if(first)show(first.folder);}
+$('side').addEventListener('click',e=>{const el=e.target.closest('[data-f]');if(el)show(el.dataset.f);});
+async function show(folder,p){cur=folder;page=p||1;$('q').value=$('q').value;
+ document.querySelectorAll('#side .n').forEach(n=>n.classList.toggle('on',n.dataset.f===folder));
+ history.replaceState(null,'','/models?folder='+encodeURIComponent(folder));
+ const f=folders.find(x=>x.folder===folder)||{};
+ const qs=new URLSearchParams({folder,size:'60',page:String(page),sort:'name'});const q=$('q').value.trim();if(q)qs.set('q',q);
+ let d;try{d=await j('/api/meshes?'+qs);}catch(e){$('main').innerHTML=`<p class="meta">${esc(e.message)}</p>`;return;}
+ $('count').textContent=`${Number(d.total).toLocaleString()} model(s) in ${folder}`;
+ const facts=i=>[i.bbox_m?`${i.bbox_m.map(v=>Number(v).toFixed(2)).join(' × ')} m`:'',i.triangles!=null?`${Number(i.triangles).toLocaleString()} tris`:'',i.pivot?`pivot ${i.pivot}`:'',i.units?i.units:'',i.lods?`${i.lods} LOD`:'',i.skin?'skinned':'',i.scale_suspect?'<span style="color:var(--warn)">size suspect</span>':''].filter(Boolean).join(' · ');
+ const view=i=>/\.fbx$/i.test(i.key.split('#')[0])?` <a href="/viewer?file=${encodeURIComponent(i.key.split('#')[0])}">view 3D</a>`:'';
+ const pages=d.total>d.size?`<div class="pages">page ${page} of ${Math.ceil(d.total/d.size)} ${page>1?`<a href="#" data-p="${page-1}">previous</a>`:''}${page*d.size<d.total?`<a href="#" data-p="${page+1}">next</a>`:''}</div>`:'';
+ $('main').innerHTML=`<h2 style="margin:0 0 2px;font-size:16px">${esc(f.name||folder)}</h2><div class="meta">${esc(folder)} · ${f.kind||''}${f.units?' · '+esc(f.units):''}${f.pivot?' · common pivot '+esc(f.pivot):''}${f.lod_groups?' · '+f.lod_groups+' LOD groups':''}${f.vendor?' · '+esc(f.vendor):''}</div>
+ ${f.sheet?`<img id="sheet" src="${esc(f.sheet)}" alt="contact sheet">`:`<div id="nosheet">No contact sheet yet. Render one with <code>python pharos.py previews --sheets --folder "${esc(folder)}"</code> (needs Blender, about a minute per folder).</div>`}
+ ${pages}<div class="grid">${d.items.map(i=>`<div class="card">${i.render?`<img src="${esc(i.render)}" alt="">`:'<div class="ph"></div>'}<div><div class="n">${esc(i.name)}</div><div class="k">${esc(i.key)}</div><div class="facts">${facts(i)}</div>${view(i)}</div></div>`).join('')}</div>${pages}`;
+ $('main').scrollTop=0;}
+$('main').addEventListener('click',e=>{if(e.target.dataset.p){e.preventDefault();show(cur,+e.target.dataset.p);}});
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter'&&cur)show(cur,1);});
+loadFolders().catch(e=>{$('main').innerHTML=`<p class="meta">${esc(e.message)}</p>`;});
+</script></body></html>

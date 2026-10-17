@@ -2171,6 +2171,183 @@ def test_clips_and_folders_tables_from_measured_records():
             config.AGENT_FILES, library_map.PATH = old
 
 
+def test_sheets_pick_keys_compose_and_index():
+    """The representative pick: full models only, one per variant group,
+    the biggest first, dealt out across sub-folders; the standard-library
+    image path (BMP in, PNG tiles, a PNG sheet) and the URLs."""
+    import tempfile
+    from asset_service import config, sheets
+    entries = [("A/x/Crate_01.fbx", "Crate 01", 500, {"variant_group": "crate"}, "x"),
+               ("A/x/Crate_02.fbx", "Crate 02", 900, {"variant_group": "crate"}, "x"),
+               ("A/x/Crate_LOD1.fbx", "Crate LOD1", 100, {"lod_level": 1, "lod_group": "crate"}, "x"),
+               ("A/x/UCX_Crate.fbx", "UCX Crate", 12, {}, "x"),
+               ("A/x/Tree Impostor.fbx", "Tree Impostor", 2, {}, "x"),
+               ("A/y/Barrel.fbx", "Barrel", 300, {}, "y"),
+               ("A/y/Lamp.fbx", "Lamp", 200, {}, "y"),
+               ("A/Loose.fbx", "Loose", 50, {}, "")]
+    picked = sheets.pick_keys(entries, limit=36)
+    assert picked[0] in ("A/x/Crate_01.fbx", "A/y/Barrel.fbx"), picked
+    assert "A/x/Crate_02.fbx" not in picked and "A/x/Crate_LOD1.fbx" not in picked
+    assert "A/x/UCX_Crate.fbx" not in picked and "A/x/Tree Impostor.fbx" not in picked
+    assert set(picked) == {"A/x/Crate_01.fbx", "A/y/Barrel.fbx", "A/y/Lamp.fbx", "A/Loose.fbx"}, picked
+    assert sheets.pick_keys(entries, limit=2) == ["A/x/Crate_01.fbx", "A/y/Barrel.fbx"] or \
+        sheets.pick_keys(entries, limit=2) == ["A/y/Barrel.fbx", "A/x/Crate_01.fbx"]
+    with tempfile.TemporaryDirectory() as tmp:
+        old = config.PREVIEW_DIR
+        config.PREVIEW_DIR = Path(tmp)
+        try:
+            # a 4x3 BMP, bottom-up, padded rows -> PNG tile -> read back
+            import struct
+            w, h = 4, 3
+            stride = (w * 3 + 3) & ~3
+            px = bytearray()
+            for y in range(h):               # BMP rows are bottom-up, BGR
+                for x in range(w):
+                    px += bytes([x * 10, y * 20, 255])
+                px += b"\0" * (stride - w * 3)
+            bmp = (b"BM" + struct.pack("<IHHI", 54 + len(px), 0, 0, 54)
+                   + struct.pack("<IiiHHIIiiII", 40, w, h, 1, 24, 0, len(px), 0, 0, 0, 0) + px)
+            bmp_file = Path(tmp) / "t.bmp"
+            bmp_file.write_bytes(bmp)
+            rw, rh, rows = sheets.read_bmp(bmp_file)
+            assert (rw, rh) == (4, 3) and rows[0][:3] == bytes([255, 40, 0]), rows[0][:6]
+            key = "Pack/Crate.fbx"
+            sheets.write_png(sheets.tile_path(key), rw, rh, rows)
+            pw, ph, prow = sheets.read_png(sheets.tile_path(key))
+            assert (pw, ph) == (4, 3) and prow == rows
+            assert sheets.tile_url(key) == f"/render/{sheets.tile_hash(key)}.png"
+            assert sheets.tile_url("Pack/Nope.fbx") is None
+            # a sheet of one rendered and one missing tile
+            out = sheets.sheet_path("Pack")
+            placed = sheets.compose([key, "Pack/Nope.fbx"], out, columns=2, tile=4)
+            sw, sh, srows = sheets.read_png(out)
+            assert placed == 1 and (sw, sh) == (8, 4) and srows[0][:3] == bytes([255, 40, 0]), (placed, sw, sh)
+            assert sheets.sheet_url("Pack") == f"/sheet/{sheets.slug('Pack')}.png" \
+                and sheets.sheet_url("Other") is None
+            sheets.save_index({"Pack": {"keys": [key]}})
+            assert sheets.load_index()["Pack"]["keys"] == [key]
+            # names: readable, bounded, unique for folders the name cannot tell apart
+            assert sheets.slug("A/B C").startswith("A__B_C-") and len(sheets.slug("A/B C")) == 15
+            assert sheets.slug("Sci Fi") != sheets.slug("Sci_Fi") and sheets.slug("Kit/Pack (Free)") != sheets.slug("Kit/Pack [Free]")
+            long = "Unity/" + "x" * 150
+            assert len(sheets.slug(long)) <= 100 and ".." not in sheets.slug("Kit/Pack..Old")
+            import re as _re
+            for f in ("A/B C", "Sci Fi", long, "Kit/Pack..Old", "BOOTH/和風家具"):
+                assert _re.fullmatch(r"[A-Za-z0-9._-]{1,120}", sheets.slug(f)), sheets.slug(f)
+            # the pick judges the file, not the folders above it
+            deep = [("Fab/Tree Impostors Pack/oak.fbx", "Oak", 10, {}, ""),
+                    ("Kits/Physics_Collision_Props/UCX_box.fbx", "UCX box", 10, {}, "")]
+            assert sheets.pick_keys(deep) == ["Fab/Tree Impostors Pack/oak.fbx"]
+        finally:
+            config.PREVIEW_DIR = old
+
+def _bmp_bytes(w, h, rows):
+    """A 24-bit BMP of the given RGB rows (top-down rows in)."""
+    import struct
+    pad = (4 - (w * 3) % 4) % 4
+    body = b"".join(bytes(b for x in range(w) for b in (r[x * 3 + 2], r[x * 3 + 1], r[x * 3]))
+                    + b"\0" * pad for r in reversed(rows))
+    head = struct.pack("<2sIHHI", b"BM", 54 + len(body), 0, 0, 54)
+    info = struct.pack("<IiiHHIIiiII", 40, w, h, 1, 24, 0, len(body), 2835, 2835, 0, 0)
+    return head + info + body
+
+
+def _stub_runner(tmp):
+    """A 'blender' that runs the --python script with Python: a .cmd that
+    drops Blender's flags and passes the job path on."""
+    if os.name == "nt":
+        cmd = tmp / "blender_stub.cmd"
+        cmd.write_text('@echo off\r\n"%s" "%%4" -- "%%6"\r\n' % sys.executable, encoding="ascii")
+    else:
+        cmd = tmp / "blender_stub.sh"
+        cmd.write_text('#!/bin/sh\nexec "%s" "$4" -- "$6"\n' % sys.executable, encoding="ascii")
+        cmd.chmod(0o755)
+    return str(cmd)
+
+
+def test_blender_renders_tiles_and_a_sheet():
+    """With Blender: a cube and a flat plate (OBJ, Blender's own importer;
+    the tests' hand-built FBX is too bare for the FBX add-on) render to
+    tiles (a lit model on a dark background, not a blank frame) and
+    compose into a sheet; rendered tiles are kept. SKIP without Blender
+    unless PHAROS_REQUIRE_BLENDER=1."""
+    import tempfile
+    from asset_service import config, sheets
+    exe = _blender_for_checks()
+    if not exe:
+        assert os.environ.get("PHAROS_REQUIRE_BLENDER") != "1", \
+            "PHAROS_REQUIRE_BLENDER=1 but no Blender found"
+        print("SKIP: no Blender on this machine -- render checks not run")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "Lib"
+        (root / "Props").mkdir(parents=True)
+        verts = [f"v {x} {y} {z}" for x in (-1, 1) for y in (0, 2) for z in (-1, 1)]
+        faces = ["f 1 2 4 3", "f 5 7 8 6", "f 1 3 7 5", "f 2 6 8 4", "f 1 5 6 2", "f 3 4 8 7"]
+        (root / "Props" / "Cube.obj").write_text("\n".join(verts + faces) + "\n", encoding="utf-8")
+        (root / "Props" / "plate.obj").write_text(
+            "v -1 0 -1\nv 1 0 -1\nv 1 0 1\nv -1 0 1\nf 1 2 3 4\n", encoding="utf-8")
+        old = config.PREVIEW_DIR
+        config.PREVIEW_DIR = Path(tmp) / "previews"
+        try:
+            keys = ["Props/Cube.obj", "Props/plate.obj", "Props/missing.fbx"]
+            res = sheets.render_tiles(keys, root, exe, log=lambda *_: None, timeout=600)
+            assert res["Props/missing.fbx"]["error"] == "file not on disk"
+            for k in keys[:2]:
+                assert res[k].get("ok"), (k, res[k])
+                w, h, rows = sheets.read_png(sheets.tile_path(k))
+                assert (w, h) == (sheets.TILE, sheets.TILE)
+                shades = {rows[y][x * 3] for y in range(0, h, 16) for x in range(0, w, 16)}
+                assert len(shades) > 4, f"{k}: a flat frame ({len(shades)} shades)"
+            res2 = sheets.render_tiles(keys[:2], root, exe, log=lambda *_: None)
+            assert all(v.get("cached") for v in res2.values()), "tiles are kept"
+            # a crash on one file: the file is marked, the rest get a new run
+            crasher = root / "Props" / "crash.obj"
+            crasher.write_text("v 0 0 0\n", encoding="utf-8")
+            stub = Path(tmp) / "blender_stub.py"
+            stub.write_text(
+                "import json, os, shutil, sys\n"
+                "job = json.load(open(sys.argv[-1], encoding='utf-8'))\n"
+                "out = {}\n"
+                "for it in job['items']:\n"
+                "    if it['path'].endswith('crash.obj'):\n"
+                "        os._exit(11)\n"
+                "    shutil.copyfile(os.environ['PHAROS_TEST_BMP'], it['out'])\n"
+                "    out[it['key']] = {'ok': True}\n"
+                "    json.dump(out, open(job['result'], 'w', encoding='utf-8'))\n",
+                encoding="utf-8")
+            bmp = Path(tmp) / "tile.bmp"
+            w, h, rows = sheets.read_png(sheets.tile_path(keys[0]))
+            bmp.write_bytes(_bmp_bytes(w, h, rows))
+            os.environ["PHAROS_TEST_BMP"] = str(bmp)
+            try:
+                keys3 = ["Props/Cube.obj", "Props/crash.obj", "Props/plate.obj", "Props/last.obj"]
+                shutil.copyfile(root / "Props" / "plate.obj", root / "Props" / "last.obj")
+                for k in keys3[2:]:
+                    if sheets.tile_path(k).is_file():
+                        sheets.tile_path(k).unlink()
+                logs = []
+                real_script = sheets._SCRIPT
+                sheets._SCRIPT = stub
+                try:
+                    res3 = sheets.render_tiles(keys3, root, _stub_runner(Path(tmp)), log=logs.append)
+                finally:
+                    sheets._SCRIPT = real_script
+            finally:
+                del os.environ["PHAROS_TEST_BMP"]
+            assert res3["Props/Cube.obj"].get("cached")
+            assert not res3["Props/crash.obj"]["ok"] and "exit 11" in res3["Props/crash.obj"]["error"]
+            assert res3["Props/plate.obj"]["ok"] and res3["Props/last.obj"]["ok"], res3
+            assert any("stopped on Props/crash.obj" in l for l in logs), logs
+            out = sheets.sheet_path("Props")
+            assert sheets.compose(keys, out, columns=3) == 2
+            sw, sh, _ = sheets.read_png(out)
+            assert (sw, sh) == (3 * sheets.TILE, sheets.TILE)
+        finally:
+            config.PREVIEW_DIR = old
+
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

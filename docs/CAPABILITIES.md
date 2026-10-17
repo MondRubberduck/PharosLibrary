@@ -18,7 +18,7 @@ token cost.** Operating manual (setup + build doctrine):
 |---|---|---|
 | HTTP JSON API | `GET http://127.0.0.1:8765/api/*` (localhost, no auth) | everything — search, details, measured facts (size, pivot, units, LOD groups, clip duration and root motion), file bytes, previews |
 | MCP server | `python -m service.pharos_mcp_server` (stdio, 10 tools) | agents with MCP support (Claude Desktop, Cursor, …) |
-| Web dashboard | `http://127.0.0.1:8765` in a browser | human verification of what the agent found |
+| Web dashboard | `http://127.0.0.1:8765` in a browser (`/models`: every model folder with its contact sheet, facts and the 3D viewer) | human verification of what the agent found |
 | Setup page | `http://127.0.0.1:8765/setup` (`python pharos.py setup` opens it); API `/api/setup/state`, `/api/setup/survey`, `/api/setup/map`, `/api/setup/confirm`, `/api/setup/progress`, `/api/fs/drives`, `/api/fs/list` (folder browsing on loopback binds only) | picking the library, correcting the survey, deciding, indexing; a server without a config serves only this |
 | CLI | `python pharos.py setup/init/survey/map/ingest/measure/serve/doctor`, `scanner.py`, `scene_manifest.py` | onboarding, ingestion, validation, builds |
 | Agent index files | `<library_root>/_Agent_Files/*.md`, `*.jsonl` | offline reading when the server is down |

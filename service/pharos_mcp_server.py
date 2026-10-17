@@ -102,7 +102,11 @@ def _animation_clip_count(conn: sqlite3.Connection) -> int:
 def pharos_stats() -> str:
     """Get a library overview: total counts per section (meshes, textures,
     audio, collection, animations; `packs` = the library map's indexed
-    folders). Call this FIRST to understand scale.
+    folders). Call this FIRST to understand scale. pharos_tree('folders')
+    lists the folders with their contact sheets (`sheet`: a picture of up
+    to 36 models of the folder); a mesh item carries `render` when its
+    own picture exists. The owner renders pictures with `pharos.py
+    previews --sheets` / `--keys`; ask instead of guessing a look.
     Doctrine for everything you find: prefer assets already in the
     library; owned-not-downloaded -> ask the user (requisition list,
     never silent substitution); absent -> model it yourself and SAY SO
@@ -131,7 +135,7 @@ def pharos_stats() -> str:
 
 
 @mcp.tool()
-def pharos_tree(section: str) -> str:
+def pharos_tree(section: str, folder: Optional[str] = None) -> str:
     """The valid filter values of one section, with counts -- look here
     before filtering, the names are specific to this library.
 
@@ -140,14 +144,17 @@ def pharos_tree(section: str) -> str:
                  (categories/subs), 'animations' (folders, skeletons),
                  'collection' (stores/groups/categories), 'folders' (the
                  library map's nodes with their measured facts: counts,
-                 units, pivot, LOD and variant groups, category words)
+                 units, pivot, LOD and variant groups, category words,
+                 and `sheet`, the contact sheet URL when rendered)
+        folder: with 'folders': one node, with its `facts` and the
+                `sheet_keys` behind its contact sheet's tiles
     """
     fn = {"meshes": browse.api_meshes_themes,
           "textures": browse.api_textures_tree,
           "audio": browse.api_audio_tree,
           "animations": browse.api_anim_tree,
           "collection": browse.api_collection_tree,
-          "folders": lambda: browse.api_folders({})}.get(
+          "folders": lambda: browse.api_folders({"folder": [folder]} if folder else {})}.get(
               (section or "").strip().lower())
     if fn is None:
         return json.dumps({"error": "unknown section", "sections": [

@@ -100,7 +100,12 @@ roots, kit root, skipped folders). Change the map, not the config.
 4. Run the consented chains: `python pharos.py convert`, `extract`,
    `previews`. Each takes `--dry-run`, which prints the commands it
    would run. Then `python pharos.py ingest` again to import the
-   results.
+   results. With Blender present, offer the pictures too:
+   `python pharos.py previews --sheets` renders one contact sheet per
+   model folder (up to 36 models each, about a minute per folder);
+   `--keys <key> ...` renders the models of a shortlist. Agents and the
+   `/models` page show them; a library without them works, it just
+   cannot be looked at.
 5. `python pharos.py serve --no-open`; wait for **INGESTION COMPLETE**;
    report the per-section counts. `python pharos.py doctor` must say
    **READY**, or **READY-WITH-GAPS** where every gap is a kind the user

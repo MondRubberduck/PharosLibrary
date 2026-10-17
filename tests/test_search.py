@@ -2408,6 +2408,64 @@ def test_clips_api_serves_measured_facts_and_filters():
             browse.CANONICAL_ROOTS[:] = old_roots
 
 
+def test_pictures_are_served_and_named():
+    """A rendered tile rides on the item as `render`, a folder's sheet on
+    /api/folders as `sheet`; /render and /sheet serve the PNGs (404 with
+    the rendering command before); folder= narrows a mesh search to a
+    map folder."""
+    import sqlite3
+    from asset_service import browse, config, folders_import, library_map, sheets
+    rows = [("Crate", "Props", {"fbx": "x://Props/Crates/crate.fbx"}),
+            ("Lamp", "Props", {"fbx": "x://Props/Lamps/lamp.fbx"}),
+            ("Tree", "Env", {"fbx": "x://Env/tree.fbx"})]
+    with tempfile.TemporaryDirectory() as tmp:
+        lib = Path(tmp) / "Lib"
+        for rel in ("Props/Crates", "Props/Lamps", "Env"):
+            (lib / rel).mkdir(parents=True)
+        for r in rows:
+            r[2]["fbx"] = str(lib / r[2]["fbx"][4:])
+        old_prev, old_roots, old_map = config.PREVIEW_DIR, list(browse.CANONICAL_ROOTS), library_map.PATH
+        config.PREVIEW_DIR = Path(tmp) / "previews"
+        browse.CANONICAL_ROOTS[:] = [lib]
+        library_map.PATH = lib / "_Agent_Files" / "library_map.csv"
+        library_map.sync([("Props", "Props"), ("Env", "Env")])
+        library_map.update("Props", kind="3d-assets")
+        library_map.update("Env", kind="3d-assets")
+
+        def run(browse):
+            folders_import.build(browse._DB_PATH, lib)
+            key = "Props/Crates/crate.fbx"
+            assert "render" not in browse.api_meshes({"q": ["crate"]})["items"][0]
+            assert _drive("/render/" + sheets.tile_hash(key) + ".png")[0] == 404
+            sheets.write_png(sheets.tile_path(key), 2, 2, [b"\x10\x20\x30" * 2] * 2)
+            item = browse.api_meshes({"q": ["crate"]})["items"][0]
+            assert item["render"] == "/render/" + sheets.tile_hash(key) + ".png", item
+            st, body = _drive(item["render"])
+            assert st == 200 and body[:8] == b"\x89PNG\r\n\x1a\n", st
+            assert _drive("/render/../x.png")[0] in (400, 404) and _drive("/sheet/nope.png")[0] == 404
+            got = {f["folder"]: f for f in browse.api_folders({})["folders"]}
+            assert got["Props"]["sheet"] is None
+            sheets.compose([key], sheets.sheet_path("Props"), columns=1, tile=2)
+            sheets.save_index({"Props": {"keys": [key]}})
+            got = {f["folder"]: f for f in browse.api_folders({})["folders"]}
+            url = f"/sheet/{sheets.slug('Props')}.png"
+            assert got["Props"]["sheet"] == url and "sheet_keys" not in got["Props"], got["Props"]
+            assert _drive(url)[0] == 200
+            one = browse.api_folders({"folder": ["props"]})["folder"]
+            assert one["sheet"] == url and one["sheet_keys"] == [key]
+            assert browse.api_folders({"folder": ["env"]})["folder"]["sheet_keys"] == []
+            names = lambda **kw: sorted(i["name"] for i in browse.api_meshes(   # noqa: E731
+                {k: [v] for k, v in kw.items()})["items"])
+            assert names(folder="Props") == ["Crate", "Lamp"] and names(folder="Props/Lamps") == ["Lamp"]
+            assert names(folder="Env") == ["Tree"] and names(folder="Nope") == []
+            assert _drive("/models")[0] == 200
+        try:
+            _with_registry(rows, run)
+        finally:
+            config.PREVIEW_DIR, library_map.PATH = old_prev, old_map
+            browse.CANONICAL_ROOTS[:] = old_roots
+
+
 def test_short_items_repeat_nothing_and_name_owned_purchases():
     """A third of a search answer repeated itself (fbx = root + key,
     max_dim_m / height_m = bbox_m, on_disk = 1 on every row), while the

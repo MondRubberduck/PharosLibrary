@@ -48,7 +48,7 @@ from asset_service import textmatch as tm  # noqa: E402
 from asset_service import skeleton  # noqa: E402
 from asset_service import library_map  # noqa: E402
 from asset_service import setup_flow  # noqa: E402
-from asset_service import clips_import, folders_import  # noqa: E402
+from asset_service import clips_import, folders_import, sheets  # noqa: E402
 from asset_service.library_map import DOMAINS  # noqa: E402
 
 DEFAULT_DB = config.DB_PATH
@@ -203,6 +203,12 @@ TEXTURE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 PAGE_SIZE = 200            # pack-content page rows per request
 PREVIEW_DIR = config.PREVIEW_DIR   # rendered clip loops (webm)
 SETUP_PAGE = _load_tpl("setup.html")
+MODELS_PAGE = _load_tpl("models.html")
+# the purchases tile exists only when the library has a purchase list
+_ASSETS_TILE = ('<a class="tile" href="/assets">\n <img src="{{ASSET_THUMB}}" alt="" '
+                'onerror="this.style.opacity=0">\n <div class="edge"></div>\n <div class="label">'
+                '<h1>Assets</h1><span>{{ASSET_PACKS}} purchases · galleries · store links</span>'
+                '</div>\n</a>\n')
 # SETUP MODE: the server runs without a library (no config yet, or the
 # owner is re-pointing it); only the setup page and its API answer, the
 # rest says so with a 503 until the first ingest ran
@@ -1388,6 +1394,9 @@ def _mesh_item(r: dict, tier: int) -> dict:
         item["category"] = "/".join(f["category_hint"])
     if r.get("_lods"):
         item["lods"] = r["_lods"]         # lower-detail copies in the pack
+    render = sheets.tile_url(r["key"])
+    if render:
+        item["render"] = render           # a 256 px picture of this model
     pt = r.get("_ptag")             # the owner's pack tags, when set
     if pt and pt["styles"]:
         item["styles"] = pt["styles"]
@@ -1486,7 +1495,8 @@ def api_meshes(params: dict) -> dict:
     pack tags: Photorealistic, Stylized, Low Poly; a comma list needs
     all), min_dim/max_dim (metres, on the largest axis),
     min_h/max_h (bbox Z: the registry is Z-up), max_tri (triangle
-    budget), textures=1 (only textured), pivot (base-centre | corner |
+    budget), textures=1 (only textured), folder (a library map folder:
+    models below it), pivot (base-centre | corner |
     centre | top | outside | other: where the origin sits), skin=1|0
     (skinned characters only / none), lod=0 (no lower-detail copies),
     units (cm | m | in ...: the source file's unit), sort, page, size.
@@ -1515,6 +1525,7 @@ def api_meshes(params: dict) -> dict:
     min_h, max_h = P.num("min_h", 0.0), P.num("max_h", 1e9)
     max_tri = P.num("max_tri", 1e12)
     only_tex = P.flag("textures")
+    want_folder = P.s("folder").replace("\\", "/").strip("/").lower()
     want_pivot = P.s("pivot").strip().lower()
     want_skin = P.s("skin").strip().lower()
     want_units = P.s("units").strip().lower()
@@ -1583,6 +1594,10 @@ def api_meshes(params: dict) -> dict:
         ptw = pt["words"] if pt else ()
         if not out and only_tex and not r["texture_count"]:
             out = True
+        if not out and want_folder:
+            f_low = (r.get("_file") or "").lower()
+            if not (f_low == want_folder or f_low.startswith(want_folder + "/")):
+                out = True
         facts = r.get("facts") or {}
         fact_unknown = False
         if not out and lod0_only and r.get("_lod"):
@@ -1777,7 +1792,7 @@ def _owned_not_downloaded(q_raw: str, styles=()):
 
 _MESH_FILTERS = ("pack", "source", "kind", "theme", "themes", "style",
                  "styles", "min_dim", "max_dim", "min_h", "max_h", "max_tri",
-                 "textures", "pivot", "skin", "lod", "units")
+                 "textures", "pivot", "skin", "lod", "units", "folder")
 _FULL_BUDGET = 80_000      # bytes of full records per answer (~20k tokens)
 _FULL_MAX_KEYS = 50
 
@@ -2262,6 +2277,14 @@ def api_folders(params: dict) -> dict:
         rows = folders_import.rows(conn, folder or None)
     finally:
         conn.close()
+    for r in rows:
+        r["sheet"] = sheets.sheet_url(r["folder"])
+    if folder and rows:
+        # the keys behind the sheet's tiles (reading order), one folder at
+        # a time: the all-folders answer stays small
+        index = sheets.load_index()
+        rows[0]["sheet_keys"] = ((index.get(rows[0]["folder"]) or {}).get("keys") or []
+                                 if rows[0]["sheet"] else [])
     if folder:
         if not rows:
             return {"error": "not found", "folder": folder}
@@ -2478,7 +2501,19 @@ class Handler(BaseHTTPRequestHandler):
                 aclips = len(_clips)
                 afold = len({c["pack"] for c in _clips})
                 conn = db.connect(_DB_PATH)
-                apacks = conn.execute("SELECT COUNT(*) FROM collection").fetchone()[0]
+                try:
+                    apacks = conn.execute("SELECT COUNT(*) FROM collection").fetchone()[0]
+                except sqlite3.OperationalError:
+                    apacks = 0
+                try:
+                    mcount = conn.execute("SELECT COUNT(*) FROM meshes").fetchone()[0]
+                    mfolders = conn.execute(
+                        "SELECT COUNT(*) FROM folders WHERE meshes > 0 AND include = 1").fetchone()[0]
+                except sqlite3.OperationalError:
+                    mcount = mfolders = 0
+                first_sheet = next((p.name for p in sorted(sheets.sheets_dir().glob("*.png"))
+                                    if not p.name.startswith("_")), None) \
+                    if sheets.sheets_dir().is_dir() else None
                 tcount = conn.execute("SELECT COUNT(*) FROM textures").fetchone()[0]
                 acount = conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]
                 ahours = conn.execute(
@@ -2521,6 +2556,12 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
                 from urllib.parse import quote as _pq
                 html = (DASH_PAGE
+                        .replace("{{ASSETS_TILE}}", _ASSETS_TILE if apacks else "")
+                        .replace("{{MODELS_THUMB}}",
+                                 "/sheet/" + first_sheet if first_sheet
+                                 else "/static/heroes/assets.svg")
+                        .replace("{{MESH_COUNT}}", f"{mcount:,}")
+                        .replace("{{MODEL_FOLDERS}}", str(mfolders))
                         .replace("{{ANIM_THUMB}}",
                                  "/cimg?path=" + _pq(anim_pick.as_posix())
                                  if anim_pick is not None
@@ -2549,6 +2590,36 @@ class Handler(BaseHTTPRequestHandler):
                 self._html(AUDIO_PAGE.encode("utf-8"))
             elif url.path == "/tags":
                 self._html(TAGS_PAGE.encode("utf-8"))
+            elif url.path == "/models":
+                self._html(MODELS_PAGE.encode("utf-8"))
+            elif url.path.startswith("/sheet/") or url.path.startswith("/render/"):
+                name = url.path.rsplit("/", 1)[1]
+                if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}\.png", name) or ".." in name:
+                    return self._json({"error": "bad name"}, 400)
+                base = sheets.sheets_dir() if url.path.startswith("/sheet/") else sheets.tiles_dir()
+                pfile = base / name
+                if not pfile.is_file():
+                    return self._json({"error": "not rendered yet",
+                                       "render": "python pharos.py previews --sheets"
+                                       if url.path.startswith("/sheet/")
+                                       else "python pharos.py previews --keys <key>"}, 404)
+                stat = pfile.stat()
+                etag = f'"{stat.st_size:x}-{int(stat.st_mtime):x}"'
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                data = pfile.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Cache-Control", "no-cache")     # re-renders replace bytes
+                self.send_header("ETag", etag)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                if not getattr(self, "_head_only", False):
+                    self.wfile.write(data)
             elif url.path == "/api/pack_tags":
                 self._json(api_pack_tags())
             elif url.path == "/animation":

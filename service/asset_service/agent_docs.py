@@ -196,7 +196,7 @@ the configured roots — outside paths return 404/403.
 
 | Endpoint | Key filters (all optional) | Result key |
 |---|---|---|
-| `/api/meshes` | `q`, `pack`, `source`, `kind`, `theme` (one or a comma list), `style` (`Photorealistic`, `Stylized`, `Low Poly`; a comma list needs all), `min_dim`/`max_dim`, `min_h`/`max_h`, `max_tri`, `textures=1`, `pivot` (base-centre, corner, centre, top, outside, other), `skin=1|0`, `lod=0` (no lower-detail copies), `units` (cm, m, in ...), `sort` (see below), `detail=1` | `items` (short) |
+| `/api/meshes` | `q`, `pack`, `source`, `kind`, `theme` (one or a comma list), `style` (`Photorealistic`, `Stylized`, `Low Poly`; a comma list needs all), `min_dim`/`max_dim`, `min_h`/`max_h`, `max_tri`, `textures=1`, `folder` (a library map folder: the models below it), `pivot` (base-centre, corner, centre, top, outside, other), `skin=1|0`, `lod=0` (no lower-detail copies), `units` (cm, m, in ...), `sort` (see below), `detail=1` | `items` (short) |
 | `/api/meshes/item?key=` | `key` repeatable (up to 50), or `id` | `items` (full: recipe, materials, corners) + `not_returned` / `missing` / `candidates` |
 | `/api/meshes/packs` | — (pack names, counts, wiring health, linked `purchases`, the owner's `styles` / `pack_tags`) | `packs` |
 | `/api/pack_tags` | — (every pack folder with the owner's styles, domain and tags) | `packs` |
@@ -212,7 +212,7 @@ the configured roots — outside paths return 404/403.
 | `/api/collection/tree` | — (valid `store` / `group` / `cat` values) | `stores`, `groups`, `cats` |
 | `/api/anim/clips` | `q`, `packs` (pack ids or folders from `/api/anim/tree`, pipe-separated), `min_dur`/`max_dur` (seconds), `root_motion=1|0`, `family` (cc, mixamo, ue-mannequin), `page`, `size` | `clips` (NOT `items`): each with `duration_s`, `fps`, `frames`, `root_motion` (true / false / null = not readable), `family`, `bones`, `has_mesh` (measured; absent on an index from before `pharos.py measure`); the answer's `root` + `/` + `rel` is the file, and `bodies` lists, keyed like each clip's `pack`, the character files the clips play on: one record per skeleton (`family`, the `subfolders` of the pack that use it, `bodies`) |
 | `/api/anim/tree` | — | folders, clip counts, `skeletons` per folder |
-| `/api/folders` | `folder=` (one folder) | `folders` + `total` (every node); with `folder=` the answer is `folder` (one record, with its `facts`) and an unknown folder is a 404 `{"error": "not found"}`. Each node: the library map's row with what was measured under each: `meshes` / `clips` / `textures` / `audio` counts, `units`, `up_axis`, `pivot` (the common ones), `lod_groups`, `variant_groups`, `category_hints` (the vendor's own folder words), `vendor`, `license` (file path), `wiring_ratio`, `prefabs` |
+| `/api/folders` | `folder=` (one folder) | `folders` + `total` (every node; each with `sheet`, its contact sheet URL or null); with `folder=` the answer is `folder` (one record, with its `facts` and `sheet_keys`, the keys of its sheet's tiles in reading order) and an unknown folder is a 404 `{"error": "not found"}`. Each node: the library map's row with what was measured under each: `meshes` / `clips` / `textures` / `audio` counts, `units`, `up_axis`, `pivot` (the common ones), `lod_groups`, `variant_groups`, `category_hints` (the vendor's own folder words), `vendor`, `license` (file path), `wiring_ratio`, `prefabs` |
 | `/api/stats` | — | `stats` (row counts per table, `last_write`) + `sections` (live totals) |
 
 Styles and `pack_tags` are the owner's own labels per pack (kept in
@@ -255,7 +255,8 @@ is turned 90 degrees about X reads `Z`; only when known) · `lods` (lower-detail
 copies of this model in the pack; only on the full model) · `skin` +
 `bones` (only for a skinned character) · `scale_suspect` (only when the
 measured size is implausible: over 60 m or under 1 cm) · `category` (the
-vendor's own folder words, only when any) · `container` + `object_name` (only when the file holds
+vendor's own folder words, only when any) · `render` (a 256 px picture
+of this model, `/render/<hash>.png`, only when the owner rendered it) · `container` + `object_name` (only when the file holds
 several objects: the object's exact name inside it) · `dim_suspect`
 (only when the size was withheld as unreliable) · `lod` (only for a
 lower-detail copy: 1, 2 ...; LOD0 is the full model) · `collider` (only
@@ -292,6 +293,18 @@ texture path; `{}` = unknown, NOT untextured) · `materials` (slot names) ·
 `vertices` · `format` · `view_url` (3D preview page).
 
 **Axes:** `bbox_m` = [x, y, z] metres, **Z-up** (height = `bbox_m[2]`, largest axis = what `min_dim`/`max_dim` filter); scene-manifest positions are Y-up.
+**Pictures:** `/api/folders` lists `sheet` per folder node: a contact
+sheet (a PNG; the URL is in `sheet`) of up to 36 of its models, 6 per
+row, each labelled with its file name (cut to 28 characters). Ask for
+one folder (`/api/folders?folder=`) to get `sheet_keys`: the full keys
+of the tiles in reading order, left to right, top to bottom. Open the
+sheet to see what a pack looks like before you shortlist. A mesh item carries `render` when its
+own picture exists. Pictures are rendered by the owner, not by you:
+`python pharos.py previews --sheets` (every model folder, Blender,
+about a minute per folder) or `python pharos.py previews --keys <key>
+...` (the models you shortlisted). Ask for them; never describe a model
+you have not seen as if you had.
+
 **Keys:** `key` is the stable handle of a mesh (library-relative file path, plus `#object` inside multi-object files): persist it, and percent-encode it as a whole in a URL (`#` → `%23`; an un-encoded `#` is cut off by every HTTP client, and the answer then lists the file's object keys as `candidates`). `id`s are positional and change when an index is rebuilt; `(pack, name)` is not unique.
 
 **Recipe contract** (`recipe.slots[].maps[]`): every texture the material
