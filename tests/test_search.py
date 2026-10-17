@@ -2841,6 +2841,113 @@ def test_agent_start_page_lists_what_to_read_when():
                  "--factory-startup", "bodies", ".obj"):
         assert need in scene, need
 
+def test_viewer_sources_for_obj_and_gltf():
+    """/file hands the viewer FBX, BVH, OBJ, GLB and glTF files under the
+    library (nothing else, nothing outside, no UNC path touched); /res/
+    hands it textures, the .mtl of an OBJ and the .bin of a glTF by their
+    library path in real segments (sibling folders, sub-folders, the old
+    one-segment form), finds a texture named by a path that is not there
+    by its file name under the model's map folder, and stays jailed; the
+    viewer page carries the loaders, the loader files are vendored, the
+    Models page links the formats."""
+    import pathlib
+    from urllib.parse import quote
+    from asset_service import browse, library_map
+    with tempfile.TemporaryDirectory() as tmp:
+        lib = Path(tmp) / "Lib"
+        for d in ("Props/Models", "Props/tex", "Props/textures/ENV", "Env",
+                  "Kits/Trash/part1/models", "Kits/Trash/part3/textures/1k", "Kits/Trash/part3/textures/2k"):
+            (lib / d).mkdir(parents=True)
+        files = {"Props/Models/crate.obj": b"mtllib crate.mtl\nv 0 0 0\n",
+                 "Props/Models/crate.mtl": b"newmtl a\nmap_Kd ../tex/a.png\n",
+                 "Props/tex/a.png": b"\x89PNG\r\n", "Props/tex/b.avif": b"avif",
+                 "Props/Models/scene.gltf": b"{\n", "Props/Models/scene.bin": b"\0\0\0\0",
+                 "Props/Models/box.glb": b"glTF\x02", "Props/Models/notes.txt": b"x",
+                 "Props/Models/walk.fbx": b"Kaydara FBX Binary  \0", "Props/Models/walk.bvh": b"HIERARCHY\n",
+                 "Props/Models/walk.png": b"\x89PNG-fbx",
+                 "Props/textures/ENV/Bricks.jpg": b"\xff\xd8bricks", "Env/Bricks.jpg": b"\xff\xd8other",
+                 "Kits/Trash/part1/models/can.obj": b"v 0 0 0\n",
+                 "Kits/Trash/part3/textures/1k/can.jpg": b"\xff\xd8can1k",
+                 "Kits/Trash/part3/textures/2k/can.jpg": b"\xff\xd8can2k", "Kits/lid.jpg": b"\xff\xd8lid"}
+        for rel, data in files.items():
+            (lib / rel).write_bytes(data)
+        (Path(tmp) / "other.obj").write_bytes(b"v 0 0 0\n")        # outside the library
+        (Path(tmp) / "other.png").write_bytes(b"\x89PNG")
+        old, old_map = list(browse.CANONICAL_ROOTS), library_map.PATH
+        browse.CANONICAL_ROOTS[:] = [lib]
+        library_map.PATH = lib / "_Agent_Files" / "library_map.csv"
+        library_map.sync([("Props", "Props"), ("Env", "Env"),
+                          ("Kits/Trash/part1", "part1"), ("Kits/Trash/part3", "part3")])
+        browse._RES_INDEX.clear()
+        resolved = []
+        real_resolve = pathlib.Path.resolve
+
+        def spy(self, *a, **k):
+            if str(self).startswith(("\\\\", "//")):
+                resolved.append(str(self))
+            return real_resolve(self, *a, **k)
+        pathlib.Path.resolve = spy
+        try:
+            for rel in ("Props/Models/crate.obj", "Props/Models/scene.gltf", "Props/Models/box.glb",
+                        "Props/Models/walk.fbx", "Props/Models/walk.bvh"):
+                st, body = _drive("/file?path=" + quote(rel))
+                assert st == 200 and body == files[rel], (rel, st)
+            assert _drive("/file?path=Props/Models/notes.txt")[0] == 404
+            assert _drive("/file?path=Props/Models/crate.mtl")[0] == 404   # companions go through /res/
+            # the jail: a relative climb, an absolute path outside, an encoded climb
+            assert _drive("/file?path=../other.obj")[0] == 404
+            assert _drive("/file?path=" + quote(str(Path(tmp) / "other.obj")))[0] == 404
+            assert _drive("/res/Props/Models/..%2F..%2F..%2Fother.png")[0] == 404
+            assert _drive("/res/Props/Models/../../../other.png")[0] == 404
+            # a UNC path is refused before anything resolves it (the last one
+            # names a texture a model in Props has: served by name, from Props)
+            for u in ("/file?path=//evil.example/s/a.obj", "/file?path=%5C%5Cevil.example%5Cs%5Ca.obj",
+                      "/res/%2F%2Fevil.example%2Fs/a.png"):
+                assert _drive(u)[0] == 404, u
+            assert _drive("/res/Props/%2F%2Fevil.example%2Fs%2Fa.png")[1] == files["Props/tex/a.png"]
+            assert resolved == [], resolved
+            # resources: real segments, the browser-resolved sibling folder, the
+            # old one-segment form, a sub-folder, the FBX texture, .avif
+            for url, rel in (("/res/Props/Models/crate.mtl", "Props/Models/crate.mtl"),
+                             ("/res/Props/Models/scene.bin", "Props/Models/scene.bin"),
+                             ("/res/Props/tex/a.png", "Props/tex/a.png"),
+                             ("/res/Props%2FModels/crate.mtl", "Props/Models/crate.mtl"),
+                             ("/res/Props%2FModels/../tex/a.png", "Props/tex/a.png"),
+                             ("/res/Props/Models/walk.png", "Props/Models/walk.png"),
+                             ("/res/Props/tex/b.avif", "Props/tex/b.avif")):
+                st, body = _drive(url)
+                assert st == 200 and body == files[rel], (url, st)
+            assert _drive("/res/Props/Models/notes.txt")[0] == 404
+            # a texture the file names by a path that is not there: found by
+            # its name under the model's map folder, not in another folder
+            st, body = _drive("/res/Props/Models/D:/author/kit/Bricks.jpg")
+            assert st == 200 and body == files["Props/textures/ENV/Bricks.jpg"], st
+            st, body = _drive("/res/Props/Models/bricks.JPG")
+            assert st == 200 and body == files["Props/textures/ENV/Bricks.jpg"]
+            assert _drive("/res/Props/Models/nothing.jpg")[0] == 404
+            assert _drive("/res/Env/Models/a.png")[0] == 404            # Props' textures are not Env's
+            assert _drive("/res/Props/Models/crate.obj")[0] == 404      # names find textures only
+            # a kit in parts: the texture sits in a sibling part, one folder
+            # above the model's node; the folders the file named pick the
+            # variant; a top-level folder is never searched
+            st, body = _drive("/res/Kits/Trash/part1/models/textures/2k/can.jpg")
+            assert st == 200 and body == files["Kits/Trash/part3/textures/2k/can.jpg"], st
+            assert _drive("/res/Kits/Trash/part1/models/can.jpg")[1] == files["Kits/Trash/part3/textures/1k/can.jpg"]
+            assert _drive("/res/Kits/Trash/part1/models/lid.jpg")[0] == 404
+            # the page, the vendored loaders, the links
+            st, page = _drive("/viewer?file=Props/Models/crate.obj")
+            assert st == 200 and b"loaders/OBJLoader.js" in page and b"loaders/GLTFLoader.js" in page
+            for f in ("loaders/OBJLoader.js", "loaders/MTLLoader.js",
+                      "loaders/GLTFLoader.js", "utils/BufferGeometryUtils.js"):
+                assert _drive("/static/jsm/" + f)[0] == 200, f"three.js addon not vendored: static/jsm/{f}"
+            assert b"fbx|obj|glb|gltf" in _drive("/models")[1]
+        finally:
+            pathlib.Path.resolve = real_resolve
+            browse.CANONICAL_ROOTS[:] = old
+            library_map.PATH = old_map
+            browse._RES_INDEX.clear()
+
+
 
 if __name__ == "__main__":
     failures = 0

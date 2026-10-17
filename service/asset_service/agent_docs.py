@@ -342,7 +342,7 @@ per-object transforms). Don't mix provenances in one comparison.
 
 ## C. Files, previews, OS integration (GET)
 
-`/file?path=` FBX/BVH bytes · `/timg?path=` `/cimg?path=` images ·
+`/file?path=` FBX/BVH/OBJ/glTF bytes · `/timg?path=` `/cimg?path=` images ·
 `/audiofile?path=` audio with HTTP Range · `/preview/<key>.webm`
 animation preview (HEAD works for link checks) ·
 `/api/open_explorer?path=&dry=1` resolve/show in Explorer (relative

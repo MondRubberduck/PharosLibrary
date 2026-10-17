@@ -28,7 +28,7 @@ input,select{background:#14161a;color:var(--fg);border:1px solid var(--line);bor
 <header><a href="/">&larr; home</a><h1>Models</h1><input id="q" placeholder="search this folder ..." size="24">
 <span class="meta" id="count"></span><span style="flex:1"></span><a href="/tags">library map</a><a href="/setup">setup</a></header>
 <div id="side"></div>
-<div id="main"><p class="meta">Pick a folder on the left. A contact sheet shows up to 36 of its models; every model lists its measured facts, and FBX files open in the viewer.</p></div>
+<div id="main"><p class="meta">Pick a folder on the left. A contact sheet shows up to 36 of its models; every model lists its measured facts, and FBX, OBJ and glTF files open in the viewer.</p></div>
 <script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $=id=>document.getElementById(id);
@@ -46,7 +46,7 @@ async function show(folder,p){cur=folder;page=p||1;$('q').value=$('q').value;
  let d;try{d=await j('/api/meshes?'+qs);}catch(e){$('main').innerHTML=`<p class="meta">${esc(e.message)}</p>`;return;}
  $('count').textContent=`${Number(d.total).toLocaleString()} model(s) in ${folder}`;
  const facts=i=>[i.bbox_m?`${i.bbox_m.map(v=>Number(v).toFixed(2)).join(' × ')} m`:'',i.triangles!=null?`${Number(i.triangles).toLocaleString()} tris`:'',i.pivot?`pivot ${i.pivot}`:'',i.units?i.units:'',i.lods?`${i.lods} LOD`:'',i.skin?'skinned':'',i.scale_suspect?'<span style="color:var(--warn)">size suspect</span>':''].filter(Boolean).join(' · ');
- const view=i=>/\.fbx$/i.test(i.key.split('#')[0])?` <a href="/viewer?file=${encodeURIComponent(i.key.split('#')[0])}">view 3D</a>`:'';
+ const view=i=>/\.(fbx|obj|glb|gltf)$/i.test(i.key.split('#')[0])?` <a href="/viewer?file=${encodeURIComponent(i.key.split('#')[0])}">view 3D</a>`:'';
  const pages=d.total>d.size?`<div class="pages">page ${page} of ${Math.ceil(d.total/d.size)} ${page>1?`<a href="#" data-p="${page-1}">previous</a>`:''}${page*d.size<d.total?`<a href="#" data-p="${page+1}">next</a>`:''}</div>`:'';
  $('main').innerHTML=`<h2 style="margin:0 0 2px;font-size:16px">${esc(f.name||folder)}</h2><div class="meta">${esc(folder)} · ${f.kind||''}${f.units?' · '+esc(f.units):''}${f.pivot?' · common pivot '+esc(f.pivot):''}${f.lod_groups?' · '+f.lod_groups+' LOD groups':''}${f.vendor?' · '+esc(f.vendor):''}</div>
  ${f.sheet?`<img id="sheet" src="${esc(f.sheet)}" alt="contact sheet">`:`<div id="nosheet">No contact sheet yet. Render one with <code>python pharos.py previews --sheets --folder "${esc(folder)}"</code> (needs Blender, about a minute per folder).</div>`}

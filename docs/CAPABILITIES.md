@@ -83,8 +83,13 @@ token cost.** Operating manual (setup + build doctrine):
   OR-fallback, per-item `tier` and response `mode`/`exact` so an agent can
   tell exact hits from adjacent ones. Queries whose tokens are all too
   short return zero results (never the whole library).
-- **Files, jailed**: `/file` (FBX/BVH), `/timg`, `/cimg`, `/audiofile`,
-  `/res`, `/preview/<key>.webm` — all path-jailed to configured roots.
+- **Files, jailed**: `/file` (FBX/BVH/OBJ/GLB/glTF for the viewer), `/timg`, `/cimg`,
+  `/audiofile`, `/res` (textures, an OBJ's .mtl, a glTF's .bin next to the model;
+  a texture named by a path that is not there is found by its file name under
+  the model's map folder or the folders above it, never a top-level folder),
+  `/preview/<key>.webm` — all path-jailed to configured roots. The viewer's three.js
+  loaders are vendored under `service/asset_service/static/jsm/` (r170: FBX, BVH,
+  OBJ, MTL, glTF; OBJ and glTF load on demand).
 - **OS integration**: `/api/open_explorer` (`dry=1` resolves a path without
   opening) — show-in-Explorer / copy-absolute-path for the human.
 

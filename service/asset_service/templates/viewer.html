@@ -1,5 +1,5 @@
 <!doctype html><html><head><meta charset="utf-8">
-<title>3D Animation Viewer</title><style>
+<title>3D Viewer</title><style>
 :root{--bg:#101216;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1}
 body{margin:0;font:13px/1.4 system-ui;background:var(--bg);color:var(--fg);overflow:hidden}
 #bar{position:fixed;top:0;left:0;right:0;display:flex;gap:8px;align-items:center;
@@ -25,7 +25,7 @@ canvas{display:block}
 <button class="r" data-r="y-">Y&minus;</button><button class="r" data-r="y+">Y+</button>
 <button class="r" data-r="z-">Z&minus;</button><button class="r" data-r="z+">Z+</button>
 <button class="r" id="orientReset" title="clear saved orientation and re-run auto-detect">reset</button></span>
-<a id="dl" href="#" title="download this FBX/BVH file" style="display:none;color:#7cc4ff;text-decoration:none">&#8681;</a>
+<a id="dl" href="#" title="download this file" style="display:none;color:#7cc4ff;text-decoration:none">&#8681;</a>
 <button id="vcp" title="copy the file's absolute path" style="display:none">path &#10697;</button>
 <button id="vexp" title="show file in Explorer" style="display:none">&#128193;</button>
 <span id="status">loading…</span></div>
@@ -58,17 +58,20 @@ async function fetchBuf(url,ms){
 scene.add(new THREE.HemisphereLight(0xdfe8ff,0x30281f,1.4));
 const key=new THREE.DirectionalLight(0xffffff,2.2); key.position.set(3,6,4); scene.add(key);
 const rim=new THREE.DirectionalLight(0x88aaff,0.8); rim.position.set(-4,3,-3); scene.add(rim);
-let grid=null,mixer=null,playing=true,holder=null,clips=[],currentRel='',mode='fbx';
+let grid=null,mixer=null,playing=true,holder=null,clips=[],currentRel='',mode='fbx',curYUp=false;
 
 // skeleton-only clips all target the Actor motion-dummy rig
 // ("skeletons should be the same") — show its body instead of naked bones
 const RETARGET_REL="{{RIG_REL}}";  // from the server; '' = no rig in this library
+// where a model's textures, .mtl and .bin are fetched: its folder, as real
+// path segments so that a file's '../' lands in the sibling folder
+const resBase=dir=>'/res/'+(dir?dir.split('/').map(encodeURIComponent).join('/')+'/':'');
 let dummyObj=null,dummyPromise=null;
 function getDummy(){
   if(!RETARGET_REL)return Promise.reject(new Error('no retarget rig'));
   if(!dummyPromise){
     const L=new FBXLoader();
-    L.setResourcePath('/res/'+encodeURIComponent(RETARGET_REL.split('/').slice(0,-1).join('/'))+'/');
+    L.setResourcePath(resBase(RETARGET_REL.split('/').slice(0,-1).join('/')));
     dummyPromise=new Promise((res,rej)=>L.load('/file?path='+encodeURIComponent(RETARGET_REL),
       o=>{dummyObj=o;res(o);},undefined,rej));
   }
@@ -122,12 +125,12 @@ function boneAxisDelta(){
   if(az>=ax)return v.z>0?{x:-Math.PI/2,z:0}:{x:Math.PI/2,z:0};
   return v.x>0?{x:0,z:Math.PI/2}:{x:0,z:-Math.PI/2};}
 let bindBoxEmpty=false,bindAnatomyOk=false;
-function applyOrient(){
+function applyOrient(yUp){
   const saved=loadOrient();
   if(saved){holder.rotation.set(saved.x,saved.y,saved.z);bindBoxEmpty=false;bindAnatomyOk=true;return 'saved orientation';}
   const box0=modelBox();
   bindBoxEmpty=box0.isEmpty()||box0.getSize(new THREE.Vector3()).lengthSq()===0;
-  if(!clips.length){bindAnatomyOk=true;return 'native orientation';}   // static props stay as-authored
+  if(!clips.length||yUp){bindAnatomyOk=true;return 'native orientation';}   // static props and Y-up formats (glTF) stay as-authored
   // clips are downloaded/exported from Blender = Z-up.
   // Baseline X-90 maps Z-up onto three.js Y-up, THEN anatomy verifies it.
   holder.rotation.set(-Math.PI/2,0,0);
@@ -179,7 +182,7 @@ function dispose(obj){obj.traverse(n=>{
       if(m[k])m[k].dispose();
     m.dispose();});});}
 function clearModel(){
-  if(mixer)mixer.stopAllAction(); mixer=null; clips=[]; clipSel.innerHTML='';
+  if(mixer)mixer.stopAllAction(); mixer=null; clips=[]; clipSel.innerHTML=''; curYUp=false;
   if(holder){if(dummyObj&&dummyObj.parent===holder)holder.remove(dummyObj);  // keep the dummy for reuse
     scene.remove(holder);dispose(holder);holder=null;}
   if(grid){scene.remove(grid);grid=null;}}
@@ -188,6 +191,64 @@ function playClip(i){
   mixer.stopAllAction();
   const action=mixer.clipAction(clips[i]); action.reset().play();
   clipSel.innerHTML=clips.map((c,j)=>`<option ${j===i?'selected':''}>${esc(c.name||j)}</option>`).join('');}
+
+// OBJ and glTF come through their own three.js loaders, fetched only when
+// such a file is opened: a missing loader file fails that file, not the page
+async function addon(name){
+  try{return await import('three/addons/'+name);}
+  catch(e){throw new Error('the loader static/jsm/'+name+' is missing (a three.js r170 addon, see docs/CAPABILITIES.md)');}}
+function showModel(obj,anims,kind,yUp){
+  try{
+    holder=new THREE.Group(); holder.add(obj); scene.add(holder);
+    clips=anims||[]; curYUp=!!yUp;
+    let hasMesh=false; obj.traverse(o=>{if(o.isMesh){hasMesh=true;o.frustumCulled=false;}});
+    if(clips.length){mixer=new THREE.AnimationMixer(obj);playClip(0);}
+    if(!hasMesh)holder.add(new THREE.SkeletonHelper(obj));
+    const how=applyOrient(yUp); refit();
+    loaded(kind+': '+(clips.length?'playing '+(clips[0].name||'clip'):'static mesh')+' ('+how+') — drag to orbit, wheel to zoom');
+    scheduleDeferredOrient();
+  }catch(e){fail(kind+' error: '+((e&&e.message)||e));}}
+async function loadObj(dir,buf){
+  mode='obj';
+  let OBJLoader,MTLLoader;
+  try{({OBJLoader}=await addon('loaders/OBJLoader.js'));({MTLLoader}=await addon('loaders/MTLLoader.js'));}
+  catch(e){fail(e.message);return;}
+  const text=new TextDecoder('utf-8').decode(buf), base=resBase(dir), loader=new OBJLoader();
+  // the material libraries live next to the model (every mtllib line, one
+  // or more names per line); a texture named by an absolute authoring path
+  // is asked for by its last folders and file name, which the server finds
+  // in the pack by name
+  const libs=[...text.matchAll(/^[ \t]*mtllib[ \t]+(.+?)[ \t\r]*$/gm)].map(m=>m[1]);
+  const fetchMtl=async name=>{const r=await fetch(base+name.split('/').map(encodeURIComponent).join('/'));return r.ok?await r.text():null;};
+  const texts=[];
+  for(const line of libs){
+    let t=null;
+    try{t=await fetchMtl(line);
+      if(t===null&&/\s/.test(line))t=(await Promise.all(line.split(/\s+/).map(n=>fetchMtl(n).catch(()=>null)))).filter(Boolean).join('\n')||null;}
+    catch(e){}
+    if(t)texts.push(t);}
+  if(texts.length){
+    const BS=String.fromCharCode(92), seps=new RegExp('['+BS+BS+'/]'),   // a backslash, spelled so (templates carry none)
+      absMap=new RegExp('^([ '+BS+'t]*(?:map_'+BS+'w+|bump|disp|decal|refl)'+BS+'b[^'+BS+'r'+BS+'n]*?[ '+BS+'t])((?:[A-Za-z]:)?['+BS+BS+'/][^'+BS+'r'+BS+'n]*)$','gm');
+    const mtlText=texts.join('\n').replace(absMap,(m,head,p)=>head+p.split(seps).filter(x=>x&&!/^[A-Za-z]:$/.test(x)).slice(-3).join('/'));
+    try{const mtl=new MTLLoader().setResourcePath(base).setMaterialOptions({side:THREE.DoubleSide}).parse(mtlText,'');
+      mtl.preload(); loader.setMaterials(mtl);}
+    catch(e){/* no materials: the default grey */}}
+  let obj;
+  try{obj=loader.parse(text);}
+  catch(err){fail('OBJ load failed: '+String((err&&err.message)||err).slice(0,200));return;}
+  fixMaterials(obj);
+  showModel(obj,[],'OBJ',false);}
+async function loadGltf(dir,buf){
+  mode='gltf';
+  let GLTFLoader;
+  try{({GLTFLoader}=await addon('loaders/GLTFLoader.js'));}
+  catch(e){fail(e.message);return;}
+  const bad=err=>{const m=String((err&&err.message)||err);
+    fail('glTF load failed: '+m.slice(0,200)+(/draco/i.test(m)?' — Draco-compressed glTF is not supported here':''));};
+  try{new GLTFLoader().setResourcePath(resBase(dir)).parse(buf,'',
+    gltf=>showModel(gltf.scene||gltf.scenes[0],gltf.animations,'glTF',true),bad);}
+  catch(err){bad(err);}}
 
 async function loadFile(rel){
   clearModel(); currentRel=rel;
@@ -212,7 +273,10 @@ async function loadFile(rel){
   let buf;
   try{buf=await fetchBuf(url,30000);}
   catch(e){fail('load failed: '+((e&&e.message)||e)+' — if the server was just restarted, reload this page');return;}
-  if(rel.toLowerCase().endsWith('.bvh')){
+  const ext=rel.toLowerCase().split('.').pop();
+  if(ext==='obj'){await loadObj(dir,buf);return;}
+  if(ext==='glb'||ext==='gltf'){await loadGltf(dir,buf);return;}
+  if(ext==='bvh'){
     mode='bvh';
     // BVHLoader.parse string-splits its input; a raw ArrayBuffer throws
     try{const res=new BVHLoader().parse(new TextDecoder('utf-8').decode(buf));
@@ -234,7 +298,7 @@ async function loadFile(rel){
   mode='fbx';
   window.__retarget={retargeted:false,common:0,clipBones:0};
   let obj;
-  try{obj=new FBXLoader().setResourcePath('/res/'+encodeURIComponent(dir)+'/').parse(buf,'');}
+  try{obj=new FBXLoader().setResourcePath(resBase(dir)).parse(buf,'');}
   catch(err){
     const msg=(err&&err.message)||String(err);
     let extra=/ascii/i.test(msg)?' — ASCII FBX is not supported, binary only':'';
@@ -288,7 +352,7 @@ document.querySelectorAll('button.r[data-r]').forEach(b=>b.onclick=()=>{
 document.getElementById('orientReset').onclick=()=>{
   if(!holder)return; clearOrient();
   holder.rotation.set(0,0,0);
-  const how=applyOrient(); refit();
+  const how=applyOrient(curYUp); refit();
   loaded('orientation reset ('+how+')');};
 clipSel.onchange=()=>playClip(clipSel.selectedIndex);
 fileSel.onchange=()=>loadFile(fileSel.value);

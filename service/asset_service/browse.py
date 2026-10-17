@@ -198,8 +198,10 @@ TEXTURES_PAGE = _load_tpl("textures.html")
 AUDIO_PAGE = _load_tpl("audio.html")
 TAGS_PAGE = _load_tpl("tags.html")
 THUMB_LIMIT = 8000
-PREVIEW_EXTS = {".fbx", ".bvh"}
+PREVIEW_EXTS = {".fbx", ".bvh"}          # animation clips: played by the viewer, filmed by /batchrender
+VIEWER_EXTS = PREVIEW_EXTS | {".obj", ".glb", ".gltf"}    # what /file hands the 3D viewer
 TEXTURE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+RESOURCE_EXTS = TEXTURE_EXTS | {".avif", ".mtl", ".bin"}   # what /res/ hands the viewer next to a model
 PAGE_SIZE = 200            # pack-content page rows per request
 PREVIEW_DIR = config.PREVIEW_DIR   # rendered clip loops (webm)
 SETUP_PAGE = _load_tpl("setup.html")
@@ -259,10 +261,22 @@ ANIM_CLUSTERS = [
 ]
 
 
+def _foreign_share(p: Path) -> bool:
+    """A UNC path on a share none of the roots lives on. Resolving it would
+    open the share: a web page's <img> can carry such a path, and an SMB
+    connection hands out credentials. Refused before resolve()."""
+    drive = p.drive
+    if not drive.startswith(("\\\\", "//")):
+        return False
+    return not any(root.drive.lower() == drive.lower() for root in CANONICAL_ROOTS)
+
+
 def _safe_asset_file(path_str: str, allowed: set) -> Optional[Path]:
     """Resolve a path (absolute or canonical-root-relative) and verify it is
     an existing file under a canonical root with an allowed extension."""
     p = Path(path_str)
+    if _foreign_share(p):
+        return None
     if not p.is_absolute():
         p = CANONICAL_ROOTS[0] / p
     try:
@@ -510,21 +524,81 @@ def _jailed(t, root) -> bool:
     except (ValueError, OSError, RuntimeError):
         return False
 
-def _safe_dir(encoded: str) -> Optional[str]:
-    """Decode a URL-encoded directory that must live under a canonical root."""
-    directory = Path(unquote(encoded))
-    if not directory.is_absolute():
-        directory = CANONICAL_ROOTS[0] / directory
-    try:
-        directory = directory.resolve()
-    except OSError:
+_RES_INDEX: dict = {}        # folder path -> {lower file name: [Path, ...]}
+_RES_INDEX_CAP = 200_000     # files looked at per folder, at most
+_NAMED_EXTS = TEXTURE_EXTS | {".avif"}
+
+
+def _res_index(folder: Path) -> dict:
+    """Every texture under `folder` by lower-cased file name, walked once
+    per server run."""
+    key = str(folder.resolve()).lower()
+    index = _RES_INDEX.get(key)
+    if index is None:
+        index = {}
+        seen = 0
+        for dirpath, dirnames, filenames in os.walk(folder):
+            dirnames[:] = [d for d in dirnames if not d.startswith((".", "_Agent_Files"))]
+            for fn in filenames:
+                if Path(fn).suffix.lower() in _NAMED_EXTS:
+                    index.setdefault(fn.lower(), []).append(Path(dirpath) / fn)
+            seen += len(filenames)
+            if seen > _RES_INDEX_CAP:
+                break
+        _RES_INDEX[key] = index
+    return index
+
+
+def _suffix_match(path: Path, want: list) -> int:
+    """How many trailing folder names of `path` agree with `want` (the
+    folders the file named): the 2k texture for a path that said 2k."""
+    segs = [x.lower() for x in path.parent.parts]
+    n = 0
+    while n < len(want) and n < len(segs) and segs[-1 - n] == want[-1 - n]:
+        n += 1
+    return n
+
+
+def _resource_by_name(rel: str) -> Optional[Path]:
+    """A texture the model names by a path that is not there (OBJ kits
+    keep the author's absolute paths, textures get moved): the same file
+    name under the model's library-map folder, then the folders above it
+    (a kit downloaded in parts keeps its textures in a sibling part), never
+    a top-level folder or the root. Among same-named files the one whose
+    folders agree with the path the file gave wins."""
+    rel = rel.replace("\\", "/")
+    parts = [x for x in rel.split("/") if x and x not in (".", "..")]
+    name = parts[-1] if parts else ""
+    if Path(name).suffix.lower() not in _NAMED_EXTS:
         return None
-    for root in CANONICAL_ROOTS:
-        try:
-            directory.relative_to(root.resolve())
-            return str(directory)
-        except ValueError:
+    root = CANONICAL_ROOTS[0]
+    # the model's folder: the longest leading run of segments that is a
+    # folder in the library (after it comes the path the file made up)
+    model_dir = ""
+    for n in range(1, len(parts)):
+        cand = "/".join(parts[:n])
+        if (root / cand).is_dir():
+            model_dir = cand
+        else:
+            break
+    if not model_dir:
+        return None                      # no model folder: nothing to search
+    want = [x.lower() for x in parts[len(model_dir.split("/")):-1]]
+    node = library_map.Lookup(library_map.load()).node(model_dir + "/x")
+    folder = node["folder"] if node and node["folder"] != "." else model_dir
+    folders = [folder]
+    while folder.count("/") >= 2 and len(folders) < 4:
+        folder = folder.rsplit("/", 1)[0]
+        folders.append(folder)
+    for f in folders:
+        top = root / f
+        if not _jailed(top, root) or not top.is_dir():
             continue
+        cands = _res_index(top).get(name.lower()) or []
+        if cands:
+            best = max(cands, key=lambda c: _suffix_match(c, want))
+            if best.is_file() and _jailed(best, root):
+                return best
     return None
 
 
@@ -2852,25 +2926,24 @@ class Handler(BaseHTTPRequestHandler):
                             mimetypes.guess_type(str(static_file))[0]
                             or "application/octet-stream")
             elif url.path == "/file":
-                # live 3D viewer source file (FBX/BVH under canonical roots only)
+                # a model or clip for the 3D viewer (FBX, BVH, OBJ, GLB, glTF
+                # under the canonical roots only)
                 target = _safe_asset_file((params.get("path") or [""])[0],
-                                          PREVIEW_EXTS)
+                                          VIEWER_EXTS)
                 if not target:
                     return self._json({"error": "not found"}, 404)
                 self._bytes(target.read_bytes(), "application/octet-stream")
             elif url.path.startswith("/res/"):
-                # texture resources for the FBX viewer: /res/<enc dir>/<name>.
-                # Clips often reference shared textures that live elsewhere in
-                # the pack; on miss, fall back to mirrored thumbnail copies
-                # (same filenames, already cached on disk).
-                remainder = url.path[len("/res/"):]
-                enc_dir, _, name = remainder.partition("/")
-                directory = _safe_dir(enc_dir)
-                target = None
-                if directory and name:
-                    target = _safe_asset_file(
-                        str(Path(directory) / unquote(name)), TEXTURE_EXTS)
-                if not target or not target.is_file():
+                # what the viewer asks for next to a model: textures (FBX,
+                # OBJ, glTF), the .mtl of an OBJ, the .bin buffers of a
+                # .gltf. The rest of the URL is the library path, in real
+                # segments (a browser resolves the file's '../' against them,
+                # so a sibling folder works); the jail keeps it under the
+                # canonical roots. A texture that is not where the file says
+                # is looked up by its name under the model's map folder.
+                rel = unquote(url.path[len("/res/"):]).lstrip("/")
+                target = _safe_asset_file(rel, RESOURCE_EXTS) or _resource_by_name(rel)
+                if not target:
                     return self._json({"error": "not found"}, 404)
                 self._bytes(target.read_bytes(),
                             mimetypes.guess_type(str(target))[0]
