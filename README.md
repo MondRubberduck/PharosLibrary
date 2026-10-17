@@ -77,6 +77,14 @@ Setup on a fresh machine took about **40 minutes** on a 9 GB test library, with 
 
 Your coding agent does all the technical work. You pick the folder, answer a few questions, and describe the scenes you want.
 
+The picking happens on one page: `python pharos.py setup` starts Pharos and
+opens it in your browser. Choose the folder that holds your assets, look at
+what the survey found (one line per pack, project, kit or texture library,
+with its evidence), correct what is wrong, answer the decisions that need
+you, press **Start indexing**. Your agent can drive the same page through
+its API, so either of you can do it. A server started without a library
+serves that page and prints its address.
+
 
 
 ## What your agent does

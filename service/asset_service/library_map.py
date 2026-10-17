@@ -49,6 +49,12 @@ FILE = "library_map.csv"
 OLD_FILE = "pack_tags.csv"
 PATH = config.AGENT_FILES / FILE
 
+
+@config.on_reload
+def _rebind() -> None:
+    global PATH
+    PATH = config.AGENT_FILES / FILE
+
 # marker name -> CSV column
 MARKERS = {"Photorealistic": "photorealistic", "Stylized": "stylized",
            "Low Poly": "low_poly"}
@@ -83,9 +89,12 @@ def marker(value: str) -> str:
 def kind_of(value: str) -> str:
     """'3D Assets', 'Unreal Scene', 'textures' -> the map's kind, or ''."""
     v = "".join(ch for ch in (value or "").lower() if ch.isalnum())
-    aliases = {"3dassets": "3d-assets", "3d": "3d-assets", "models": "3d-assets",
+    aliases = {"3dassets": "3d-assets", "3dasset": "3d-assets", "3d": "3d-assets",
+               "assets": "3d-assets", "asset": "3d-assets", "models": "3d-assets",
                "model": "3d-assets", "meshes": "3d-assets", "unrealscene": "unreal",
-               "ue": "unreal", "unityscene": "unity", "blenderfile": "blender",
+               "unrealproject": "unreal", "unrealengine": "unreal", "ue": "unreal",
+               "unityscene": "unity", "unityproject": "unity", "blenderfile": "blender",
+               "blenderfiles": "blender", "blenderkit": "blender",
                "blend": "blender", "texture": "textures", "hdris": "hdri",
                "animations": "animation", "anim": "animation", "sounds": "audio",
                "sound": "audio", "purchase": "purchases", "collection": "purchases",
@@ -529,6 +538,7 @@ def apply_to_config(rows: dict, cfg: dict, root=None, weights=None) -> dict:
 def summary(rows: dict) -> list:
     """Top-level lines for the agent docs: folder, kind, decision, counts."""
     out = []
+    pend = {r["folder"] for r in pending(rows)}
     for r in sorted(rows.values(), key=lambda r: r["folder"].lower()):
         if "/" in r["folder"] or r["folder"] == ".":
             continue
@@ -538,8 +548,12 @@ def summary(rows: dict) -> list:
         act = effective_action(r, rows)
         if act:
             line += f", decision: {act}"
-        elif decision_options(r["kind"], r["state"]):
+        elif r["folder"] in pend:
             line += ", decision PENDING"
+        else:
+            below = [p for p in pend if p.lower().startswith(r["folder"].lower() + "/")]
+            if below:
+                line += f", {len(below)} decision(s) pending below"
         if not r["include"]:
             line += ", not indexed"
         if r["styles"] or r["tags"]:

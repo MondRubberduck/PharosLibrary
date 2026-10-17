@@ -25,7 +25,6 @@ _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
 from asset_service import textmatch as tm
 
-CSV_PATH = config.CSV_PATH
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 COLLECTION_DDL = """
@@ -144,7 +143,7 @@ def _canonical_header(h) -> str:
     return _HEADER_ALIASES.get(key, (h or "").strip())
 
 
-def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
+def import_collection(db_path: str | Path, csv_path=None) -> int:
     """Merge the CSV purchase catalog into the `collection` table.
 
     Merge semantics (NOT a full replace -- hand-curated rows must survive):
@@ -157,6 +156,7 @@ def import_collection(db_path: str | Path, csv_path: Path = CSV_PATH) -> int:
       availability state whenever it knows the item.
     Returns the number of CSV rows processed.
     """
+    csv_path = Path(csv_path) if csv_path else config.CSV_PATH   # at call time
     db_path = Path(db_path)
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))

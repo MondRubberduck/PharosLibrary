@@ -19,7 +19,8 @@ token cost.** Operating manual (setup + build doctrine):
 | HTTP JSON API | `GET http://127.0.0.1:8765/api/*` (localhost, no auth) | everything — search, details, file bytes, previews |
 | MCP server | `python -m service.pharos_mcp_server` (stdio, 10 tools) | agents with MCP support (Claude Desktop, Cursor, …) |
 | Web dashboard | `http://127.0.0.1:8765` in a browser | human verification of what the agent found |
-| CLI | `python pharos.py init/serve`, `scanner.py`, `indexer.py`, `scene_manifest.py` | onboarding, ingestion, validation, builds |
+| Setup page | `http://127.0.0.1:8765/setup` (`python pharos.py setup` opens it); API `/api/setup/state`, `/api/setup/survey`, `/api/setup/map`, `/api/setup/confirm`, `/api/setup/progress`, `/api/fs/drives`, `/api/fs/list` (folder browsing on loopback binds only) | picking the library, correcting the survey, deciding, indexing; a server without a config serves only this |
+| CLI | `python pharos.py setup/init/survey/map/ingest/serve/doctor`, `scanner.py`, `indexer.py`, `scene_manifest.py` | onboarding, ingestion, validation, builds |
 | Agent index files | `<library_root>/_Agent_Files/*.md`, `*.jsonl` | offline reading when the server is down |
 
 ## 2. What the agent can ask
@@ -103,6 +104,11 @@ token cost.** Operating manual (setup + build doctrine):
 
 ## 4. Onboarding a fresh library (no crawler output at all)
 
+0. `python pharos.py setup` opens the setup page (`serve` without a config
+   serves the same page and prints its URL): folder browser, the survey's
+   tree with kind / index / decision per folder, *Start indexing*, then the
+   doctor verdict and the engine chains the decisions ask for. Steps 1 and
+   2 are the same flow from the shell.
 1. `python pharos.py init <root>` surveys the root (structural markers
    first: `Exports/manifest.json`, `kit_manifest.json`, `.uproject`,
    `Assets/` + `ProjectSettings/`, a purchase CSV header; file shares and

@@ -30,7 +30,6 @@ from asset_service import config, imgmeta
 from asset_service import kinds
 from asset_service import textmatch as tm
 
-TEX_ROOT = config.TEX_ROOT
 MAIN_NAME = "4K_Textures_Gumroad"
 GROUP_MAIN = "4K Textures Gumroad"
 GROUP_MISC = "Misc"
@@ -305,7 +304,8 @@ def _families(d: Path, grp: str, sub: str) -> list:
     return out
 
 
-def import_textures(db_path: str | Path, root: Path = TEX_ROOT) -> int:
+def import_textures(db_path: str | Path, root=None) -> int:
+    root = Path(root) if root else config.TEX_ROOT     # the config's root at call time
     db_path = Path(db_path)
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))

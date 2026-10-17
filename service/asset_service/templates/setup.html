@@ -1,0 +1,167 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pharos setup</title><style>
+:root{--bg:#14161a;--card:#1e2128;--line:#2c313a;--fg:#dfe3ea;--dim:#8b93a1;--ok:#7dff9b;--bad:#ff8a8a;--warn:#ffd479;--link:#7cc4ff}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui;background:var(--bg);color:var(--fg)}
+header{position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+header a{color:var(--link);text-decoration:none}h1{font-size:15px;margin:0}
+main{max-width:1180px;margin:0 auto;padding:12px 16px 60px}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:14px 0}
+section h2{font-size:14px;margin:0 0 6px;display:flex;gap:10px;align-items:center}
+section h2 .step{display:inline-flex;width:22px;height:22px;border-radius:50%;background:#243040;color:var(--link);align-items:center;justify-content:center;font-size:12px}
+section.done h2 .step{background:#1f3a2a;color:var(--ok)}
+.hint{color:var(--dim);font-size:12.5px;margin:0 0 10px}
+.hint code,.mono{font-family:ui-monospace,Consolas,monospace;color:var(--fg);font-size:12px}
+input,select,button{background:#14161a;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 9px;font:inherit}
+button{cursor:pointer;background:#243040;color:var(--link);border-color:#31506e}
+button.primary{background:#2a5a3a;color:#dfffe6;border-color:#3b7f52}
+button:disabled{opacity:.45;cursor:default}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}
+#path{flex:1;min-width:280px}
+#drives button{padding:4px 9px}
+#dirs{max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#14161a;margin:6px 0}
+#dirs div{padding:5px 10px;border-bottom:1px solid #1c2027;cursor:pointer;display:flex;justify-content:space-between}
+#dirs div:hover{background:#191c22}#dirs .up{color:var(--dim)}
+#dirs .more{color:var(--dim);font-size:11.5px}
+.sum{color:var(--dim);font-size:12.5px;white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace}
+#msg{min-width:12em;font-size:12.5px}#msg.ok{color:var(--ok)}#msg.bad{color:var(--bad)}
+table{border-collapse:collapse;width:100%;margin-top:6px}
+th{text-align:left;font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;padding:6px 8px;border-bottom:1px solid var(--line);background:var(--card);position:sticky;top:48px}
+th.c,td.c{text-align:center}td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+tr:hover td{background:#191c22}tr.out td{opacity:.55}
+.n{font-weight:600;word-break:break-word}.f{color:var(--dim);font-size:11.5px;word-break:break-all}
+.ev{color:var(--dim);font-size:11px;margin-top:2px}.ev b{color:var(--warn);font-weight:600}
+td.c input{width:18px;height:18px;accent-color:#6ea8fe;cursor:pointer}
+.pend{color:var(--warn);font-size:11.5px}.meta{color:var(--dim);font-size:12px}
+.accept{padding:0 7px;margin-left:4px;font-size:11.5px}
+#log{background:#0f1114;border:1px solid var(--line);border-radius:6px;padding:8px 10px;max-height:320px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;white-space:pre-wrap;color:#c7cdd6}
+.verdict{font-size:16px;font-weight:700}.verdict.ok{color:var(--ok)}.verdict.warn{color:var(--warn)}.verdict.bad{color:var(--bad)}
+ul.next{margin:6px 0 0 0;padding-left:18px}ul.next li{margin:3px 0}
+.saved{animation:fl 1s ease}@keyframes fl{from{background:#1f3a2a}to{background:transparent}}
+</style></head><body>
+<header><h1>Pharos setup</h1><span class="meta" id="mode"></span><span id="msg"></span>
+<span style="flex:1"></span><a href="/tags">library map</a><a href="/">dashboard</a></header>
+<main>
+
+<section id="s1"><h2><span class="step">1</span>Where is your library?</h2>
+<p class="hint">Pick the folder that holds your assets: packs, projects, textures, sounds, animations, all of it.
+Pharos never writes into it except its own <code>_Agent_Files</code> folder (and <code>Exports</code> when you
+ask for a conversion). The registry, a small database Pharos builds for itself, goes somewhere else.</p>
+<div class="row" id="drives"></div>
+<div class="row"><input id="path" placeholder="D:\your\assets" spellcheck="false"><button id="go">Open</button>
+<button id="use" class="primary">Use this folder</button></div>
+<div id="dirs"></div>
+<div class="row"><label class="meta">registry folder</label><input id="reg" size="48" spellcheck="false">
+<span class="meta">derived data, rebuildable; leave the default unless you know why</span></div>
+<div class="row"><button id="survey" class="primary">Survey this folder</button>
+<span class="meta" id="current"></span></div>
+<div class="sum" id="sum1"></div>
+</section>
+
+<section id="s2"><h2><span class="step">2</span>What is where</h2>
+<p class="hint">One line per folder that is a thing: a pack, a project, a kit, a texture library. The survey reads
+the structure and tells you what it <b>knows</b> and what it <b>guesses</b>; correct the kind where it is wrong,
+untick <b>Index</b> for folders Pharos should leave alone, and answer the <b>decisions</b> (nothing with an engine
+runs without your word). A folder inherits the decision of the folder above it. Tick <b>Confirmed</b> when a line
+is right; <b>Accept every guess</b> does that for the rest.</p>
+<div class="row"><select id="show"><option value="attention">needs attention</option><option value="">all folders</option>
+<option value="top">top level only</option></select><input id="q" placeholder="filter ..." size="22">
+<button id="acceptall">Accept every guess</button><button id="resurvey">Survey again</button>
+<span class="meta" id="count"></span></div>
+<table><thead><tr><th>Folder</th><th>Kind</th><th class="c">Index</th><th>Decision</th><th class="c">Confirmed</th></tr></thead>
+<tbody id="rows"></tbody></table>
+</section>
+
+<section id="s3"><h2><span class="step">3</span>Index it</h2>
+<p class="hint">Runs everything that needs no engine: measures the models, lists the clips, reads the texture and
+sound folders, writes the agent's files into <code>_Agent_Files</code>. Minutes for a large library. The engine
+chains you approved are listed afterwards with their commands.</p>
+<div class="row"><button id="index" class="primary">Start indexing</button><span class="meta" id="pendnote"></span></div>
+<div id="log" hidden></div>
+<div id="result"></div>
+</section>
+</main>
+<script>
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $=id=>document.getElementById(id);
+let st=null,map={packs:[],kinds:[],pending:[]},poll=null;
+function say(t,ok){$('msg').textContent=t;$('msg').className=ok?'ok':'bad';}
+async function j(url,opt){const r=await fetch(url,opt);let d={};try{d=await r.json();}catch(e){}if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;}
+async function post(url,body){return j(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}
+// ---- step 1: the folder browser
+async function drives(){try{const d=await j('/api/fs/drives');
+ $('drives').innerHTML=d.drives.map(x=>`<button data-p="${esc(x.path)}">${esc(x.label)}</button>`).join('')+`<button data-p="${esc(d.home)}">home</button>`;
+ if(!$('path').value)$('path').value=d.suggested||d.home;}catch(e){$('drives').innerHTML=`<span class="meta">${esc(e.message)}</span>`;}}
+$('drives').addEventListener('click',e=>{const p=e.target.dataset.p;if(p){$('path').value=p;list(p);}});
+async function list(p){try{const d=await j('/api/fs/list?path='+encodeURIComponent(p));$('path').value=d.path;
+ $('dirs').innerHTML=(d.parent?`<div class="up" data-p="${esc(d.parent)}">.. up</div>`:'')+
+  d.dirs.map(x=>`<div data-p="${esc(x.path)}"><span>${esc(x.name)}</span><span class="more">${x.has_children?'&rsaquo;':''}</span></div>`).join('')||'<div class="meta">no sub-folders</div>';
+ }catch(e){$('dirs').innerHTML=`<div class="meta">${esc(e.message)}</div>`;}}
+$('dirs').addEventListener('click',e=>{const el=e.target.closest('[data-p]');if(el)list(el.dataset.p);});
+$('go').onclick=()=>list($('path').value);$('path').addEventListener('keydown',e=>{if(e.key==='Enter')list($('path').value);});
+$('use').onclick=()=>{$('current').textContent='chosen: '+$('path').value;$('survey').focus();};
+// the registry belongs to one library: another folder gets its own
+// (an empty field lets the server pick one), unless the field was edited
+const norm=s=>String(s||'').split(String.fromCharCode(92)).join('/').replace(/\/+$/,'').toLowerCase();
+const same=(a,b)=>norm(a)===norm(b);
+function regFor(root){const v=$('reg').value.trim();if(!st)return v;
+ if(same(root,st.library_root))return v;return same(v,st.registry_dir)?'':v;}
+$('survey').onclick=()=>run('survey',{root:$('path').value,registry_dir:regFor($('path').value)});
+$('resurvey').onclick=()=>run('survey',{root:st.library_root||$('path').value,registry_dir:st.registry_dir});
+// ---- jobs with a progress log
+async function run(job,body){try{await post(job==='survey'?'/api/setup/survey':'/api/setup/confirm',body);
+ say(job==='survey'?'surveying ...':'indexing ...',true);$('log').hidden=false;$('log').textContent='';
+ clearInterval(poll);poll=setInterval(()=>tick(job),1000);}catch(e){say(e.message,false);}}
+async function tick(job){try{const p=await j('/api/setup/progress');
+ $('log').textContent=p.lines.join('\n');$('log').scrollTop=$('log').scrollHeight;
+ if(p.state==='running')return;clearInterval(poll);poll=null;
+ if(p.state==='failed'){say(p.error,false);return;}
+ say(`${job} done in ${p.seconds}s`,true);await load();
+ if(job==='ingest')showResult(p.result);}catch(e){say(e.message,false);clearInterval(poll);}}
+// ---- state + the map
+async function load(){st=await j('/api/setup/state');
+ $('mode').textContent=st.configured?`library: ${st.library_root}`:'no library chosen yet';
+ $('reg').value=st.registry_dir||st.default_registry_dir;
+ if(st.configured&&!$('path').value)$('path').value=st.library_root;
+ $('current').textContent=st.configured?`current library: ${st.library_root}  (${st.rows} folders in the map)`:'';
+ $('sum1').textContent=st.summary.join('\n');
+ $('s1').classList.toggle('done',st.configured);
+ $('s2').classList.toggle('done',st.configured&&!st.pending.length&&!st.unconfirmed);
+ $('index').disabled=!st.configured||!!st.pending.length||st.progress.state==='running';
+ $('pendnote').textContent=!st.configured?'choose and survey a folder first':st.pending.length?`${st.pending.length} decision(s) still pending above`:`${st.rows} folders, ${st.unconfirmed} not confirmed`;
+ if(st.progress.state==='running'&&!poll){$('log').hidden=false;poll=setInterval(()=>tick(st.progress.job),1000);}
+ if(st.configured){map=await j('/api/setup/map');render();}else{map={packs:[],kinds:[],pending:[]};render();}
+ if(st.progress.state==='done'&&st.progress.job==='ingest'&&st.progress.result.verdict)showResult(st.progress.result);}
+const depth=f=>f==='.'?0:f.split('/').length;
+function render(){const f=$('q').value.trim().toLowerCase(),s=$('show').value,pend=new Set(map.pending);
+ const vis=map.packs.map((p,i)=>[p,i]).filter(([p])=>(!f||(p.name+' '+p.folder+' '+p.kind).toLowerCase().includes(f))&&
+  (!s||(s==='top'&&depth(p.folder)<=1)||(s==='attention'&&(pend.has(p.folder)||!p.confirmed))));
+ $('count').textContent=`${vis.length} of ${map.packs.length} folders · ${map.pending.length} decision(s) pending`;
+ const opts=(list,cur)=>'<option value=""></option>'+list.map(x=>`<option${x===cur?' selected':''}>${esc(x)}</option>`).join('');
+ $('rows').innerHTML=vis.map(([p,i])=>{const sv=p.survey;
+  const ev=sv?`<div class="ev">${sv.confidence==='know'?'known':'<b>guess</b>'}: ${esc(sv.kind)} — ${esc(sv.evidence)}${sv.kind!==p.kind?` <button class="accept" data-act="takekind">use ${esc(sv.kind)}</button>`:''}</div>`:'';
+  const dec=p.options.length?`<select data-act="action">${opts(p.options,p.action)}</select>${!p.action&&p.effective_action?`<div class="meta">inherits ${esc(p.effective_action)}</div>`:''}${pend.has(p.folder)?'<div class="pend">pending</div>':''}`:'';
+  return `<tr data-i="${i}" class="${p.include?'':'out'}"><td><div class="n" style="padding-left:${Math.max(0,depth(p.folder)-1)*14}px">${esc(p.name||p.folder)}</div><div class="f">${esc(p.folder)}${p.files?` · ${Number(p.files).toLocaleString()} files`:''}</div>${ev}</td>
+ <td><select data-act="kind">${opts(map.kinds,p.kind)}</select>${p.state?`<div class="meta">${esc(p.state)}</div>`:''}</td>
+ <td class="c"><input type="checkbox" data-act="include"${p.include?' checked':''}></td><td>${dec}</td>
+ <td class="c"><input type="checkbox" data-act="confirmed"${p.confirmed?' checked':''}></td></tr>`;}).join('');}
+async function save(i,change){const p=map.packs[i];try{const r=await post('/api/setup/map',{folder:p.folder,...change});
+ Object.assign(p,r.pack);p.options=r.options;say(`saved ${p.name||p.folder}`,true);await load();}catch(e){say(e.message,false);render();}}
+$('rows').addEventListener('change',e=>{const el=e.target,tr=el.closest('tr');if(!tr)return;const i=+tr.dataset.i,act=el.dataset.act;
+ if(act==='kind')save(i,{kind:el.value,confirmed:true});else if(act==='include')save(i,{include:el.checked});
+ else if(act==='action')save(i,{action:el.value,confirmed:true});else if(act==='confirmed')save(i,{confirmed:el.checked});});
+$('rows').addEventListener('click',e=>{if(e.target.dataset.act!=='takekind')return;const i=+e.target.closest('tr').dataset.i,p=map.packs[i];
+ save(i,{kind:p.survey.kind,state:p.survey.state||'',confirmed:true});});
+$('acceptall').onclick=async()=>{const todo=map.packs.filter(p=>p.include&&!p.confirmed&&p.folder!=='.');
+ for(const p of todo){try{await post('/api/setup/map',{folder:p.folder,confirmed:true});}catch(e){say(e.message,false);break;}}
+ say(`confirmed ${todo.length} folder(s)`,true);await load();};
+$('index').onclick=()=>run('ingest',{});
+$('q').oninput=render;$('show').onchange=render;
+function showResult(res){const v=res.verdict||'unknown',cls=v==='READY'?'ok':v.startsWith('READY')?'warn':'bad';
+ $('result').innerHTML=`<p class="verdict ${cls}">${esc(v)}</p>`+(res.counts?`<p class="meta">${Object.entries(res.counts).map(([k,n])=>`${esc(k)} ${Number(n).toLocaleString()}`).join(' · ')}</p>`:'')+
+  (res.gaps&&res.gaps.length?`<ul class="next">${res.gaps.map(g=>`<li><b>${esc(g.name)}</b> ${esc(g.status)}: ${esc(g.detail)}${g.fix?`<br><span class="mono">${esc(g.fix)}</span>`:''}</li>`).join('')}</ul>`:'')+
+  (res.next&&res.next.length?`<p class="hint">Your decisions ask for these engine chains; run them in a terminal, then index again:</p><ul class="next">${res.next.map(n=>`<li><span class="mono">${esc(n.command)}</span> — ${esc(n.why)}</li>`).join('')}</ul>`:'')+
+  `<p><a href="/">Open the dashboard</a> · <a href="/tags">tags and labels</a></p>`;
+ $('s3').classList.add('done');}
+drives();load().catch(e=>say(e.message,false));
+</script></body></html>

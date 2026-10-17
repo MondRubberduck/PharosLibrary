@@ -39,7 +39,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
 from asset_service import textmatch as tm
 
-AUDIO_ROOT = config.AUDIO_ROOT
 
 # ---------------------------------------------------------------------------
 # format detection
@@ -585,7 +584,7 @@ def _insert_audio(conn, af, duration, folder):
     # UNIQUE(rel) once made two separately-scanned folders silently
     # overwrite each other's same-named files
     try:
-        rel = af.resolve().relative_to(AUDIO_ROOT).as_posix()
+        rel = af.resolve().relative_to(config.AUDIO_ROOT).as_posix()
     except ValueError:
         rel = af.resolve().as_posix()
     # folder taxonomy beats a generic label: Impacts/Metal/x.wav ->

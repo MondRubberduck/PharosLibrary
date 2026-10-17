@@ -290,14 +290,9 @@ def test_audio_themes_come_from_the_file_not_the_category_keywords():
             "Nature": {"description": "d", "keywords": [
                 "horror", "creepy", "gore", "animal", "bird", "dog"]}}}),
             encoding="utf-8")
-        saved = audio_import.JSONL, audio_import.INDEX
-        audio_import.JSONL = root / "library_files.jsonl"
-        audio_import.INDEX = root / "library_index.json"
-        try:
-            dbp = str(root / "a.sqlite")
-            assert audio_import.import_audio(dbp, root=root) == 2
-        finally:
-            audio_import.JSONL, audio_import.INDEX = saved
+        # the importer reads the crawl files under the root it is given
+        dbp = str(root / "a.sqlite")
+        assert audio_import.import_audio(dbp, root=root) == 2
         conn = sqlite3.connect(dbp)
         got = {n: set(json.loads(m)["themes"]) for n, m in
                conn.execute("SELECT name, meta FROM audio")}
@@ -2412,6 +2407,80 @@ def test_tag_page_and_retag_write_the_tag_file_not_the_registry():
             library_map.PATH, config.LIBRARY_ROOT = old_path, old_root
             browse.CANONICAL_ROOTS[:] = old_canon
             config._CONFIG_FILE = old_cf
+
+def test_setup_flow_guards_folders_and_jobs():
+    """Behind /setup: the folder browser lists folders only and refuses
+    files, relative and missing paths; browsing is for loopback binds; a
+    job refuses a missing root, a whole drive and a second job while one
+    runs; the roots follow a reloaded config."""
+    from asset_service import setup_flow, config
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "A").mkdir()
+        (root / ".hidden").mkdir()
+        (root / "$RECYCLE.BIN").mkdir()
+        (root / "f.txt").write_text("x", encoding="utf-8")
+        d, code = setup_flow.api_fs_list(str(root))
+        assert code == 200 and [x["name"] for x in d["dirs"]] == ["A"], d
+        assert d["parent"] and not d["dirs"][0]["has_children"]
+        assert setup_flow.api_fs_list(str(root / "f.txt"))[1] == 400
+        assert setup_flow.api_fs_list("relative/path")[1] == 400
+        assert setup_flow.api_fs_list(str(root / "nope"))[1] == 404
+        assert setup_flow.api_fs_list("")[1] == 400
+        assert setup_flow.api_fs_list("\\\\host\\share")[1] == 400, "UNC"
+        assert setup_flow.api_fs_list("//host/share")[1] == 400, "UNC"
+        assert setup_flow.fs_allowed("127.0.0.1") and setup_flow.fs_allowed("::1")
+        assert not setup_flow.fs_allowed("0.0.0.0") and not setup_flow.fs_allowed("192.168.1.5")
+        drives = setup_flow.api_fs_drives()
+        assert drives["drives"] and drives["home"]
+        st = setup_flow.api_state("serving")
+        assert set(st) >= {"configured", "mode", "pending", "summary", "next", "progress", "rows"}
+        assert st["progress"]["state"] in ("idle", "running", "done", "failed")
+        # jobs refused before anything starts (nothing is spawned here)
+        assert setup_flow.begin("survey", {"root": str(root / "nope")})[1] == 400
+        assert setup_flow.begin("survey", {"root": "relative"})[1] == 400
+        assert setup_flow.begin("survey", {"root": root.anchor})[1] == 400, "a whole drive"
+        assert setup_flow.begin("survey", {})[1] == 400
+        assert setup_flow.begin("survey", {"root": str(root), "registry_dir": "rel"})[1] == 400
+        assert setup_flow.begin("survey", {"root": "\\\\host\\share"})[1] == 400
+        assert setup_flow.begin("bogus", {})[1] == 400
+        saved = dict(setup_flow._STATE)
+        setup_flow._STATE.update(state="running", job="survey")
+        try:
+            assert setup_flow.begin("survey", {"root": str(root)})[1] == 409
+            assert setup_flow.begin("ingest", {})[1] == 409
+        finally:
+            setup_flow._STATE.update(saved)
+        # the chains the decisions ask for
+        rows = {"ue": {"folder": "UE", "kind": "unreal", "state": "raw", "include": True,
+                       "action": "export", "confirmed": True},
+                "ue/p": {"folder": "UE/P", "kind": "unreal", "state": "raw", "include": True,
+                         "action": "", "confirmed": False},
+                "anim": {"folder": "Anim", "kind": "animation", "state": "", "include": True,
+                         "action": "no-previews", "confirmed": True},
+                "kits": {"folder": "Kits", "kind": "blender", "state": "kit", "include": False,
+                         "action": "extract", "confirmed": True}}
+        nxt = setup_flow.next_steps(rows)
+        assert [n["command"] for n in nxt] == ["python pharos.py convert"], nxt
+        assert nxt[0]["folders"] == ["UE", "UE/P"], nxt
+        # a reloaded config moves every derived root, in this module and
+        # the ones that register with it
+        from asset_service import library_map, browse
+        old_cf = config._CONFIG_FILE
+        config._CONFIG_FILE = root / "pharos_config.json"
+        try:
+            config.save({**config._DEFAULTS, "library_root": str(root / "Lib"),
+                         "registry_dir": str(root / "Reg")})
+            config.reload()
+            assert config.LIBRARY_ROOT == (root / "Lib").resolve()
+            assert config.DB_PATH == str((root / "Reg").resolve() / "assets.sqlite")
+            assert library_map.PATH == (root / "Lib" / "_Agent_Files" / "library_map.csv").resolve()
+            assert browse.CANONICAL_ROOTS == [config.LIBRARY_ROOT] and browse._DB_PATH == config.DB_PATH
+            assert config.TEX_ROOT == config.LIBRARY_ROOT / config._DEFAULTS["sections"]["textures"]
+        finally:
+            config._CONFIG_FILE = old_cf
+            config.reload()
+
 
 def test_short_items_repeat_nothing_and_name_owned_purchases():
     """A third of a search answer repeated itself (fbx = root + key,

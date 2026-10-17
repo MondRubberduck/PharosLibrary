@@ -48,6 +48,7 @@ from asset_service import meshes_import  # noqa: E402
 from asset_service import textmatch as tm  # noqa: E402
 from asset_service import skeleton  # noqa: E402
 from asset_service import library_map  # noqa: E402
+from asset_service import setup_flow  # noqa: E402
 from asset_service.auto_classifier import DOMAINS, STYLES  # noqa: E402
 
 DEFAULT_DB = config.DB_PATH
@@ -201,6 +202,29 @@ PREVIEW_EXTS = {".fbx", ".bvh"}
 TEXTURE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 PAGE_SIZE = 200            # pack-content page rows per request
 PREVIEW_DIR = config.PREVIEW_DIR   # rendered clip loops (webm)
+SETUP_PAGE = _load_tpl("setup.html")
+# SETUP MODE: the server runs without a library (no config yet, or the
+# owner is re-pointing it); only the setup page and its API answer, the
+# rest says so with a 503 until the first ingest ran
+_SETUP_MODE = False
+_SETUP_OPEN = ("/setup", "/api/setup/", "/api/fs/", "/static/", "/favicon.ico")
+
+
+@config.on_reload
+def _rebind_roots() -> None:
+    """After config.reload(): every path this module derived from the
+    roots follows the new config (setup mode changes it at run time)."""
+    global DEFAULT_DB, COLLECTION_ROOT, TEXTURES_ROOT, AUDIO_ROOT, STATUS_FILE
+    global PREVIEW_DIR, _DB_PATH
+    DEFAULT_DB = config.DB_PATH
+    CANONICAL_ROOTS[:] = [config.LIBRARY_ROOT]
+    COLLECTION_ROOT = config.COLLECTION_ROOT
+    TEXTURES_ROOT = config.TEX_ROOT
+    AUDIO_ROOT = config.AUDIO_ROOT
+    STATUS_FILE = (Path(config.EXTENSION_STATUS_FILE).expanduser()
+                   if config.EXTENSION_STATUS_FILE else None)
+    PREVIEW_DIR = config.PREVIEW_DIR
+    _DB_PATH = config.DB_PATH
 
 # Concept clusters for tiered ("meta") search: exact title match first, then
 # related motions from the same cluster (search "talking" -> "arguing",
@@ -472,6 +496,8 @@ def _sync_pack_tags() -> int:
     packs appear after an ingest (the 0.10 library_map.csv is carried over
     once). Returns the number of rows added."""
     import time
+    if not config.is_configured():
+        return 0        # setup mode: there is no library to survey yet
     try:
         res = library_map.refresh(config.LIBRARY_ROOT)
     except library_map.TagFileBusy:
@@ -486,6 +512,10 @@ def _sync_pack_tags() -> int:
 def api_pack_tags() -> dict:
     """Every folder of the map with its kind, decision and the owner's
     tags, the survey's guess beside it, and the registry's counts."""
+    if not config.is_configured():
+        return {"file": "", "markers": list(library_map.MARKERS),
+                "kinds": list(library_map.KINDS), "domains": list(DOMAINS),
+                "pending": [], "packs": []}
     _sync_pack_tags()
     rows = _tag_rows()
     nodes = _survey_nodes()
@@ -3361,13 +3391,57 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _fs_ok(self) -> bool:
+        try:
+            return setup_flow.fs_allowed(str(self.server.server_address[0]))
+        except Exception:                                 # noqa: BLE001
+            return False
+
+    def _setup_gate(self, path: str) -> bool:
+        """In setup mode only the setup page and its API answer; `/` goes
+        there, everything else gets a 503 that says so."""
+        if not _SETUP_MODE or path.startswith(_SETUP_OPEN):
+            return False
+        if path == "/":
+            self.send_response(302)
+            self.send_header("Location", "/setup")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+        self._json({"error": "Pharos is not set up yet: no library indexed",
+                    "setup": "/setup"}, 503)
+        return True
+
     def do_GET(self):
         if not self._host_ok():
             return self._json({"error": "bad host"}, 403)
         url = urlparse(self.path)
         params = parse_qs(url.query)
+        if self._setup_gate(url.path):
+            return
         try:
-            if url.path == "/":
+            if url.path == "/setup":
+                self._html(SETUP_PAGE.encode("utf-8"))
+            elif url.path == "/api/setup/state":
+                self._json(setup_flow.api_state("setup" if _SETUP_MODE else "serving"))
+            elif url.path == "/api/setup/progress":
+                self._json(setup_flow.progress())
+            elif url.path == "/api/setup/map":
+                self._json(api_pack_tags())
+            elif url.path in ("/api/fs/drives", "/api/fs/list"):
+                # the machine's folders: loopback binds only, and never for
+                # a page from another site (an <img> can carry a UNC path)
+                if not self._fs_ok():
+                    return self._json({"error": "folder browsing is for the "
+                                                "machine the server runs on"}, 403)
+                if not self._origin_ok():
+                    return self._json({"error": "cross-origin request rejected"}, 403)
+                if url.path == "/api/fs/drives":
+                    self._json(setup_flow.api_fs_drives())
+                else:
+                    answer, code = setup_flow.api_fs_list((params.get("path") or [""])[0])
+                    self._json(answer, code)
+            elif url.path == "/":
                 _prefix = _anim_prefix()
                 # the rig's pack thumbnail (under the configured section)
                 anim = _pack_thumb.get(
@@ -3748,6 +3822,25 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(urlparse(self.path).query)
         try:
             path = urlparse(self.path).path
+            if self._setup_gate(path):
+                return
+            if path in ("/api/setup/survey", "/api/setup/confirm", "/api/setup/map"):
+                body, err = self._json_body()
+                if err:
+                    return self._json({"error": err}, 415)
+                if path == "/api/setup/map":
+                    answer, code = api_pack_tags_set(body)
+                    return self._json(answer, code)
+                job = "survey" if path.endswith("survey") else "ingest"
+                if not self._fs_ok():
+                    # choosing and indexing a library is for the machine the
+                    # server runs on, like browsing its folders
+                    return self._json({"error": "setup is for the machine the "
+                                                "server runs on"}, 403)
+                answer, code = setup_flow.begin(job, body or {},
+                                                on_configured=_after_survey,
+                                                on_indexed=_after_ingest)
+                return self._json(answer, code)
             if path == "/api/preview/store":
                 # browser-rendered preview loop upload: body is a small webm
                 qs = parse_qs(urlparse(self.path).query)
@@ -3900,59 +3993,23 @@ def _loopback_warning(host: str) -> Optional[str]:
         "  metadata, filenames and thumbnails. When in doubt: 127.0.0.1.")
 
 
-def main(argv=None) -> int:
-    argv = argv if argv is not None else sys.argv[1:]
-    global _DB_PATH
-    parser = argparse.ArgumentParser(description="Registry browser (localhost)")
-    parser.add_argument("--db", default=DEFAULT_DB)
-    parser.add_argument("--port", type=int, default=config.NETWORK["port"])
-    parser.add_argument("--no-open", action="store_true")
-    parser.add_argument("--init", action="store_true",
-                        help="first-run: detect folders and write pharos_config.json")
-    args = parser.parse_args(argv)
-    if args.init:
-        from asset_service import init as pharos_init
-        pharos_init.run_init()
-        if not config.is_configured():
-            return 0
-    if not config.is_configured():
-        print("pharos_config.json has no library_root/registry_dir set.\n"
-              "Run:  python -m asset_service init <path-to-your-assets-folder>\n"
-              "(or copy pharos_config.example.json and edit it by hand)",
-              flush=True)
-        return 2
-    _DB_PATH = args.db
-    # a registry left behind by ANOTHER library: refuse before the
-    # importers write into it (they kept its rows, mixed with this one's)
-    _owner = db.registry_foreign(_DB_PATH, config.LIBRARY_ROOT)
-    if _owner:
-        print(db.foreign_registry_message(_DB_PATH, _owner,
-                                          config.LIBRARY_ROOT), flush=True)
-        return 2
-
+def _startup_imports(db_path: str) -> dict:
+    """What the server does before it answers: thumbnails, schema, every
+    importer (each failing on its own), the map, the registry stamp, the
+    preview cache. Returns the per-section counts for the banner."""
     build_thumb_index()
-    db.init_db(_DB_PATH)   # applies schema migrations (source_url etc.)
-    c_n = t_n = a_n = m_n = 0
-    try:
-        c_n = collection_import.import_collection(_DB_PATH)
-        print(f"collection imported: {c_n} assets", flush=True)
-    except Exception as exc:  # noqa: BLE001 -- CSV missing/moved must not kill the app
-        print(f"collection import skipped: {exc}", flush=True)
-    try:
-        t_n = textures_import.import_textures(_DB_PATH)
-        print(f"textures imported: {t_n} sets", flush=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"textures import skipped: {exc}", flush=True)
-    try:
-        a_n = audio_import.import_audio(_DB_PATH)
-        print(f"audio imported: {a_n} files", flush=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"audio import skipped: {exc}", flush=True)
-    try:
-        m_n = meshes_import.import_meshes(_DB_PATH)
-        print(f"meshes imported: {m_n} records", flush=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"meshes import skipped: {exc}", flush=True)
+    db.init_db(db_path)   # applies schema migrations (source_url etc.)
+    counts = {"collection": 0, "textures": 0, "audio": 0, "meshes": 0}
+    steps = (("collection", lambda: collection_import.import_collection(db_path), "assets"),
+             ("textures", lambda: textures_import.import_textures(db_path), "sets"),
+             ("audio", lambda: audio_import.import_audio(db_path), "files"),
+             ("meshes", lambda: meshes_import.import_meshes(db_path), "records"))
+    for name, fn, unit in steps:
+        try:
+            counts[name] = fn()
+            print(f"{name} imported: {counts[name]} {unit}", flush=True)
+        except Exception as exc:  # noqa: BLE001 -- a missing source must not kill the app
+            print(f"{name} import skipped: {exc}", flush=True)
     try:
         added = _sync_pack_tags()
         if added:
@@ -3961,7 +4018,7 @@ def main(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001 -- a locked file must not stop the app
         print(f"pack tags not updated: {exc}", flush=True)
     try:
-        db.stamp_registry(_DB_PATH, config.LIBRARY_ROOT)   # this library's
+        db.stamp_registry(db_path, config.LIBRARY_ROOT)   # this library's
     except Exception as exc:  # noqa: BLE001
         print(f"registry stamp skipped: {exc}", flush=True)
     # self-heal the preview cache: drop stub/empty recordings and orphaned
@@ -3979,43 +4036,109 @@ def main(argv=None) -> int:
                     orphan.unlink()
                 except OSError:
                     pass
-    host = config.NETWORK["host"]
-    warn = _loopback_warning(host)
-    if warn:
-        print("!" * 70 + "\n" + warn + "\n" + "!" * 70, flush=True)
-    # explicit completion feedback: counts + folders nobody indexed, so a
-    # human watching the console never wonders whether it worked
     try:
-        _c = db.connect(_DB_PATH)
+        _c = db.connect(db_path)
         _prefix = _anim_prefix()
-        _afold = _c.execute(
+        counts["anim_packs"] = _c.execute(
             "SELECT COUNT(*) FROM assets WHERE substr(id, 1, ?) = ?",
-            (len(_prefix), _prefix)
-        ).fetchone()[0]
+            (len(_prefix), _prefix)).fetchone()[0]
         _c.close()
     except Exception:                                     # noqa: BLE001
-        _afold = 0
-    print(f"INGESTION COMPLETE -- collection={c_n}"
-          f" textures={t_n} audio={a_n} meshes={m_n}"
-          f" anim_packs={_afold}", flush=True)
-    if config.is_configured():
+        counts["anim_packs"] = 0
+    # explicit completion feedback: counts + folders nobody indexed, so a
+    # human watching the console never wonders whether it worked
+    print(f"INGESTION COMPLETE -- collection={counts['collection']}"
+          f" textures={counts['textures']} audio={counts['audio']}"
+          f" meshes={counts['meshes']} anim_packs={counts['anim_packs']}", flush=True)
+    return counts
+
+
+def _after_survey() -> dict:
+    """The setup page surveyed a folder: `init` wrote the config and the
+    first map; the roots follow it (config.reload ran) and the map is
+    listed for the page."""
+    global _SETUP_MODE
+    _survey_cache["nodes"], _survey_cache["at"] = {}, 0.0
+    # the registry must serve the roots: a new library (no registry yet, or
+    # one that belongs to another library) puts the server back into setup
+    # mode until its indexing ran; a re-survey of the same library stays live
+    if not Path(_DB_PATH).is_file() or db.registry_foreign(_DB_PATH, config.LIBRARY_ROOT):
+        _SETUP_MODE = True
+    rows = library_map.load()
+    return {"rows": len(rows), "pending": [r["folder"] for r in library_map.pending(rows)],
+            "mode": "setup" if _SETUP_MODE else "serving"}
+
+
+def _after_ingest() -> dict:
+    """The setup page ran `ingest`: the server leaves setup mode, imports
+    what ingest wrote, and reports the verdict and the chains the owner's
+    decisions ask for."""
+    global _SETUP_MODE
+    owner = db.registry_foreign(_DB_PATH, config.LIBRARY_ROOT)
+    if owner:
+        raise RuntimeError(db.foreign_registry_message(_DB_PATH, owner, config.LIBRARY_ROOT))
+    counts = _startup_imports(_DB_PATH)
+    _SETUP_MODE = False
+    out = setup_flow.doctor_verdict()
+    out["counts"] = counts
+    out["next"] = setup_flow.next_steps(library_map.load())
+    return out
+
+
+def main(argv=None) -> int:
+    argv = argv if argv is not None else sys.argv[1:]
+    global _DB_PATH, _SETUP_MODE
+    parser = argparse.ArgumentParser(description="Registry browser (localhost)")
+    parser.add_argument("--db", default=DEFAULT_DB)
+    parser.add_argument("--port", type=int, default=config.NETWORK["port"])
+    parser.add_argument("--no-open", action="store_true")
+    parser.add_argument("--setup", action="store_true",
+                        help="open the setup page (pick the library, correct the map, index)")
+    parser.add_argument("--init", action="store_true",
+                        help="first-run: detect folders and write pharos_config.json")
+    args = parser.parse_args(argv)
+    if args.init:
+        from asset_service import init as pharos_init
+        pharos_init.run_init()
+        config.reload()
+    host = config.NETWORK["host"]
+    if not config.is_configured():
+        # SETUP MODE: serve the setup page and nothing else until the
+        # owner picked a library and the first ingest ran
+        _SETUP_MODE = True
+        print("SETUP MODE -- no library configured yet.\n"
+              f"  open http://{host}:{args.port}/setup to pick your asset folder,\n"
+              "  or run:  python pharos.py init <path-to-your-assets-folder>", flush=True)
+    else:
+        _DB_PATH = args.db
+        # a registry left behind by ANOTHER library: refuse before the
+        # importers write into it (they kept its rows, mixed with this one's)
+        _owner = db.registry_foreign(_DB_PATH, config.LIBRARY_ROOT)
+        if _owner:
+            print(db.foreign_registry_message(_DB_PATH, _owner,
+                                              config.LIBRARY_ROOT), flush=True)
+            return 2
+        _startup_imports(_DB_PATH)
+        warn = _loopback_warning(host)
+        if warn:
+            print("!" * 70 + "\n" + warn + "\n" + "!" * 70, flush=True)
         # the same rule as ingest's ASK block (sections, scan folders, skip
         # dirs, manifest/kit roots AND the registry's rows): listing indexed
         # scan folders here told agents to re-scan them -> duplicates
         from asset_service.init import _not_indexed_dirs
-        strays = _not_indexed_dirs(config.LIBRARY_ROOT, config.load(),
-                                   _DB_PATH)
+        strays = _not_indexed_dirs(config.LIBRARY_ROOT, config.load(), _DB_PATH)
         if strays:
             print(f"NOT INDEXED (no section claims these): "
                   f"{', '.join(strays)}", flush=True)
-            print("  -> scan with scanner.py <folder> or edit "
-                  "pharos_config.json sections, then restart", flush=True)
-    print(f"registry browser: http://{host}:{args.port}  "
-          f"(db={_DB_PATH}, thumbs={len(_thumbs)})", flush=True)
+            print('  -> python pharos.py map set "<folder>" kind=<kind>  '
+                  "(or include=no), then pharos.py ingest", flush=True)
+        print(f"registry browser: http://{host}:{args.port}  "
+              f"(db={_DB_PATH}, thumbs={len(_thumbs)})", flush=True)
     server = ThreadingHTTPServer((host, args.port), Handler)
-    if not args.no_open:
+    if not args.no_open or args.setup:
+        page = "/setup" if (_SETUP_MODE or args.setup) else ""
         threading.Timer(0.4, lambda: webbrowser.open(
-            f"http://{host}:{args.port}")).start()
+            f"http://{host}:{args.port}{page}")).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -337,7 +337,9 @@ def build_config(report: dict, registry_dir: Path) -> dict:
         cfg.pop(key, None)
     cfg["library_root"] = str(root)
     cfg["registry_dir"] = str(registry_dir)
-    cfg["previews_dir"] = str(registry_dir / "previews")
+    if not (same and cfg.get("previews_dir")):
+        # the same library keeps the previews folder the owner set
+        cfg["previews_dir"] = str(registry_dir / "previews")
     counts_by_folder = report.get("folder_counts", {})
     # the folder carrying the catalog CSV is the COLLECTION -- it must
     # never win a content-section pick (alphabetical order once let a

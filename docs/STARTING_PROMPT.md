@@ -14,10 +14,13 @@ Set up Pharos for my asset library. Setup only, do not build scenes yet.
 0. Read <repo>/README.md, then <repo>/docs/AGENT_SETUP.md (your contract).
 
 1. python <repo>/pharos.py doctor --json
+   Then EITHER open the setup page for me (python <repo>/pharos.py setup;
+   I pick the folder, correct the survey and press Start indexing; you
+   wait and watch /api/setup/state), OR do it in the shell:
    python <repo>/pharos.py init "<D:/path/to/your/assets>" --force
    python <repo>/pharos.py survey "<D:/path/to/your/assets>"
-   Show me the top-level folders the way the survey read them (kind and
-   evidence) and let me correct them before anything is indexed.
+   and show me the top-level folders the way the survey read them (kind
+   and evidence) so I can correct them before anything is indexed.
 
 2. python <repo>/pharos.py ingest
    Relay its ASK YOUR USER questions to me in one message, in plain

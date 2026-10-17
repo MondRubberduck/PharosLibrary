@@ -38,11 +38,15 @@ from asset_service.material_roles import classify_param, packed_for
 from asset_service.scene_manifest import collapse_slot_maps
 from asset_service import textmatch as tm
 
-AGENT_FILES = config.AGENT_FILES
-MODELS = AGENT_FILES / "models.jsonl"
-KB3D = AGENT_FILES / "kb3d_models.jsonl"
-NATIVE = AGENT_FILES / "native_models.jsonl"
-SOURCES = (MODELS, KB3D, NATIVE)
+SOURCES = None      # tests point this at one index file; None = the config's
+
+
+def _sources() -> tuple:
+    """The index files, under the config's agent-files folder at call time."""
+    if SOURCES is not None:
+        return tuple(SOURCES)
+    return (config.AGENT_FILES / "models.jsonl", config.AGENT_FILES / "kb3d_models.jsonl",
+            config.AGENT_FILES / "native_models.jsonl")
 # `source` of a row that carries none, by the index file it was read from
 # (build_agent_index writes no source; native rows always carry their own)
 JSONL_SOURCE = {"models.jsonl": "leartes", "kb3d_models.jsonl": "kitbash3d"}
@@ -754,7 +758,7 @@ def import_meshes(db_path: str | Path) -> int:
         joined = 0
         resolved = 0
         per_pack_joined: dict = {}
-        for src in SOURCES:
+        for src in _sources():
             if not src.is_file():
                 continue
             # cp1252/latin-1 fallback: strict utf-8 aborted the whole

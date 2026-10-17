@@ -62,14 +62,31 @@ roots, kit root, skipped folders). Change the map, not the config.
 1. `python pharos.py doctor --json`: what the machine has (Blender,
    Unreal, registry). Report every gap with the fixing command it
    prints.
-2. `python pharos.py init "<library root>" --force` writes the config
-   and the first map (if the user gave no folder, ask for it first).
-   `python pharos.py survey "<library root>"` prints the tree the way
-   the survey read it. Show the user the top-level lines (kind,
-   evidence, file counts) and ask which are wrong before anything is
-   indexed. Correct them with `map set "<folder>" kind=<kind>`
-   (`include=no` for folders to skip), `confirmed=yes` for the rows
-   they looked at.
+2. Two ways to pick and survey the library; the result is the same map.
+   - **The setup page** (prefer it when the user is at the machine):
+     `python pharos.py setup` starts the server and opens `/setup`. The
+     user picks the folder in a folder browser, sees one line per thing
+     the survey found with its evidence, corrects kinds, unticks folders
+     to leave out, answers the decisions, presses *Start indexing*. Tell
+     them the page is open and wait; `GET /api/setup/state` tells you
+     where they are (`configured`, `pending`, `progress.state`), and
+     `pharos.py doctor --json` says READY when it is done. A server
+     started without a config serves only this page (setup mode) until
+     the first indexing ran.
+   - **The shell**: `python pharos.py init "<library root>" --force`
+     writes the config and the first map (if the user gave no folder,
+     ask for it first). `python pharos.py survey "<library root>"`
+     prints the tree the way the survey read it. Show the user the
+     top-level lines (kind, evidence, file counts) and ask which are
+     wrong before anything is indexed. Correct them with
+     `map set "<folder>" kind=<kind>` (`include=no` for folders to
+     skip), `confirmed=yes` for the rows they looked at.
+   An agent can also drive the page's API itself: `POST /api/setup/survey`
+   `{"root": "<folder>"}`, `GET /api/setup/map` and `POST /api/setup/map`
+   (one row: `{"folder", "kind"?, "include"?, "action"?, "confirmed"?}`),
+   `POST /api/setup/confirm` `{}` (refused with the pending list while
+   decisions are missing), `GET /api/setup/progress` (the running job's
+   log, then its result with the doctor verdict and the next steps).
 3. `python pharos.py ingest` runs everything that needs no engine
    (scanner, animation indexer, importers, agent docs) and prints an
    **ASK YOUR USER** block: the folders whose decision is missing, each

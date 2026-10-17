@@ -26,9 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config
 from asset_service import textmatch as tm
 
-AUDIO_ROOT = config.AUDIO_ROOT
-JSONL = AUDIO_ROOT / "library_files.jsonl"
-INDEX = AUDIO_ROOT / "library_index.json"
 
 PLAYABLE = {".wav", ".ogg", ".mp3", ".flac", ".m4a"}
 
@@ -115,7 +112,10 @@ def _kebab(x: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (x or "").lower()).strip("-")
 
 
-def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
+def import_audio(db_path: str | Path, root=None) -> int:
+    root = Path(root) if root else config.AUDIO_ROOT   # the config's root at call time
+    jsonl_file = root / "library_files.jsonl"
+    index_file = root / "library_index.json"
     db_path = Path(db_path)
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -126,9 +126,9 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
         # no crawler jsonl -> this importer owns NOTHING; scanner-indexed
         # rows must survive a restart (previously the DELETE below ran
         # first and the later open() failure could take them with it)
-        if not JSONL.is_file():
+        if not jsonl_file.is_file():
             kept = conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]
-            print(f"audio import: no crawl index ({JSONL}) -- keeping "
+            print(f"audio import: no crawl index ({jsonl_file}) -- keeping "
                   f"{kept} scanner-indexed row(s)")
             return kept
         # scanner rows (source='scan') survive the rebuild: only this
@@ -145,9 +145,9 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
         conn.execute("DELETE FROM audio WHERE source IS NOT 'scan'")
 
         cat_meta: dict = {}
-        if INDEX.is_file():
+        if index_file.is_file():
             try:
-                idx = json.loads(INDEX.read_text(encoding="utf-8"))
+                idx = json.loads(index_file.read_text(encoding="utf-8"))
                 for cat, info in (idx.get("categories") or {}).items():
                     cat_meta[cat] = {
                         "desc": info.get("description") or "",
@@ -159,7 +159,7 @@ def import_audio(db_path: str | Path, root: Path = AUDIO_ROOT) -> int:
         n = 0
         # cp1252/latin-1 fallback: strict utf-8 emptied the whole audio
         # section when the crawl index carried non-ASCII filenames
-        raw = JSONL.read_bytes()
+        raw = jsonl_file.read_bytes()
         text = None
         for enc in ("utf-8", "cp1252", "latin-1"):
             try:

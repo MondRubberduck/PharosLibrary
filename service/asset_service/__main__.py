@@ -7,7 +7,10 @@
     doctor  check setup end-to-end; print exact fixes for every gap
     ingest  run the safe import chains in order; print the decisions
             that need the user (UE crawl? blend handling? purchase CSV?)
-    serve   start the HTTP dashboard + API (same as browse.py)
+    serve   start the HTTP dashboard + API (same as browse.py); without a
+            config it starts in SETUP MODE and serves only /setup
+    setup   start the server and open the setup page: pick the library
+            folder, correct the map, index
     docs    regenerate the agent entry files (AGENT_START_HERE / AGENT_API)
 """
 
@@ -37,6 +40,9 @@ def main() -> int:
     if cmd == "serve":
         from .browse import main as serve_main
         return serve_main(["--no-open"] + sys.argv[2:])
+    if cmd == "setup":
+        from .browse import main as serve_main
+        return serve_main(["--setup"] + sys.argv[2:])
     if cmd == "docs":
         from .agent_docs import run_docs
         return run_docs(sys.argv[2:])

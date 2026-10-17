@@ -2,6 +2,13 @@
 
 ## Unreleased (towards 1.0)
 
+Phase 2 of the 1.0 plan: setup mode and the setup page.
+
+- **`pharos.py setup`** starts the server and opens `/setup`: a folder browser for the library root, the survey's tree (one line per pack, project, kit or texture library, with its evidence) with kind, index and decision per folder, *Accept every guess*, *Start indexing* with a live log, then the doctor verdict, the counts and the engine chains the decisions ask for. The same page adds folders later (*Survey again*).
+- **Setup mode.** A server started without a config no longer exits: it serves the setup page and its API, redirects `/` there and answers everything else with a 503 that names the page, until the first indexing ran. `init` and `ingest` run as subprocesses behind the page; nothing with an engine runs from a web request.
+- **Roots follow the config at run time.** `config.reload()` re-derives every root and runs the hooks the server and the map register; the importers read their roots when called instead of at import. Setup mode changes the library while the server runs; before this, every path was fixed at import.
+- The setup API (`/api/setup/state`, `survey`, `map`, `confirm`, `progress`; `/api/fs/drives`, `/api/fs/list` on loopback binds only) is documented in `docs/AGENT_SETUP.md` so an agent can drive the flow for the user. The fresh-install suite drives it end to end: a new user with a loose-FBX folder and a Unity project reaches READY with no purchase layer in sight.
+
 Phase 1 of the 1.0 plan: the library map.
 
 - **The library map** (`<library>/_Agent_Files/library_map.csv`) replaces `pack_tags.csv` (read once and carried over) and the hand-edited section keys of `pharos_config.json`. One row per folder that is a thing: kind (3D assets, Unreal, Unity, Blender, textures, HDRI, animation, audio, purchases, archive, other, ignore), state, include, the decision its kind needs (`export`/`leave`, `extract`/`leave`, `index-files`/`leave`, `previews`/`no-previews`), confirmed, and the owner's tags. A folder inherits the decision of the folder above it. The survey fills the map and never overwrites a row the owner changed. The config mirrors the map (`pharos.py map apply`); a kind the library lacks has no section, so `doctor` stops asking for it.

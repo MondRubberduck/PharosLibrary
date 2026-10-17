@@ -97,33 +97,63 @@ def is_configured() -> bool:
     return bool(_CFG.get("library_root")) and bool(_CFG.get("registry_dir"))
 
 
-_CFG = load()
-LIBRARY_ROOT = Path(_CFG["library_root"] or ".").resolve()
-REGISTRY_DIR = Path(_CFG["registry_dir"] or ".").resolve()
-DB_PATH = str(REGISTRY_DIR / "assets.sqlite")
-# previews default to a sibling of the registry DB (both are derived data)
-PREVIEW_DIR = Path(_CFG["previews_dir"] or (REGISTRY_DIR / "previews")).resolve()
-SECTIONS = _CFG["sections"]
-AGENT_FILES = (LIBRARY_ROOT / _CFG["agent_files"]).resolve()
-MANIFEST_ROOTS = [Path(r).resolve() for r in _CFG["manifest_roots"]]
-THUMB_CACHE_DIRS = list(_CFG["thumb_cache_dirs"])
-EXTENSION_STATUS_FILE = _CFG["extension_status_file"]
-INDEXER_SKIP_DIRS = list(_CFG["indexer_skip_dirs"])
-NETWORK = _CFG["network"]
-DASHBOARD = _CFG["dashboard"]
+_HOOKS: list = []
 
-# per-section absolute roots
-TEX_ROOT = LIBRARY_ROOT / SECTIONS["textures"]
-AUDIO_ROOT = LIBRARY_ROOT / SECTIONS["audio"]
-COLLECTION_ROOT = LIBRARY_ROOT / SECTIONS["collection"]
 
-# Deliberate owner-default filename, kept verbatim: init.py only writes
-# `collection_csv` when the detected name DIFFERS from this literal
-# (init.py:179-183), so every config whose CSV is called this has no key at
-# all and relies on this default -- including the owner's live config.
-# Renaming it here alone would leave those installs pointing at a file that
-# does not exist; a neutral name would need an init.py change plus a config
-# migration. Reported as a documented exception, not a leftover.
-CSV_PATH = COLLECTION_ROOT / _CFG.get("collection_csv",
-                                      "3D_Assets_Overview.csv")
-AVAILABILITY_JSONL = AGENT_FILES / "availability.jsonl"
+def on_reload(fn):
+    """Register a callable that runs after every reload(): a module that
+    derives paths from the roots re-derives them there."""
+    _HOOKS.append(fn)
+    return fn
+
+
+# the list object is shared with the importers (they alias it): reload
+# fills it in place
+MANIFEST_ROOTS: list = []
+
+
+def _bind(cfg: dict) -> None:
+    """Derive every root from `cfg` into the module globals."""
+    global _CFG, LIBRARY_ROOT, REGISTRY_DIR, DB_PATH, PREVIEW_DIR, SECTIONS
+    global AGENT_FILES, THUMB_CACHE_DIRS, EXTENSION_STATUS_FILE, INDEXER_SKIP_DIRS
+    global NETWORK, DASHBOARD, TEX_ROOT, AUDIO_ROOT, COLLECTION_ROOT, CSV_PATH
+    global AVAILABILITY_JSONL
+    _CFG = cfg
+    LIBRARY_ROOT = Path(cfg["library_root"] or ".").resolve()
+    REGISTRY_DIR = Path(cfg["registry_dir"] or ".").resolve()
+    DB_PATH = str(REGISTRY_DIR / "assets.sqlite")
+    # previews default to a sibling of the registry DB (both are derived data)
+    PREVIEW_DIR = Path(cfg["previews_dir"] or (REGISTRY_DIR / "previews")).resolve()
+    SECTIONS = cfg["sections"]
+    AGENT_FILES = (LIBRARY_ROOT / cfg["agent_files"]).resolve()
+    MANIFEST_ROOTS[:] = [Path(r).resolve() for r in cfg["manifest_roots"]]
+    THUMB_CACHE_DIRS = list(cfg["thumb_cache_dirs"])
+    EXTENSION_STATUS_FILE = cfg["extension_status_file"]
+    INDEXER_SKIP_DIRS = list(cfg["indexer_skip_dirs"])
+    NETWORK = cfg["network"]
+    DASHBOARD = cfg["dashboard"]
+    # per-section absolute roots
+    TEX_ROOT = LIBRARY_ROOT / SECTIONS["textures"]
+    AUDIO_ROOT = LIBRARY_ROOT / SECTIONS["audio"]
+    COLLECTION_ROOT = LIBRARY_ROOT / SECTIONS["collection"]
+    # Deliberate owner-default filename, kept verbatim: init.py only writes
+    # `collection_csv` when the detected name DIFFERS from this literal, so
+    # every config whose CSV is called this has no key at all and relies on
+    # this default -- including the owner's live config. Renaming it here
+    # alone would leave those installs pointing at a file that does not
+    # exist. Reported as a documented exception, not a leftover.
+    CSV_PATH = COLLECTION_ROOT / cfg.get("collection_csv", "3D_Assets_Overview.csv")
+    AVAILABILITY_JSONL = AGENT_FILES / "availability.jsonl"
+
+
+_bind(load())
+
+
+def reload() -> dict:
+    """Re-read pharos_config.json and re-derive every root, then run the
+    registered hooks. Setup mode writes the config while the server runs;
+    before this, every root was fixed at import."""
+    _bind(load())
+    for fn in list(_HOOKS):
+        fn()
+    return _CFG

@@ -481,6 +481,32 @@ def test_extract_hands_the_scripts_only_the_approved_folders():
             restore()
 
 
+def test_init_keeps_the_owners_previews_folder_for_the_same_library():
+    """A re-survey of the same library (the setup page's 'Survey again')
+    runs init --force: the previews folder the owner set stays; another
+    library gets the default beside its registry."""
+    from asset_service import config, init as pharos_init
+    with tempfile.TemporaryDirectory() as tmp:
+        lib = Path(tmp) / "Lib"
+        lib.mkdir()
+        old_cf = config._CONFIG_FILE
+        config._CONFIG_FILE = Path(tmp) / "pharos_config.json"
+        try:
+            config.save({**config._DEFAULTS, "library_root": str(lib),
+                         "registry_dir": str(Path(tmp) / "reg"),
+                         "previews_dir": str(Path(tmp) / "my_previews")})
+            report = {"root": str(lib), "sections": {}, "mesh_folders": [],
+                      "catalog_csvs": [], "manifest_roots": [], "folder_counts": {}}
+            cfg = pharos_init.build_config(report, Path(tmp) / "reg")
+            assert cfg["previews_dir"] == str(Path(tmp) / "my_previews"), cfg["previews_dir"]
+            other = Path(tmp) / "Other"
+            other.mkdir()
+            cfg = pharos_init.build_config({**report, "root": str(other)}, Path(tmp) / "reg2")
+            assert cfg["previews_dir"] == str(Path(tmp) / "reg2" / "previews"), cfg["previews_dir"]
+        finally:
+            config._CONFIG_FILE = old_cf
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

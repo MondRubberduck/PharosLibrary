@@ -216,9 +216,22 @@ def run_doctor(argv=None) -> int:
     # ---- library sections on disk ----------------------------------------
     if lib and Path(lib).is_dir():
         sections = cfg.get("sections") or {}
+        # the library map says which kinds this library HAS: a section the
+        # config only names by default (the map lacks the kind) is not a
+        # folder to ask for
+        try:
+            from . import library_map
+            _rows = library_map.load()
+            kinds_present = set(library_map.sections(_rows)) if _rows else None
+        except Exception:                                 # noqa: BLE001
+            kinds_present = None
+        wants_kind = {"animation": {"animation"}, "textures": {"textures", "hdri"},
+                      "audio": {"audio"}, "collection": {"purchases"}}
         for key in ("animation", "textures", "audio", "collection"):
             rel = sections.get(key) or ""
             if not rel:
+                continue
+            if kinds_present is not None and not (wants_kind[key] & kinds_present):
                 continue
             p = Path(lib) / rel
             checks.append(_check(

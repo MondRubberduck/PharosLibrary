@@ -5,6 +5,7 @@
     python pharos.py ingest        run the safe import chains; relay the
                                    decision questions (UE crawl? blends?) to the user
     python pharos.py serve         start the dashboard + API on 127.0.0.1:8765
+    python pharos.py setup         start the server and open the setup page
     python pharos.py docs          regenerate the agent entry files (_Agent_Files)
 """
 

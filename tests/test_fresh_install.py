@@ -190,7 +190,7 @@ def main() -> int:
         import subprocess
         r = subprocess.run(
             [sys.executable, str(Path(__file__).resolve()), "--inner"],
-            capture_output=True, text=True, cwd=str(REPO), timeout=600)
+            capture_output=True, text=True, cwd=str(REPO), timeout=1500)
         print(r.stdout[-3000:])
         if r.returncode != 0:
             print(r.stderr[-1500:])
@@ -220,6 +220,183 @@ def main() -> int:
             failures.append(label)
 
     try:
+        # 0. THE SETUP FLOW OVER HTTP: a new user with a loose-FBX folder and
+        #    a Unity project (no purchases, no textures, no audio) reaches
+        #    READY from a server started WITHOUT a config (setup mode),
+        #    through the API the /setup page uses: pick root -> survey ->
+        #    correct one row -> decide -> index -> doctor
+        import time as _t0
+        import urllib.error as _ue0
+        import urllib.request as _u0
+        if cfg_path.is_file():
+            cfg_path.unlink()
+        lib0 = tmp / "newuser"
+        (lib0 / "Models" / "Props").mkdir(parents=True)
+        for n in ("crate", "barrel", "lamp"):
+            (lib0 / "Models" / "Props" / f"{n}.fbx").write_bytes(_min_fbx())
+        (lib0 / "MyGame" / "Assets" / "Props").mkdir(parents=True)
+        (lib0 / "MyGame" / "Assets" / "Props" / "chair.fbx").write_bytes(_min_fbx())
+        (lib0 / "MyGame" / "ProjectSettings").mkdir()
+        (lib0 / "MyGame" / "ProjectSettings" / "ProjectVersion.txt").write_text(
+            "m_EditorVersion: 2022.3\n", encoding="utf-8")
+        (lib0 / "MyGame" / "Library").mkdir()
+        (lib0 / "MyGame" / "Library" / "cache.bin").write_bytes(b"\0" * 10)
+        (lib0 / "notes.txt").write_text("x", encoding="utf-8")   # a file: not a folder
+        reg0 = tmp / "reg0"
+        log0 = open(tmp / "setup_server.log", "w", encoding="utf-8")
+        srv0 = subprocess.Popen(
+            [sys.executable, str(REPO / "pharos.py"), "serve", "--no-open", "--port", "8846"],
+            cwd=str(REPO), stdout=log0, stderr=subprocess.STDOUT)
+        base0 = "http://127.0.0.1:8846"
+
+        def _body(resp):
+            raw = resp.read() or b""
+            if "json" in (resp.headers.get("Content-Type") or ""):
+                try:
+                    return json.loads(raw or b"{}")
+                except ValueError:
+                    return {}
+            return raw
+
+        def _get(path, timeout=5):
+            try:
+                with _u0.urlopen(base0 + path, timeout=timeout) as r:
+                    return r.status, _body(r)
+            except _ue0.HTTPError as e:
+                return e.code, _body(e)
+
+        def _post(path, obj):
+            req = _u0.Request(base0 + path, data=json.dumps(obj).encode("utf-8"),
+                              headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with _u0.urlopen(req, timeout=10) as r:
+                    return r.status, _body(r)
+            except _ue0.HTTPError as e:
+                return e.code, _body(e)
+
+        def _wait_job(limit):
+            for _ in range(limit * 2):
+                _t0.sleep(0.5)
+                st, p = _get("/api/setup/progress")
+                if st == 200 and isinstance(p, dict) and p.get("state") in ("done", "failed"):
+                    return p
+            return {"state": "timeout", "lines": [], "error": "timeout"}
+
+        def _tail(p):
+            return (p.get("error") or "") + " | " + " / ".join(p.get("lines", [])[-5:])
+
+        class _S0Abort(Exception):
+            pass
+        try:
+            code = None
+            for _ in range(40):
+                _t0.sleep(0.5)
+                try:
+                    code, _ = _get("/api/setup/state")
+                except OSError:            # not listening yet (refused, reset)
+                    code = None
+                    continue
+                if code == 200:
+                    break
+            check("S0: server boots WITHOUT a config (setup mode)", code == 200, str(code))
+            st, state = _get("/api/setup/state")
+            check("S0: state says not configured",
+                  st == 200 and state.get("configured") is False and state.get("mode") == "setup",
+                  str(state)[:200])
+            st, body = _get("/api/stats")
+            check("S0: data API answers 503 in setup mode (no registry touched)",
+                  st == 503 and isinstance(body, dict) and body.get("setup") == "/setup",
+                  f"{st} {str(body)[:120]}")
+
+            class _NoRedirect(_u0.HTTPRedirectHandler):
+                def redirect_request(self, *a, **k):
+                    return None
+            loc0 = None
+            try:
+                rc0 = _u0.build_opener(_NoRedirect).open(base0 + "/", timeout=5).status
+            except _ue0.HTTPError as e:
+                rc0, loc0 = e.code, e.headers.get("Location")
+            check("S0: / redirects to /setup", rc0 == 302 and loc0 == "/setup", f"{rc0} {loc0}")
+            st, page = _get("/setup")
+            check("S0: /setup page served", st == 200 and b"Pharos setup" in page, str(st))
+            st, d = _get("/api/fs/drives")
+            check("S0: drives listed", st == 200 and bool(d.get("drives")), str(d)[:120])
+            st, d = _get("/api/fs/list?path=" + _u0.quote(str(lib0)))
+            check("S0: sub-folders listed, files not",
+                  st == 200 and {x["name"] for x in d.get("dirs", [])} == {"Models", "MyGame"}
+                  and "notes.txt" not in str(d), str(d)[:200])
+            st, d = _get("/api/fs/list?path=" + _u0.quote("\\\\attacker.example\\share"))
+            check("S0: a UNC path is refused by the folder browser", st == 400, str(st))
+            st, d = _get("/api/fs/list?path=" + _u0.quote(str(lib0 / "Models" / "Props" / "crate.fbx")))
+            check("S0: a file is refused by the folder browser", st == 400, str(st))
+            st, d = _post("/api/setup/survey", {"root": str(lib0 / "nope")})
+            check("S0: survey refuses a missing folder", st == 400, f"{st} {d}")
+            st, d = _post("/api/setup/survey", {"root": str(lib0), "registry_dir": str(reg0)})
+            check("S0: survey accepted", st == 202, f"{st} {d}")
+            p = _wait_job(240)
+            check("S0: survey finished", p.get("state") == "done", _tail(p))
+            if p.get("state") != "done":
+                raise _S0Abort()
+            check("S0: survey log carries the init output",
+                  any("library map" in ln for ln in p.get("lines", [])), _tail(p))
+            cfg0 = json.loads(cfg_path.read_text(encoding="utf-8-sig")) if cfg_path.is_file() else {}
+            check("S0: config written by the page's survey",
+                  _same_path(cfg0.get("library_root", ""), str(lib0)), str(cfg0.get("library_root")))
+            st, state = _get("/api/setup/state")
+            check("S0: configured, still setup mode, the Unity decision pending",
+                  state.get("configured") is True and state.get("mode") == "setup"
+                  and state.get("pending") == ["MyGame"],
+                  str({k: state.get(k) for k in ("configured", "mode", "pending")}))
+            st, m = _get("/api/setup/map")
+            got0 = {x["folder"]: x for x in m.get("packs", [])}
+            check("S0: the map lists the model folder and the Unity project",
+                  got0.get("Models", {}).get("kind") == "3d-assets"
+                  and got0.get("MyGame", {}).get("kind") == "unity"
+                  and got0.get("MyGame", {}).get("state") == "project",
+                  str({k: (v["kind"], v["state"]) for k, v in got0.items()}))
+            check("S0: no purchase layer in a library without one",
+                  not any(x["kind"] == "purchases" for x in got0.values()))
+            st, d = _post("/api/setup/confirm", {})
+            check("S0: indexing refused while a decision pends",
+                  st == 400 and d.get("pending") == ["MyGame"], f"{st} {d}")
+            st, d = _post("/api/setup/map", {"folder": "Models", "kind": "3D Asset", "confirmed": True})
+            check("S0: a row saved through the setup map",
+                  st == 200 and d.get("pack", {}).get("confirmed") is True, f"{st} {d}")
+            st, d = _post("/api/setup/map", {"folder": "MyGame", "action": "index-files"})
+            check("S0: Unity decision recorded",
+                  st == 200 and d.get("pack", {}).get("action") == "index-files", f"{st} {d}")
+            st, d = _post("/api/setup/confirm", {})
+            check("S0: indexing started", st == 202, f"{st} {d}")
+            p = _wait_job(400)
+            check("S0: indexing finished", p.get("state") == "done", _tail(p))
+            if p.get("state") != "done":
+                raise _S0Abort()
+            res0 = p.get("result") or {}
+            check("S0: doctor READY for the new user", res0.get("verdict") == "READY", str(res0)[:300])
+            check("S0: models counted (loose FBX + the Unity Assets folder)",
+                  (res0.get("counts") or {}).get("meshes", 0) >= 4, str(res0.get("counts")))
+            st, state = _get("/api/setup/state")
+            check("S0: server left setup mode", state.get("mode") == "serving", str(state.get("mode")))
+            st, body = _get("/api/meshes?q=crate&limit=5")
+            check("S0: the data API answers after setup",
+                  st == 200 and body.get("total", 0) >= 1, f"{st} {str(body)[:120]}")
+            st, body = _get("/api/stats")
+            check("S0: no purchases counted", st == 200 and not (body.get("sections") or {}).get("collection"),
+                  str(body)[:200])
+            st, page = _get("/")
+            check("S0: dashboard renders", st == 200, str(st))
+        except _S0Abort:
+            print("  S0 aborted: the rest of the setup flow is skipped")
+        finally:
+            srv0.kill()
+            try:
+                srv0.wait(timeout=10)
+            except Exception:                              # noqa: BLE001
+                pass
+            log0.close()
+        if cfg_path.is_file():
+            cfg_path.unlink()          # step 1 inits the main fixture from scratch
+
         # 1. init as a subprocess: detection + config write (--force;
         #    the real config is backed up above)
         r = subprocess.run(
