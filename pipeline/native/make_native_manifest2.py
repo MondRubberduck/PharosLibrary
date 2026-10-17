@@ -4,13 +4,14 @@ from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "service"))
 from _config import library_root, load
+from asset_service import kinds
 LIB = library_root() or "."
 OUT = os.path.join(T, "native_manifest.json")
-BLENDS = os.path.join(T, "native_blends.txt")
 
 _cfg = load()
-MODEL_EXT = {".fbx", ".obj", ".usd", ".usda", ".usdc", ".blend", ".max"}
+MODEL_EXT = kinds.MODEL | kinds.BLEND
 
 if not os.path.isdir(LIB):
     print("library root not found: %s" % LIB)
@@ -66,17 +67,8 @@ others = [i for i in items if i["ext"] not in (".blend", ".max")]
 json.dump({"importable": others, "blend_files": blends},
           io.open(OUT, "w", encoding="utf-8", newline="\n"), indent=1)
 
-# plain list so the bash launcher does not need to parse JSON.
-# newline="\n" matters: the Windows text-mode default writes CRLF, Git
-# Bash `read -r` keeps the \r, Blender receives "path\r" and every
-# import silently fails while the driver still exits 0
-with io.open(BLENDS, "w", encoding="utf-8", newline="\n") as fh:
-    for b in blends:
-        fh.write(b["path"] + "\n")
-        fh.write(b["section"] + "\n")
-
 print("importable:", len(others), " blend kits:", len(blends))
 print("blend kits by section:", dict(Counter(b["section"] for b in blends)))
 print("importable by section:", dict(Counter(i["section"] for i in others)))
 print("importable by ext:", dict(Counter(i["ext"] for i in others)))
-print("wrote:", OUT, "and", BLENDS)
+print("wrote:", OUT)

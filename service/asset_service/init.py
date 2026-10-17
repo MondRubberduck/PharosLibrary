@@ -32,13 +32,12 @@ from . import config
 
 _REPO = Path(__file__).resolve().parents[2]
 
-CLIP_EXTS = {".fbx", ".bvh"}
-MESH_EXTS = {".fbx", ".obj", ".glb", ".gltf", ".stl", ".blend", ".usd", ".usda",
-             ".usdc", ".usdz", ".uasset", ".umodel", ".max"}
-AUDIO_EXTS = {".wav", ".ogg", ".mp3", ".flac", ".m4a", ".aif", ".aiff",
-              ".aac", ".wma"}
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp",
-              ".exr", ".hdr", ".dds", ".tga"}
+from . import kinds
+
+CLIP_EXTS = kinds.CLIP
+MESH_EXTS = kinds.MODEL | kinds.BLEND | kinds.UNREAL
+AUDIO_EXTS = kinds.AUDIO
+IMAGE_EXTS = kinds.IMAGE
 SAMPLE_LIMIT = 2000          # files censused per folder; classification
                              # does not need the whole tree
 FBX_PROBE_LIMIT = 3          # FBXs opened for animation evidence when a
@@ -68,10 +67,12 @@ def _census(folder: Path) -> tuple[dict[str, int], list[Path]]:
 
 
 def _fbx_is_animation(samples: list[Path]) -> bool:
-    """Binary evidence: FBX files carrying AnimStack/AnimationCurve
-    nodes are animation clips, static geometry is not. A folder of FBX
-    models must classify as MESHES even though .fbx also counts as a
-    clip extension (and an animation library must stay animation)."""
+    """Binary evidence: an FBX is an animation clip when it carries an
+    AnimationStack AND either no mesh geometry or an armature (LimbNode:
+    a skinned character with its motion). Static exports from Unreal
+    carry an AnimationStack too, and every exporter writes a 'Takes'
+    node, so 'any animation marker' once made a folder of converted
+    static meshes the ANIMATION section."""
     try:
         from asset_service.auto_classifier import probe_fbx_markers
     except Exception:
@@ -81,7 +82,8 @@ def _fbx_is_animation(samples: list[Path]) -> bool:
             with open(p, "rb") as fh:
                 blob = fh.read(16 * 1024 * 1024)
             marks = probe_fbx_markers(blob) or {}
-            if marks.get("has_anim"):
+            if marks.get("has_anim_stack") and (
+                    marks.get("has_bones") or not marks.get("has_mesh")):
                 return True
         except OSError:
             continue

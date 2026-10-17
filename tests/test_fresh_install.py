@@ -39,10 +39,12 @@ def _same_path(a: str, b: str) -> bool:
 FBX_TRIANGLES = 1
 
 
-def _min_fbx() -> bytes:
-    """Hand-built binary FBX 7400: one Geometry with Vertices and
+def _min_fbx(version: int = 7400) -> bytes:
+    """Hand-built binary FBX: one Geometry with Vertices and
     PolygonVertexIndex as CHILD nodes (the real layout the parser walks).
-    Triangle spans 100x100 cm -> 1x1 m after unit scaling."""
+    Triangle spans 100x100 cm -> 1x1 m after unit scaling. Record headers
+    are 32-bit below version 7500 and 64-bit from 7500 on."""
+    hfmt, hsize = ("<QQQ", 25) if version >= 7500 else ("<III", 13)
     def d_arr(vals):
         body = struct.pack(f"<{len(vals)}d", *vals)
         return b"d" + struct.pack("<III", len(vals), 0, len(body)) + body
@@ -53,13 +55,13 @@ def _min_fbx() -> bytes:
 
     def build(name, prop_list, children, start):
         props = b"".join(prop_list)
-        pos = start + 13 + len(name) + len(props)
+        pos = start + hsize + len(name) + len(props)
         blob = b""
         for (cn, cp, cc) in children:
             b2, pos = build(cn, cp, cc, pos)
             blob += b2
-        end = start + 13 + len(name) + len(props) + len(blob)
-        return (struct.pack("<III", end, len(prop_list), len(props))
+        end = start + hsize + len(name) + len(props) + len(blob)
+        return (struct.pack(hfmt, end, len(prop_list), len(props))
                 + bytes([len(name)]) + name + props + blob), end
 
     geom_props = [b"I" + struct.pack("<i", 1234), b"S\x00\x00\x00\x00"]
@@ -68,9 +70,9 @@ def _min_fbx() -> bytes:
     polys = (b"PolygonVertexIndex", [i_arr([0, 1, -2])], [])
     body, _ = build(b"Geometry", geom_props, [verts, polys], 27)
     out = bytearray(b"Kaydara FBX Binary  \x00\x1a\x00")
-    out += struct.pack("<I", 7400)
+    out += struct.pack("<I", version)
     out += body
-    out += b"\x00" * 13
+    out += b"\x00" * hsize
     return bytes(out)
 
 
@@ -152,8 +154,8 @@ def build_fixture(root: Path) -> None:
     kit.mkdir(parents=True)
     (kit / "kb3d_FixtureKit.blend").write_bytes(b"BLENDER-stub")
     (root / "Collected Files").mkdir(parents=True)
-    # Local Folder points at a real dir: ingest's availability pass must
-    # mark this purchase 'local' (the CSV folder is the on-disk evidence)
+    # Local Folder points at a real dir: for the reference library that
+    # folder is the STORE-IMAGE gallery, so it is no proof of a download
     (root / "Collected Files" / "OldMill").mkdir()
     (root / "Collected Files" / "OldMill" / "mill.png").write_bytes(
         b"\x89PNG fake")
@@ -1027,16 +1029,16 @@ def main() -> int:
         check("ingest kept meshes intact across rebuild",
               _mesh_n >= 3, f"meshes={_mesh_n}")
 
-        # B10: purchases whose Local Folder exists on disk must read
-        # 'local' after ingest (the CSV folder is the on-disk evidence)
+        # B10: a purchase is NOT 'local' just because its CSV folder exists
+        # (ingest did that; for the reference library every gallery folder
+        # exists, so all 259 purchases read as downloaded while 38 were)
         _c = _sq.connect(dbp)
         _avail = _c.execute(
             "SELECT availability FROM collection "
             "WHERE name='Old Mill'").fetchone()
         _c.close()
-        check("B10: on-disk purchase marked local after ingest",
-              _avail and _avail[0] == "local",
-              str(_avail))
+        check("B10: a gallery folder alone does not make a purchase local",
+              not (_avail and _avail[0] == "local"), str(_avail))
 
         # ---- R2: converted packs import by themselves, exactly once ------
         def _rows_for(fbx: Path) -> list:

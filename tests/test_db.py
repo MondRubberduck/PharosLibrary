@@ -49,11 +49,6 @@ def _populate(conn):
             {"relative_path": "Archviz/Sofa/albedo.png", "file_type": "texture", "file_size": 5},
         ],
     )
-    db.record_operation(
-        conn, op_id="op-1", operation_type="prepare_blender_import",
-        asset_ids=["pack-001"], plan_json={"collection": "Sofa"},
-        status="awaiting_approval",
-    )
 
 
 def test_roundtrip():
@@ -70,7 +65,9 @@ def test_roundtrip():
             try:
                 stats = db.db_stats(conn2)
                 assert stats["assets"] == 2 and stats["asset_files"] == 2
-                assert stats["operations"] == 1
+                assert "operations" not in stats and not conn2.execute(
+                    "SELECT name FROM sqlite_master WHERE name='operations'"
+                ).fetchone(), "the unused operations table is gone"
                 assert stats["domains"]["Archviz"] == 1
 
                 # FTS search + structured filters

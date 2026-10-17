@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (towards 1.0)
+
+Phase 0 of the 1.0 plan: ground truth before the restructure.
+
+- **FBX 7.5 and later parse.** Those files write 64-bit record headers; the stdlib reader knew only the 32-bit layout, so every UE5 / recent Maya / Max file came back empty (all 617 clips of one animation pack). `fbx_dims.fbx_nodes()` reads every version.
+- **Folder detection: an animation folder needs motion.** A converted-Unreal folder of static meshes was classified as the animation section because static exports carry an AnimationStack and every exporter writes a `Takes` node. A clip now needs an AnimationStack plus an armature, or plus no geometry.
+- **One table of file kinds** (`asset_service/kinds.py`). Six writers carried their own list of what counts as a 3D file and disagreed.
+- **A purchase is no longer "local" because its CSV folder exists.** For the reference library that folder is the store-image gallery, so all 259 purchases read as downloaded while 38 were. Availability comes from the availability catalogue, or stays unknown.
+- Removed, nothing read them: the `/gltest` page, the `operations` registry table (dropped on the next start), `source_fingerprint.py`, `recon_new.py`, `native_blends.txt`, the pack catalogue `build_agent_index.py` computed and discarded (and its extra library walk). `export_kb3d_rest.py` folded into `export_all_kb3d.py`, which now handles both kit layouts.
+
 ## 0.10.0 (2026-10-03)
 A review of how an agent actually browses the library (live tests against a 12,280-model library, each finding re-checked by a second reviewer, then a second review of the changes) drove this release: search answers are now short, ordered by relevance and honest about what they did.
 

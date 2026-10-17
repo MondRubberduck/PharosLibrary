@@ -45,11 +45,12 @@ AUDIO_ROOT = config.AUDIO_ROOT
 # format detection
 # ---------------------------------------------------------------------------
 
-MESH_EXTS = {".fbx", ".obj", ".glb", ".gltf", ".stl"}
-BLEND_EXTS = {".blend"}
-AUDIO_EXTS = {".wav", ".ogg", ".mp3", ".flac", ".m4a"}
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tga", ".tif", ".tiff",
-              ".exr", ".hdr", ".bmp"}
+from asset_service import kinds
+
+MESH_EXTS = kinds.MODEL_SCAN
+BLEND_EXTS = kinds.BLEND
+AUDIO_EXTS = kinds.AUDIO
+IMAGE_EXTS = kinds.IMAGE
 
 # texture channel detection from filename
 CHANNEL_PATTERNS = [

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # index_native_all.sh -- count/index the geometry that is NOT in the converted
 # packs: the kit .blend files (LOADED, one session each; list from
-# native_blends.txt) plus the importable FBX/OBJ/USD files (one session for
+# plus the importable FBX/OBJ/USD files (one session for
 # all of them; list from native_manifest.json). Both lists are derived by
 # make_native_manifest2.py -- no counts or folder names are hardcoded here.
 # Writes a timestamped jsonl so nothing has to be deleted first.
@@ -24,7 +24,6 @@ if [[ -z "$BLENDER" ]]; then
   BLENDER="${BLENDER//$'\r'/}"
 fi
 LIST="$T/native_manifest.json"
-BLENDS="$T/native_blends.txt"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$T/native_index_${STAMP}.jsonl"
 echo "OUT=$OUT"

@@ -300,6 +300,59 @@ def _poison_fbx() -> bytes:
     return bytes(out)
 
 
+def test_fbx_dims_reads_every_header_width():
+    """FBX 7500 and later write 64-bit record headers; the reader knew only
+    the 32-bit layout, so every UE5 / recent Maya / Max file (all 617
+    clips of one pack) parsed as nothing: no size, no triangles, excluded
+    by every size filter."""
+    from asset_service.fbx_dims import fbx_file_info, fbx_nodes
+    with tempfile.TemporaryDirectory() as tmp:
+        for version in (7400, 7700):
+            p = Path(tmp) / f"v{version}.fbx"
+            p.write_bytes(_min_fbx(version))
+            info = fbx_file_info(p)
+            assert info and info["triangles"] == 1 \
+                and info["fbx_version"] == version, (version, info)
+            assert [n[0] for n in fbx_nodes(p)[1]] == ["Geometry"], version
+
+
+def test_animation_rule_needs_motion_not_just_markers():
+    """Static exports from Unreal carry an AnimationStack and every
+    exporter writes a 'Takes' node, so 'any animation marker' made a
+    folder of converted static meshes the ANIMATION section. A clip is
+    an AnimationStack plus an armature, or plus no geometry."""
+    from asset_service import init
+    cases = {
+        b"...Geometry...AnimationStack...Takes...": False,   # static UE export
+        b"...Geometry...Takes...": False,                    # Blender/KitBash export
+        b"...AnimationStack...Takes...": True,               # bare clip
+        b"...Geometry...LimbNode...AnimationStack...": True,  # skinned clip
+        b"...Geometry...LimbNode...Deformer...Takes...": False,  # rigged, no motion
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, (blob, want) in enumerate(cases.items()):
+            p = Path(tmp) / f"f{i}.fbx"
+            p.write_bytes(b"Kaydara FBX Binary  \x00" + blob)
+            assert init._fbx_is_animation([p]) is want, (blob, want)
+
+
+def test_one_table_of_file_kinds():
+    """Six writers carried their own list of what counts as a 3D file and
+    disagreed; every list now comes from kinds.py."""
+    import re
+    from asset_service import kinds
+    assert ".usd" in kinds.MODEL and ".uasset" in kinds.UNREAL
+    assert not (kinds.MODEL & kinds.UNREAL) and not (kinds.MODEL & kinds.BLEND)
+    own = re.compile(r'^\s*[A-Z_]*EXTS?\s*=\s*\{\s*"\.', re.M)
+    for rel in ("service/asset_service/init.py", "service/asset_service/scanner.py",
+                "service/asset_service/indexer.py",
+                "pipeline/native/make_native_manifest2.py",
+                "pipeline/agent_index/build_availability_catalog.py",
+                "pipeline/agent_index/build_agent_index.py"):
+        src = (REPO / rel).read_text(encoding="utf-8")
+        assert not own.search(src), f"{rel} still defines its own extension set"
+
+
 def test_fbx_dims_poison_returns_none():
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "poison.fbx"
@@ -630,6 +683,11 @@ def _native_copy(dest=None) -> Path:
     dest = Path(dest or tempfile.mkdtemp(prefix="pharos_native_"))
     (dest / "pipeline" / "native").mkdir(parents=True, exist_ok=True)
     shutil.copy2(REPO / "pipeline" / "_config.py", dest / "pipeline")
+    # the one shared table the chain reads from the service package
+    svc = dest / "service" / "asset_service"
+    svc.mkdir(parents=True, exist_ok=True)
+    for name in ("__init__.py", "kinds.py"):
+        shutil.copy2(REPO / "service" / "asset_service" / name, svc / name)
     for f in (REPO / "pipeline" / "native").iterdir():
         if f.is_file() and f.suffix in (".py", ".sh"):
             shutil.copy2(f, dest / "pipeline" / "native" / f.name)
@@ -651,10 +709,10 @@ def test_native_worklist_is_lf_only():
             env={**os.environ, "PHAROS_CONFIG": str(tmp / "missing.json"),
                  "PHAROS_LIBRARY_ROOT": str(lib)})
         assert r.returncode == 0, (r.stderr or "")[-300:]
-        data = (native / "native_blends.txt").read_bytes()
-        assert data and b"\r" not in data, data[:80]
         mdata = (native / "native_manifest.json").read_bytes()
-        assert b"\r" not in mdata
+        assert mdata and b"\r" not in mdata, mdata[:80]
+        assert not (native / "native_blends.txt").exists(), \
+            "the plain-text blend list is written again (nothing reads it)"
 
 
 def test_native_driver_fails_loudly():
@@ -678,8 +736,6 @@ def test_native_driver_fails_loudly():
             "importable": [], "blend_files": [
                 {"path": "X:/nope/kit.blend", "section": "S"}]}),
             encoding="utf-8")
-        (native / "native_blends.txt").write_text(
-            "X:/nope/kit.blend\nS\n", encoding="utf-8")
         base_env = {**os.environ,
                     "BLENDER_EXE": str(stub),
                     "PHAROS_CONFIG": str(tmp / "missing.json")}
@@ -1730,7 +1786,6 @@ def test_blender_exe_finder():
 
 
 _BLENDER_SCRIPTS = ("pipeline/kitbash/export_all_kb3d.py",
-                    "pipeline/kitbash/export_kb3d_rest.py",
                     "pipeline/kitbash/run_kb3d_metadata.py",
                     "pipeline/native/run_blends.py")
 
@@ -1893,7 +1948,7 @@ def test_rig_path_follows_section_and_exists():
     orig = browse._rig_rel
     try:
         browse._rig_rel = lambda *a, **k: ""
-        for name in ("VIEWER_PAGE", "ANIM_PAGE", "GLTEST_PAGE", "BATCH_PAGE"):
+        for name in ("VIEWER_PAGE", "ANIM_PAGE", "BATCH_PAGE"):
             page = getattr(browse, name)
             assert "{{RIG_REL}}" in page, f"{name}: rig not server-filled"
             assert "{{RIG_REL}}" not in browse._with_rig(page), name

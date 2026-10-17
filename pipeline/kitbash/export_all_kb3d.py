@@ -1,5 +1,7 @@
 """Export FBX from every KitBash3D .blend kit, one FBX per group assembly.
-Skips kits that already have Exports/kit_manifest.json (so it is re-runnable)."""
+Both kit layouts: <Kit>/*.blender.native/*.blend (newer) and <Kit>/*.blend
+(older packaging; this used to be a second driver). Skips kits that
+already have a healthy Exports/kit_manifest.json (so it is re-runnable)."""
 import glob, io, json, os, subprocess, sys
 from pathlib import Path
 
@@ -17,12 +19,15 @@ if not ROOT or not os.path.isdir(ROOT):
                      "pharos_config.json or PHAROS_KB3D_ROOT "
                      "(see pipeline/README.md)" % ROOT)
 
-kits = sorted(glob.glob(os.path.join(ROOT, "*", "*.blender.native", "*.blend")))
+kits = sorted(glob.glob(os.path.join(ROOT, "*", "*.blender.native", "*.blend"))
+              + glob.glob(os.path.join(ROOT, "*", "*.blend")))
 print("kits found:", len(kits), flush=True)
 
 ok = skipped = failed = 0
 for i, blend in enumerate(kits, 1):
-    kit_dir = os.path.dirname(os.path.dirname(blend))          # <Kit>
+    kit_dir = os.path.dirname(blend)                           # <Kit>
+    if os.path.basename(kit_dir).endswith(".blender.native"):
+        kit_dir = os.path.dirname(kit_dir)
     man = os.path.join(kit_dir, "Exports", "kit_manifest.json")
     name = os.path.basename(kit_dir)
     if os.path.isfile(man):

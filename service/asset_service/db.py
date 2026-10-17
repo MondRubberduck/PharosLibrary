@@ -6,8 +6,6 @@ Tables:
                  classification is virtual, files on disk are never touched
     asset_files  physical files belonging to a pack (meshes, anims, textures,
                  .uasset, licenses, archives)
-    operations   audit trail for gated DCC actions (dry-run plans, approvals,
-                 execution results, viewport screenshots)
     assets_fts   FTS5 full-text index over name/vendor/taxonomy/tags, kept in
                  sync with `assets` via triggers
 
@@ -17,7 +15,6 @@ configured registry dir -- never to files under the canonical asset roots.
 CLI:
     python db.py --db <registry>/assets.sqlite --init
     python db.py --db ... --stats
-    python db.py --self-test
 """
 
 from __future__ import annotations
@@ -90,24 +87,11 @@ CREATE TABLE IF NOT EXISTS asset_files (
     sha256 TEXT
 );
 
-CREATE TABLE IF NOT EXISTS operations (
-    op_id TEXT PRIMARY KEY,
-    operation_type TEXT NOT NULL,
-    asset_ids TEXT NOT NULL,
-    plan_json TEXT,
-    dry_run INTEGER DEFAULT 1,
-    status TEXT,
-    result_json TEXT,
-    screenshot_path TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE INDEX IF NOT EXISTS idx_assets_domain        ON assets(domain);
 CREATE INDEX IF NOT EXISTS idx_assets_style         ON assets(style);
 CREATE INDEX IF NOT EXISTS idx_assets_vendor        ON assets(vendor);
 CREATE INDEX IF NOT EXISTS idx_assets_status        ON assets(status);
 CREATE INDEX IF NOT EXISTS idx_asset_files_asset   ON asset_files(asset_id);
-CREATE INDEX IF NOT EXISTS idx_operations_status   ON operations(status);
 
 -- Full-text search over the taxonomy-facing columns. `assets` is a plain
 -- rowid table (TEXT primary key), so external-content FTS5 can hang off rowid.
@@ -214,6 +198,8 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
     # (the indexer no longer computes either): drop their indexes
     conn.execute("DROP INDEX IF EXISTS idx_assets_content_hash")
     conn.execute("DROP INDEX IF EXISTS idx_asset_files_sha256")
+    # the 'operations' audit trail never had a writer outside its own test
+    conn.execute("DROP TABLE IF EXISTS operations")
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
     return conn
@@ -414,34 +400,6 @@ def replace_asset_files(
     conn.commit()
 
 
-def record_operation(
-    conn: sqlite3.Connection,
-    op_id: str,
-    operation_type: str,
-    asset_ids: list[str],
-    plan_json: Optional[Mapping[str, Any]] = None,
-    dry_run: bool = True,
-    status: Optional[str] = None,
-    result_json: Optional[Mapping[str, Any]] = None,
-    screenshot_path: Optional[str] = None,
-) -> None:
-    conn.execute(
-        "INSERT OR REPLACE INTO operations (op_id, operation_type, asset_ids, plan_json, "
-        "dry_run, status, result_json, screenshot_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            op_id,
-            operation_type,
-            json.dumps(asset_ids),
-            _json_or_none(plan_json),
-            1 if dry_run else 0,
-            status,
-            _json_or_none(result_json),
-            screenshot_path,
-        ),
-    )
-    conn.commit()
-
-
 # ---------------------------------------------------------------------------
 # Read helpers
 # ---------------------------------------------------------------------------
@@ -527,7 +485,6 @@ def db_stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "schema_version": conn.execute("PRAGMA user_version").fetchone()[0],
         "assets": one("SELECT COUNT(*) FROM assets"),
         "asset_files": one("SELECT COUNT(*) FROM asset_files"),
-        "operations": one("SELECT COUNT(*) FROM operations"),
         "domains": {
             r["domain"]: r["n"]
             for r in conn.execute(
@@ -547,81 +504,6 @@ def db_stats(conn: sqlite3.Connection) -> dict[str, Any]:
 # Self test (also validates FTS5 availability on this interpreter)
 # ---------------------------------------------------------------------------
 
-def self_test() -> None:
-    conn = init_db(":memory:")
-
-    upsert_asset(
-        conn,
-        {
-            "id": "pack-001",
-            "name": "Leather Sofa Set",
-            "canonical_root": "X:/lib",
-            "hero_file_path": "X:/lib/Archviz/Sofa/sofa.fbx",
-            "vendor": "CGTrader",
-            "style": "Photorealistic",
-            "domain": "Archviz",
-            "sub_category": "Furniture",
-            "formats": ["fbx", "png"],
-            "host_tags": ["sofa", "furniture", "livingroom"],
-            "content_hash": "deadbeef",
-        },
-    )
-    upsert_asset(
-        conn,
-        {
-            "id": "pack-002",
-            "name": "Mocap Walk Cycle Pack",
-            "canonical_root": "X:/lib",
-            "hero_file_path": "X:/lib/Anims/walk.fbx",
-            "vendor": "Mixamo",
-            "style": "Neutral/Unclassified",
-            "domain": "Human Animations",
-            "sub_category": "Locomotion",
-            "formats": ["fbx", "bvh"],
-            "host_tags": ["walk", "locomotion", "mocap"],
-            "content_hash": "cafef00d",
-        },
-    )
-    replace_asset_files(
-        conn,
-        "pack-001",
-        [
-            {"relative_path": "Archviz/Sofa/sofa.fbx", "file_type": "mesh", "file_size": 10},
-            {"relative_path": "Archviz/Sofa/diffuse.png", "file_type": "texture", "file_size": 5},
-        ],
-    )
-    record_operation(
-        conn, op_id="op-1", operation_type="prepare_blender_import",
-        asset_ids=["pack-001"], plan_json={"collection": "Sofa"}, status="awaiting_approval",
-    )
-
-    hits = search_assets(conn, "sofa")
-    assert [h["id"] for h in hits] == ["pack-001"], hits
-    hits = search_assets(conn, "walk", domain="Human Animations")
-    assert [h["id"] for h in hits] == ["pack-002"], hits
-    hits = search_assets(conn, "sofa", style="Stylized")
-    assert hits == [], hits
-
-    # taxonomy update must reindex FTS (trigger path)
-    upsert_asset(conn, {"id": "pack-002", "name": "Run Cycle Pack",
-                        "canonical_root": "X:/lib",
-                        "hero_file_path": "X:/lib/Anims/run.fbx",
-                        "domain": "Human Animations", "content_hash": "cafef00d",
-                        "host_tags": ["run"]})
-    assert search_assets(conn, "run") and not search_assets(conn, "walk")
-
-    details = get_asset_details(conn, "pack-001")
-    assert details is not None and len(details["files"]) == 2
-    stats = db_stats(conn)
-    assert stats["assets"] == 2 and stats["asset_files"] == 2 and stats["operations"] == 1
-
-    conn.execute("DELETE FROM assets WHERE id = 'pack-001'")
-    assert search_assets(conn, "sofa") == [], "FTS delete trigger did not fire"
-
-    print("db.self_test: PASS "
-          f"(sqlite {sqlite3.sqlite_version}, FTS5 OK, schema v{SCHEMA_VERSION})")
-
-
 def main(argv: Optional[list[str]] = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     import argparse
@@ -631,12 +513,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--init", action="store_true", help="create/migrate the schema")
     group.add_argument("--stats", action="store_true", help="print registry statistics")
-    group.add_argument("--self-test", action="store_true", help="run in-memory roundtrip tests")
     args = parser.parse_args(argv)
 
-    if args.self_test:
-        self_test()
-        return 0
     conn = init_db(args.db) if args.init else connect(args.db)
     if args.init:
         print(f"initialized {args.db} (schema v{SCHEMA_VERSION})")

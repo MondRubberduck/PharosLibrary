@@ -232,6 +232,7 @@ def probe_fbx_markers(blob: bytes) -> dict[str, bool]:
     hits = {label: pattern in blob for pattern, label in _FBX_MARKERS.items()}
     return {
         "has_anim": hits["anim"] or hits["takes"],
+        "has_anim_stack": hits["anim"],       # a 'Takes' node alone is not one
         "has_bones": hits["bones"],
         "has_mesh": hits["mesh"],
         "has_skin": hits["skin"],

@@ -2909,56 +2909,6 @@ a.tile:hover img{filter:grayscale(0) brightness(1);transform:scale(1.06)}
 </body></html>"""
 
 
-GLTEST_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>GL test</title>
-<style>body{background:#111;color:#eee;font:16px monospace;padding:20px}div{margin:8px 0;padding:6px 10px;border:1px solid #333}
-.ok{color:#7dff9b}.fail{color:#ff8a8a}</style></head><body><h2>capability self-test</h2><div id=log>running…</div>
-<script type="module">
-import * as THREE from '/static/three.module.js';
-const log=document.getElementById('log');
-const line=(txt,ok)=>{const d=document.createElement('div');d.className=ok?'ok':'fail';d.textContent=txt;log.appendChild(d);};
-try{
- const r=new THREE.WebGLRenderer({antialias:true});
- line('WebGL renderer: OK ('+r.domElement.width+'x'+r.domElement.height+')',true);
- const sc=new THREE.Scene();sc.background=new THREE.Color(0x2060c0);
- const cam=new THREE.PerspectiveCamera(40,2,.1,10);cam.position.z=4;
- sc.add(new THREE.Mesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshNormalMaterial()));
- r.render(sc,cam);
- // captureStream + MediaRecorder round trip
- const stream=r.domElement.captureStream(30);
- const mime=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'].find(m=>window.MediaRecorder&&MediaRecorder.isTypeSupported(m));
- if(!mime)throw new Error('no webm MediaRecorder mime');
- const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:1000000});
- const chunks=[];rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
- const stopped=new Promise(res=>rec.onstop=res);
- rec.start(100);
- const t0=performance.now();
- await new Promise(res=>{(function f(){r.render(sc,cam);if(performance.now()-t0<700)requestAnimationFrame(f);else res();})();});
- rec.stop();await stopped;
- const blob=new Blob(chunks,{type:'video/webm'});
- line('MediaRecorder webm: OK, '+blob.size+' bytes via '+mime,true);
- // decode check
- const v=document.createElement('video');v.muted=true;
- const dec=await new Promise(res=>{const to=setTimeout(()=>res('decode timeout'),4000);
-  v.onloadedmetadata=()=>{clearTimeout(to);res('decode OK '+v.videoWidth+'x'+v.videoHeight);};
-  v.onerror=()=>{clearTimeout(to);res('decode ERR '+String(v.error&&v.error.code));};
-  v.src=URL.createObjectURL(blob);});
- line('round-trip decode: '+dec,dec.startsWith('decode OK'));
- // fetch + upload path
- const RIG="{{RIG_REL}}";   // from the server; '' = no rig in this library
- if(RIG){const fr=await fetch('/file?path='+encodeURIComponent(RIG));
- const fb=await fr.arrayBuffer();
- line('FBX fetch: '+fr.status+', '+fb.byteLength+' bytes',fr.ok&&fb.byteLength>1000000);}
- else line('FBX fetch: skipped (no retarget rig in this library)',true);
- // store route reachable + validating (400 expected: fake clip does not exist)
- const up=await fetch('/api/preview/store?clip='+encodeURIComponent('__selftest.fbx'),
-   {method:'POST',body:new Uint8Array(4096)});
- const upj=await up.json();
- line('store route: HTTP '+up.status+' '+JSON.stringify(upj)+' (400 expected)',up.status===400);
-}catch(e){line('FAILED: '+(e&&e.message||e),false);}
-line('self-test complete',true);
-</script></body></html>"""
-
-
 BATCH_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Batch preview renderer</title>
 <style>body{background:#111;color:#eee;font:15px monospace;padding:24px}
 #big{font-size:26px;color:#7cc4ff;margin-bottom:14px}
@@ -3461,8 +3411,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._html(PACK_PAGE.encode("utf-8"))
             elif url.path == "/animation":
                 self._html(_with_rig(ANIM_PAGE).encode("utf-8"))
-            elif url.path == "/gltest":
-                self._html(_with_rig(GLTEST_PAGE).encode("utf-8"))
             elif url.path == "/batchrender":
                 self._html(_with_rig(BATCH_PAGE).encode("utf-8"))
             elif url.path == "/api/stats":

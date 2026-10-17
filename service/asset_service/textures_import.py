@@ -27,6 +27,7 @@ from pathlib import Path
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import config, imgmeta
+from asset_service import kinds
 from asset_service import textmatch as tm
 
 TEX_ROOT = config.TEX_ROOT
@@ -35,8 +36,7 @@ GROUP_MAIN = "4K Textures Gumroad"
 GROUP_MISC = "Misc"
 
 DISPLAY_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-FILE_EXT = DISPLAY_EXT | {".tif", ".tiff", ".bmp", ".tga", ".exr", ".hdr",
-                          ".tx", ".sbsar"}
+FILE_EXT = kinds.IMAGE
 
 TEXTURES_DDL = """
 CREATE TABLE IF NOT EXISTS textures (

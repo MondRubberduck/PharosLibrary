@@ -8,7 +8,7 @@ Produces, under <library_root>/_Agent_Files :
 Re-runnable at any time; safe to run while a conversion batch is in progress
 (reads only).  Never writes outside _Agent_Files.
 """
-import io, os, json, collections
+import io, os, json
 import sys
 from pathlib import Path
 
@@ -20,32 +20,6 @@ from asset_service.fbx_dims import fbx_file_info
 LIB = library_root() or "."
 AGENT = agent_files() or os.path.join(LIB, "_Agent_Files")
 os.makedirs(AGENT, exist_ok=True)
-
-MODEL_EXT = {".fbx", ".obj", ".blend", ".usd", ".usda", ".usdc", ".abc",
-             ".glb", ".gltf", ".dae", ".max", ".ma", ".mb", ".stl", ".ply"}
-IMG_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".tga", ".exr", ".hdr",
-           ".bmp", ".psd", ".webp", ".gif", ".svg"}
-
-
-
-def walk_stats(root):
-    n_model = collections.Counter()
-    n_img = uasset = umap = 0
-    total = 0
-    for dp, dn, fn in os.walk(root):
-        for f in fn:
-            e = os.path.splitext(f)[1].lower()
-            total += 1
-            if e in MODEL_EXT:
-                n_model[e] += 1
-            elif e in IMG_EXT:
-                n_img += 1
-            elif e == ".uasset":
-                uasset += 1
-            elif e == ".umap":
-                umap += 1
-    return n_model, n_img, uasset, umap, total
-
 
 def read_manifest(exports_dir):
     p = os.path.join(exports_dir, "manifest.json")
@@ -78,105 +52,16 @@ def fbx_counts(fb):
 
 
 # --------------------------------------------------------------------------- #
-# 1. packs: one record per library section / pack, with a `delivery_state`
-#    and the Exports folder that holds its converted geometry
-# --------------------------------------------------------------------------- #
-packs = []
-for name in sorted(os.listdir(LIB)):
-    d = os.path.join(LIB, name)
-    if not os.path.isdir(d) or name.startswith((".", "_")):
-        continue
-    # generic one-level expansion: if this folder's children carry Exports
-    # dirs, each child is a pack (nested category layouts); otherwise the
-    # folder itself is the pack candidate
-    try:
-        kids = [s for s in sorted(os.listdir(d))
-                if os.path.isdir(os.path.join(d, s)) and not s.startswith(".")]
-    except OSError:
-        kids = []
-    kid_packs = [s for s in kids
-                 if os.path.isdir(os.path.join(d, s, "Exports"))]
-    if kid_packs:
-        candidates = [(s, os.path.join(d, s)) for s in kid_packs]
-    else:
-        candidates = [(name, d)]
-
-    for sub, root in candidates:
-        m, nimg, uasset, umap, total = walk_stats(root)
-        if total == 0:
-            continue
-        exports = os.path.join(root, "Exports")
-        man = read_manifest(exports)
-        has_models = sum(m.values()) > 0
-
-        if man and (man.get("counts") or {}).get("fbx_written", 0) > 0:
-            state = "converted-fbx"
-            note = "converted; use the FBX under Exports/FBX"
-        elif uasset and not has_models:
-            state = "unreal-only"
-            note = "Unreal assets only - needs conversion before Blender can open it"
-        elif uasset and has_models:
-            state = "mixed"
-            note = "both native model files and Unreal assets present"
-        elif has_models:
-            state = "native-models"
-            note = "already openable by Blender/Unreal"
-        elif nimg and not has_models:
-            state = "image-only"
-            note = "gallery/reference images only - NOT downloaded as assets"
-        else:
-            state = "other"
-            note = ""
-
-        rec = {
-            "section": name,
-            "pack": sub,
-            "path": root,
-            "delivery_state": state,
-            "note": note,
-            "counts": {
-                "files": total,
-                "fbx": m.get(".fbx", 0), "obj": m.get(".obj", 0),
-                "blend": m.get(".blend", 0),
-                "usd": m.get(".usd", 0) + m.get(".usda", 0) + m.get(".usdc", 0),
-                "other_models": sum(v for k, v in m.items()
-                                    if k not in (".fbx", ".obj", ".blend", ".usd", ".usda", ".usdc")),
-                "uasset": uasset, "umap": umap, "images": nimg,
-            },
-        }
-        if man:
-            c = man.get("counts") or {}
-            rec["export"] = {
-                "dir": exports,
-                "fbx_dir": os.path.join(exports, "FBX"),
-                "textures_dir": os.path.join(exports, "Textures"),
-                "manifest": os.path.join(exports, "manifest.json"),
-                "meshes_exported": c.get("fbx_written", 0),
-                "textures_exported": c.get("texture_files_written", 0),
-                "failures": c.get("failures", 0),
-                "exported_at": man.get("exported_at"),
-            }
-        packs.append(rec)
-
-# --------------------------------------------------------------------------- #
 # 2. models.jsonl
 # --------------------------------------------------------------------------- #
 rows = []
 manifest_dirs = []
-for rec in packs:
-    ex = (rec.get("export") or {}).get("dir")
-    if ex:
-        manifest_dirs.append((rec.get("pack") or rec["section"], ex))
-# the pack list looks two levels deep; converted packs can sit deeper
-# (<top>/<category>/<pack>/Exports) and ingest imports their recipes, so
-# every Exports/manifest.json in the library must also get its mesh rows
-_seen = {os.path.normcase(os.path.abspath(ex)) for _, ex in manifest_dirs}
+# every Exports/manifest.json in the library, at any depth (converted packs
+# can sit under category folders): one walk, no per-folder census
 for dp, dn, fn in os.walk(LIB):
     dn[:] = [x for x in dn if not x.startswith((".", "_")) and x != "Exports"]
     ex = os.path.join(dp, "Exports")
-    if (os.path.isfile(os.path.join(ex, "manifest.json"))
-            and os.path.normcase(os.path.abspath(ex)) not in _seen):
-        _seen.add(os.path.normcase(os.path.abspath(ex)))
+    if os.path.isfile(os.path.join(ex, "manifest.json")):
         manifest_dirs.append((os.path.basename(dp), ex))
 
 for pack, ex in manifest_dirs:
@@ -216,9 +101,6 @@ with io.open(os.path.join(AGENT, "models.jsonl"), "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-state_counts = collections.Counter(p["delivery_state"] for p in packs)
-print("packs       :", len(packs))
 print("models      :", len(rows))
 print("manifests   :", len(manifest_dirs))
-print("states      :", dict(state_counts))
 print("wrote models.jsonl")

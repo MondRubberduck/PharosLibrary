@@ -14,12 +14,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "service"))
 from _config import library_root, db_path, refuse_near_empty
+from asset_service import kinds
 LIB = library_root() or "."
 DB = os.environ.get("PHAROS_DB") or db_path() or "assets.sqlite"
 AGENT = os.path.join(LIB, "_Agent_Files")
-MODEL_EXT = {".fbx", ".obj", ".usd", ".usda", ".usdc", ".blend", ".max"}
-IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+MODEL_EXT = kinds.MODEL | kinds.BLEND
+IMG_EXT = kinds.IMAGE
 
 STOP = {"the", "and", "of", "a", "in", "for", "vol", "pack", "megapack", "set",
         "collection", "assets", "kit", "free"}

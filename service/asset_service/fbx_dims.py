@@ -13,11 +13,14 @@ treat results as file-level. "Indicative, not fabricated": anything
 unparseable (ASCII FBX, truncation, trailing junk) returns None.
 
 Format notes (verified against Blender-measured ground truth on 8k+ UE
-exporter files): record layout is [endOffset:u32][numProps:u32]
-[propLen:u32][nameLen:u8][name][props][children]; pre-7400 files put a
-13-byte null record BETWEEN top-level records; child lists end where the
-next candidate stops being a valid record. A record's props sit BETWEEN
-the name and its children — parse positions must track both.
+exporter files): record layout is [endOffset][numProps][propLen]
+[nameLen:u8][name][props][children], the three counts u32 below FBX 7500
+(13-byte header) and u64 from 7500 on (25-byte header: every FBX 7.5+
+file -- UE5, recent Maya and Max -- parsed as nothing before that case
+was added); pre-7400 files put a null record BETWEEN top-level records;
+child lists end where the next candidate stops being a valid record. A
+record's props sit BETWEEN the name and its children — parse positions
+must track both.
 """
 
 from __future__ import annotations
@@ -80,19 +83,26 @@ def _read_property(data: bytes, pos: int):
     raise _FBXParseError(f"unknown property type {t!r} at {pos-1}")
 
 
-def _read_record(data: bytes, pos: int):
+def _header(version: int) -> tuple:
+    """(struct format of the three counts, header size) for an FBX version:
+    u32 fields below 7500, u64 fields from 7500 on."""
+    return ("<QQQ", 25) if version >= 7500 else ("<III", 13)
+
+
+def _read_record(data: bytes, pos: int, hdr=("<III", 13)):
     """Read one record (header + props). Children are the caller's job.
 
     Returns (name, props, end_offset, pos_after_props) or None when the
     candidate at pos is not a valid record (junk / null terminator)."""
-    if pos + 13 > len(data):
+    fmt, hs = hdr
+    if pos + hs > len(data):
         return None
-    end_offset, num_props, prop_len = struct.unpack_from("<III", data, pos)
-    name_len = data[pos + 12]
-    if name_len == 0 or end_offset <= pos + 13 or end_offset > len(data):
+    end_offset, num_props, prop_len = struct.unpack_from(fmt, data, pos)
+    name_len = data[pos + hs - 1]
+    if name_len == 0 or end_offset <= pos + hs or end_offset > len(data):
         return None
-    name = data[pos + 13:pos + 13 + name_len].decode("latin-1")
-    pos += 13 + name_len
+    name = data[pos + hs:pos + hs + name_len].decode("latin-1")
+    pos += hs + name_len
     prop_end = pos + prop_len
     if prop_end > end_offset:
         return None
@@ -104,26 +114,27 @@ def _read_record(data: bytes, pos: int):
 
 
 def _parse_nodes(data: bytes, pos: int, limit: int, top: bool = False,
-                 depth: int = 0):
+                 depth: int = 0, hdr=("<III", 13)):
+    """Parse successive records up to limit. Returns (nodes, pos)."""
     if depth > 64:
         raise _FBXParseError("node nesting deeper than 64")
-    """Parse successive records up to limit. Returns (nodes, pos)."""
+    fmt, hs = hdr
     out = []
-    while pos + 13 <= limit:
-        peek = struct.unpack_from("<I", data, pos)[0]
-        name_len = data[pos + 12]
+    while pos + hs <= limit:
+        peek = struct.unpack_from(fmt[:2], data, pos)[0]
+        name_len = data[pos + hs - 1]
         if peek == 0 and name_len == 0:
-            pos += 13
+            pos += hs
             if top:
                 continue        # pre-7400 separator between top records
             break
         if peek <= pos or peek > limit or name_len == 0:
             break               # props tail / junk — not a record
-        rec = _read_record(data, pos)
+        rec = _read_record(data, pos, hdr)
         if rec is None:
             break
         name, props, end, after = rec
-        kids, _ = _parse_nodes(data, after, end, depth=depth + 1)
+        kids, _ = _parse_nodes(data, after, end, depth=depth + 1, hdr=hdr)
         out.append((name, props, kids))
         pos = end
     return out, pos
@@ -136,12 +147,11 @@ def _walk(nodes, name):
         yield from _walk(kids, name)
 
 
-def fbx_file_info(path: str | Path) -> dict | None:
-    """File-level geometry info from a binary FBX, in FILE UNITS.
-
-    Returns {"bbox_min", "bbox_max", "polygons", "vertices",
-    "unit_scale_factor", "fbx_version"} or None when unparseable.
-    """
+def fbx_nodes(path: str | Path):
+    """(fbx_version, top-level nodes) of a binary FBX, every version the
+    format has had (u32 record headers below 7500, u64 from 7500 on), or
+    None when the file is not a readable binary FBX. Nodes are (name,
+    props, children) triples; walk them with _walk()."""
     try:
         data = Path(path).read_bytes()
     except OSError:
@@ -150,10 +160,25 @@ def fbx_file_info(path: str | Path) -> dict | None:
         return None
     version = struct.unpack_from("<I", data, 23)[0]
     try:
-        top, _ = _parse_nodes(data, 27, len(data), top=True)
+        top, _ = _parse_nodes(data, 27, len(data), top=True,
+                              hdr=_header(version))
     except (struct.error, zlib.error, _FBXParseError, RecursionError,
             IndexError, ValueError):
         return None
+    return version, top
+
+
+def fbx_file_info(path: str | Path) -> dict | None:
+    """File-level geometry info from a binary FBX, in FILE UNITS.
+
+    Returns {"bbox_min", "bbox_max", "polygons", "vertices",
+    "unit_scale_factor", "fbx_version"} or None when unparseable or when
+    the file holds no geometry (a bare animation clip).
+    """
+    parsed = fbx_nodes(path)
+    if parsed is None:
+        return None
+    version, top = parsed
 
     lo = [float("inf")] * 3
     hi = [float("-inf")] * 3

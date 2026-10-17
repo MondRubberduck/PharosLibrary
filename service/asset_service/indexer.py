@@ -42,19 +42,20 @@ from asset_service.auto_classifier import (                     # noqa: E402
 )
 from asset_service.uasset_parser import UassetParseError, parse_uasset  # noqa: E402
 
+from asset_service import kinds
+
 FILE_TYPES: dict[str, str] = {}
-for ext in (".fbx", ".obj", ".glb", ".gltf", ".ply", ".stl", ".3ds", ".dae",
-            ".abc", ".usd", ".usda", ".usdc", ".usdz", ".max", ".ma", ".mb"):
-    FILE_TYPES[ext] = "mesh"
-for ext in (".bvh", ".c3d", ".trc", ".anim"):
-    FILE_TYPES[ext] = "anim"
-for ext in (".uasset", ".umap", ".uexp", ".ubulk", ".upk"):
-    FILE_TYPES[ext] = "uasset"
-FILE_TYPES[".blend"] = "blend"
-FILE_TYPES[".hdr"] = "hdri"
-for ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".tga", ".bmp", ".dds",
-            ".psd", ".exr", ".webp"):
+for ext in kinds.IMAGE:
     FILE_TYPES[ext] = "texture"
+FILE_TYPES[".hdr"] = "hdri"
+for ext in kinds.MODEL:
+    FILE_TYPES[ext] = "mesh"
+for ext in kinds.CLIP - {".fbx"}:
+    FILE_TYPES[ext] = "anim"
+for ext in kinds.UNREAL:
+    FILE_TYPES[ext] = "uasset"
+for ext in kinds.BLEND:
+    FILE_TYPES[ext] = "blend"
 
 ASSET_TYPES = {"mesh", "anim", "uasset", "blend", "hdri", "texture"}
 

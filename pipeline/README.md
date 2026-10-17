@@ -13,8 +13,7 @@ variables (`ASSETS_ROOT`, `UE_EXE`, `BLENDER_EXE`).
 
 **Safety invariant (never violate):** source asset libraries are
 read-only. Conversion works on a disposable sandbox copy; outputs land
-in `<pack>/Exports/`; fingerprints prove byte-identity of sources
-before/after.
+in `<pack>/Exports/`.
 
 ## Chains
 
@@ -28,7 +27,6 @@ round-trip check), Git Bash.**
 | `export_pack.py` | runs INSIDE UnrealEditor (via `AMCONV_JOB` env JSON set by the driver) |
 | `relink_pack.sh` + `relink_materials.py` | re-wire materials with engine-exact texture params → manifest v2 (`--preview` dry-runs against a copy first) |
 | `verify_pack_export.py` | independent verifier (no engine): every manifest link + FBX header + texture dims |
-| `source_fingerprint.py` | SHA-256 proof that pack sources are byte-identical before/after an engine run |
 | `pack_discovery.py` | filesystem-only pack/content-root discovery |
 | `blender_inspect_fbx.py` | headless Blender import measurement (round-trip proof) |
 | `batch_packs.sh` | batch driver over a pack root (resume, skip-if-done, failure isolation) |
@@ -67,8 +65,7 @@ resolved by basename fallback, `kit_manifest.json` per kit.
 
 ```bash
 cd pipeline/kitbash
-python export_all_kb3d.py            # newer packaging (.blender.native)
-python export_kb3d_rest.py           # older packaging (.blend in kit root)
+python export_all_kb3d.py            # both kit layouts (.blender.native, or .blend in the kit root)
 python run_kb3d_metadata.py          # material names + textures (needed for recipes)
 cd ../.. && python pharos.py ingest  # builds _Agent_Files/kb3d_models.jsonl + imports
 ```
@@ -84,7 +81,6 @@ crashes when batched).
 
 ```bash
 cd pipeline/native
-python recon_new.py                  # read-only scout of a downloads folder
 python make_native_manifest2.py      # build the indexing worklist
 bash index_native_all.sh             # measure the model files (1 Blender session)
 python run_blends.py                 # .blend objects pass (1 Blender proc each)
@@ -101,12 +97,11 @@ BEFORE running chain 3; to narrow a run that was too broad, delete
 `<library>/_Agent_Files/native_models.jsonl` first (the near-empty guard
 refuses to shrink a large live index on its own).
 
-`recon_new.py` and `promote_blends.py` find their sections in the library
-itself (the pack folders carrying `Exports/manifest.json`, the kit folders
-carrying `Exports/kit_manifest.json`) — nothing is hardcoded to a folder
-name. Two optional overrides: `PHAROS_CONVERTED_ROOT` pins the converted
-section when a library has more than one, `PHAROS_RECON_LEFTOVER=<folder>`
-makes the scout report whether a specific pack was already removed.
+`promote_blends.py` finds its sections in the library itself (the pack
+folders carrying `Exports/manifest.json`, the kit folders carrying
+`Exports/kit_manifest.json`) — nothing is hardcoded to a folder name.
+One optional override: `PHAROS_CONVERTED_ROOT` pins the converted section
+when a library has more than one.
 
 ### 4. `agent_index/` — regenerate the app's index files (pure Python)
 ```bash
@@ -127,8 +122,7 @@ and `build_kb3d_index.py` itself whenever converted packs or kits exist.
 
 ## Order of operations for brand-new downloads
 
-scout (`recon_new.py`) → convert packs (chain 1) and/or export kits
-(chain 2) → enumerate natives (chain 3) → optional richer audio/texture
+convert packs (chain 1) and/or export kits (chain 2) → enumerate natives (chain 3) → optional richer audio/texture
 indexes (chain 4) → `python pharos.py ingest` (builds the model/kit
 indexes, imports everything, rewrites the agent docs) → restart the server.
 
@@ -138,8 +132,7 @@ indexes, imports everything, rewrites the agent docs) → restart the server.
   and `_Agent_Files/` index files.
 - Manifest backups inside `Exports/` are `manifest.v1.bak` — never
   `*.json` (a glob must not pick them up).
-- Verify (verifier + fingerprints) after every engine run; the source
-  tree fingerprint must be identical before/after.
+- Verify with `verify_pack_export.py` after every engine run.
 - Packs whose master materials expose no texture parameters can verify
   with 0/N wiring — that is an authoring choice, not a pipeline failure:
   the verifier warns on low coverage, it never hard-fails on it.

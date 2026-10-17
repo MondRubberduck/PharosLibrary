@@ -263,30 +263,6 @@ def run_ingest(argv=None) -> int:
                 else:
                     failed_steps += 1
                     print(f"  {name} import FAILED: {exc}", flush=True)
-        # owned vs on-disk: the purchase CSV's Local Folder is on-disk
-        # evidence -- mark rows 'local' when the folder REALLY exists,
-        # then the (optional) availability catalog refines the rest via
-        # name matching. Without this, every purchase read as
-        # owned-not-downloaded even when the files sit on disk.
-        try:
-            import sqlite3
-            conn = sqlite3.connect(config.DB_PATH)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, folder FROM collection "
-                "WHERE folder IS NOT NULL AND folder != ''").fetchall()
-            local_ids = [r["id"] for r in rows if Path(r["folder"]).is_dir()]
-            if local_ids:
-                conn.executemany(
-                    "UPDATE collection SET availability='local' WHERE id=?",
-                    [(i,) for i in local_ids])
-                conn.commit()
-            conn.close()
-            if local_ids:
-                print(f"  availability: {len(local_ids)} purchase(s) with "
-                      f"a folder on disk marked local", flush=True)
-        except Exception as exc:                      # noqa: BLE001
-            print(f"  availability marking skipped: {exc}", flush=True)
         try:
             for p in agent_docs.generate(config.DB_PATH):
                 print(f"  wrote {p}", flush=True)
