@@ -168,7 +168,8 @@ def _line(text: str) -> None:
 def _stream(cmd: list) -> int:
     """Run `cmd`, keep every output line, return its exit code."""
     _line("> " + " ".join(f'"{c}"' if " " in str(c) else str(c) for c in cmd[1:]))
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1",
+           "PHAROS_SETUP_PAGE": "1"}       # the CLI skips the terminal-only advice
     try:
         proc = subprocess.Popen([str(c) for c in cmd], cwd=str(REPO), env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -216,7 +217,9 @@ def begin(job: str, body: dict, on_configured=None, on_indexed=None) -> tuple:
         owner = db.registry_foreign(Path(reg).expanduser().resolve() / "assets.sqlite", root)
         if owner and body.get("registry_dir"):
             return {"error": db.foreign_registry_message(
-                Path(reg) / "assets.sqlite", owner, root), "step": "survey"}, 409
+                Path(reg) / "assets.sqlite", owner, root)
+                + " On this page: put a new, empty folder into the registry field "
+                  "above and survey again.", "step": "survey"}, 409
         if owner:
             reg = str(Path.home() / ".pharos" / f"registry-{root.name}")
         cmd += ["init", str(root), "--registry-dir", reg, "--force"]

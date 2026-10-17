@@ -266,10 +266,56 @@ def run_doctor(argv=None) -> int:
     s.settimeout(0.5)
     busy = s.connect_ex((host, port)) == 0
     s.close()
-    checks.append(_check(
-        "server", "running" if busy else "stopped",
-        f"http://{host}:{port}",
-        "" if busy else f'python "{repo}/pharos.py" serve --no-open'))
+    status, detail = "stopped", f"http://{host}:{port}"
+    fix = f'python "{repo}/pharos.py" serve --no-open'
+    if busy:
+        # something listens: this registry's Pharos, another one, or not
+        # Pharos at all (the port is a machine-wide resource)
+        other, mode = None, None            # mode: pharos | setup | None
+        try:
+            import urllib.error
+            import urllib.request
+            # the loopback, never through a proxy
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            try:
+                with opener.open(f"http://{host}:{port}/api/stats", timeout=2) as r:
+                    body = json.loads(r.read().decode("utf-8"))
+                if isinstance(body, dict) and "stats" in body:
+                    mode = "pharos"
+                    other = (body.get("stats") or {}).get("registry")
+            except urllib.error.HTTPError as exc:
+                try:
+                    body = json.loads(exc.read().decode("utf-8"))
+                except ValueError:
+                    body = {}
+                if exc.code == 503 and isinstance(body, dict) and body.get("setup"):
+                    mode = "setup"
+        except Exception:                                     # noqa: BLE001
+            mode = None
+        mine = Path(cfg.get("registry_dir") or "") / "assets.sqlite"
+        try:
+            same = bool(other) and Path(other).resolve() == mine.resolve()
+        except OSError:
+            same = False
+        elsewhere = (f'python "{repo}/pharos.py" serve --no-open --port <a free port>, and '
+                     f'put that port into pharos_config.json "network" so doctor and the '
+                     f'agent files follow it')
+        if mode == "setup":
+            status, detail, fix = "running", f"http://{host}:{port} (setup mode: no library yet)", ""
+        elif same:
+            status, detail, fix = "running", f"http://{host}:{port} (this registry)", ""
+        elif mode == "pharos" and not other:
+            status, detail, fix = "running", f"http://{host}:{port} (a Pharos older than this " \
+                                             f"version: which registry it serves is unknown)", ""
+        elif other:
+            status = "other"
+            detail = f"http://{host}:{port} answers for another registry ({other})"
+            fix = elsewhere
+        else:
+            status = "busy"
+            detail = f"http://{host}:{port} is taken by something that is not Pharos"
+            fix = elsewhere
+    checks.append(_check("server", status, detail, fix))
 
     # ---- optional engines -------------------------------------------------
     blender = _find_blender()
@@ -329,7 +375,7 @@ def run_doctor(argv=None) -> int:
             mark = {"ok": "+", "found": "+", "running": "+",
                     "not-indexed": "!", "not-created": "!",
                     "missing": "x", "fail": "x", "absent": "-",
-                    "stopped": "-", "incomplete": "!"}.get(
+                    "stopped": "-", "incomplete": "!", "other": "!", "busy": "!"}.get(
                 c["status"], "?")
             print(f" [{mark}] {c['name']:<18} {c['status']:<12} "
                   f"{c['detail']}")

@@ -108,6 +108,16 @@ def _norm_path(p) -> str:
     return os.path.normcase(os.path.normpath(str(p)))
 
 
+def _real_path(p) -> str:
+    """_norm_path on the real path: a junction, a symlink or a mapped
+    drive spells one file two ways, and they must compare equal."""
+    import os
+    try:
+        return os.path.normcase(os.path.realpath(str(p)))
+    except (OSError, ValueError):
+        return _norm_path(p)
+
+
 def path_under(path, root) -> bool:
     """True when `path` is `root` or lies below it (Path.relative_to on
     normalised text -- never a string-prefix test)."""
@@ -221,6 +231,32 @@ def touch_sources(db_path: str | Path) -> None:
     try:
         set_meta(conn, "sources_stamp", time.time_ns())
         set_meta(conn, "sources_stamp_at", time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()))
+    finally:
+        conn.close()
+
+
+def folder_signature(folder) -> str:
+    """Every folder under `folder` (itself included) by mtime: a file or a
+    folder added, removed or renamed anywhere below moves one of them. The
+    agent files folder is left out (ingest writes there)."""
+    import hashlib
+    import os
+    parts = []
+    for dirpath, dirnames, _files in os.walk(str(folder)):
+        dirnames[:] = [d for d in dirnames if d != "_Agent_Files"]
+        try:
+            parts.append(f"{dirpath}:{os.stat(dirpath).st_mtime_ns}")
+        except OSError:
+            parts.append(f"{dirpath}:absent")
+    return hashlib.sha1("\n".join(parts).encode("utf-8", "replace")).hexdigest()
+
+
+def remember_scan(db_path: str | Path, label: str, signature: str) -> None:
+    """A scan (ingest's or the server's) finished for a folder: the server
+    will not scan it again until the folder changes."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        set_meta(conn, "scan_sig:" + label, signature)
     finally:
         conn.close()
 

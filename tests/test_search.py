@@ -776,6 +776,13 @@ def test_scan_rows_come_back_when_the_richer_row_goes():
                 return got
             meshes_import.import_meshes(dbp)
             assert rows() == [("Plate", "native"), ("other", "scan")], rows()
+            # the parked scan row lends the richer row its measured file
+            # facts (that is how converted packs get units/LOD/skin facts)
+            c = sqlite3.connect(dbp)
+            facts = c.execute("SELECT facts FROM meshes WHERE name='Plate'").fetchone()[0]
+            parked = c.execute("SELECT COUNT(*) FROM meshes_parked").fetchone()[0]
+            c.close()
+            assert parked == 1 and facts and "units" in json.loads(facts), (parked, facts)
             idx.write_text("", encoding="utf-8")       # index rebuilt elsewhere
             meshes_import.import_meshes(dbp)
             assert rows() == [("other", "scan"), ("plate", "scan")], rows()
@@ -2946,6 +2953,71 @@ def test_viewer_sources_for_obj_and_gltf():
             browse.CANONICAL_ROOTS[:] = old
             library_map.PATH = old_map
             browse._RES_INDEX.clear()
+
+
+def test_server_rescans_a_folder_that_changed():
+    """A pack dropped into a model folder is scanned at the next server
+    start: the folder's signature (every folder below it, by mtime)
+    moves, the scan runs with the server's registry and is remembered;
+    an unchanged folder is not scanned; a folder the registry already
+    holds rows from is adopted when nobody signed it, one it knows
+    nothing of is scanned; a failed scan is tried again; --rebuild scans
+    everything; ingest's own signing keeps the server from scanning
+    twice."""
+    import sqlite3
+    import sys as _sys
+    from asset_service import browse, db
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        lib = Path(tmp) / "Lib"
+        (lib / "Props" / "PackA" / "Deep" / "Deeper" / "Deepest" / "Last").mkdir(parents=True)
+        (lib / "Props" / "PackA" / "a.fbx").write_bytes(b"x")
+        reg = Path(tmp) / "reg.sqlite"
+        db.init_db(reg).close()
+        log = Path(tmp) / "scans.log"
+        ok = [_sys.executable, "-c", f"open(r'{log}', 'a').write('scan\\n'); print('scanned')"]
+        bad = [_sys.executable, "-c", "raise SystemExit(3)"]
+        jobs = [("models:Props", lib / "Props", ok)]
+        old = browse._scan_jobs
+        browse._scan_jobs = lambda db_path: jobs
+        try:
+            runs = lambda: log.read_text().count("scan") if log.is_file() else 0
+            import time as _t
+            # the registry knows nothing of Props: scanned, not adopted
+            assert browse._rescan_changed(str(reg)) == 1 and runs() == 1
+            assert browse._rescan_changed(str(reg)) == 0 and runs() == 1     # unchanged
+            _t.sleep(0.05)
+            (lib / "Props" / "PackB").mkdir()                                 # a new pack
+            (lib / "Props" / "PackB" / "b.fbx").write_bytes(b"y")
+            assert browse._rescan_changed(str(reg)) == 1 and runs() == 2
+            assert browse._rescan_changed(str(reg)) == 0 and runs() == 2     # remembered
+            _t.sleep(0.05)
+            (lib / "Props" / "PackA" / "Deep" / "Deeper" / "Deepest" / "Last" / "z.fbx").write_bytes(b"z")
+            jobs[0] = ("models:Props", lib / "Props", bad)
+            assert browse._rescan_changed(str(reg)) == 0                      # failed: not remembered
+            jobs[0] = ("models:Props", lib / "Props", ok)
+            assert browse._rescan_changed(str(reg)) == 1 and runs() == 3     # six levels down, tried again
+            assert browse._rescan_changed(str(reg), force=True) == 1 and runs() == 4
+            # ingest signed the folder itself: the server does not scan it again
+            _t.sleep(0.05)
+            (lib / "Props" / "PackB" / "c.fbx").write_bytes(b"c")
+            db.remember_scan(reg, "models:Props", db.folder_signature(lib / "Props"))
+            assert browse._rescan_changed(str(reg)) == 0 and runs() == 4
+            # a registry with rows from the folder but no signature: adopted
+            reg2 = Path(tmp) / "reg2.sqlite"
+            db.init_db(reg2).close()
+            from asset_service import meshes_import
+            c = sqlite3.connect(reg2)
+            c.executescript(meshes_import.MESHES_DDL)
+            c.execute("INSERT INTO meshes (name, pack, source, kind, fbx) VALUES (?,?,?,?,?)",
+                      ("a", "Props", "scan", "StaticMesh", str(lib / "Props" / "PackA" / "a.fbx")))
+            c.commit()
+            c.close()
+            assert browse._rescan_changed(str(reg2)) == 0 and runs() == 4
+            c = sqlite3.connect(reg2)
+            assert db.get_meta(c, "scan_sig:models:Props"), "adopted: signed without a scan"
+            c.close()
+        finally:
+            browse._scan_jobs = old
 
 
 

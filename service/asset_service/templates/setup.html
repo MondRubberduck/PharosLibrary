@@ -105,7 +105,7 @@ $('use').onclick=()=>{$('current').textContent='chosen: '+$('path').value;$('sur
 const norm=s=>String(s||'').split(String.fromCharCode(92)).join('/').replace(/\/+$/,'').toLowerCase();
 const same=(a,b)=>norm(a)===norm(b);
 function regFor(root){const v=$('reg').value.trim();if(!st)return v;
- if(same(root,st.library_root))return v;return same(v,st.registry_dir)?'':v;}
+ if(same(root,st.library_root))return v;return same(v,st.registry_dir||st.default_registry_dir)?'':v;}
 $('survey').onclick=()=>run('survey',{root:$('path').value,registry_dir:regFor($('path').value)});
 $('resurvey').onclick=()=>run('survey',{root:st.library_root||$('path').value,registry_dir:st.registry_dir});
 // ---- jobs with a progress log
@@ -128,14 +128,14 @@ async function load(){st=await j('/api/setup/state');
  $('s1').classList.toggle('done',st.configured);
  $('s2').classList.toggle('done',st.configured&&!st.pending.length&&!st.unconfirmed);
  $('index').disabled=!st.configured||!!st.pending.length||st.progress.state==='running';
- $('pendnote').textContent=!st.configured?'choose and survey a folder first':st.pending.length?`${st.pending.length} decision(s) still pending above`:`${st.rows} folders, ${st.unconfirmed} not confirmed`;
+ $('pendnote').textContent=!st.configured?'choose and survey a folder first':st.pending.length?`${st.pending.length} decision(s) still pending above: ${st.pending.join(', ')}`:`${st.rows} folders, ${st.unconfirmed} not confirmed`;
  if(st.progress.state==='running'&&!poll){$('log').hidden=false;poll=setInterval(()=>tick(st.progress.job),1000);}
  if(st.configured){map=await j('/api/setup/map');render();}else{map={packs:[],kinds:[],pending:[]};render();}
  if(st.progress.state==='done'&&st.progress.job==='ingest'&&st.progress.result.verdict)showResult(st.progress.result);}
 const depth=f=>f==='.'?0:f.split('/').length;
 function render(){const f=$('q').value.trim().toLowerCase(),s=$('show').value,pend=new Set(map.pending);
  const vis=map.packs.map((p,i)=>[p,i]).filter(([p])=>(!f||(p.name+' '+p.folder+' '+p.kind).toLowerCase().includes(f))&&
-  (!s||(s==='top'&&depth(p.folder)<=1)||(s==='attention'&&(pend.has(p.folder)||!p.confirmed))));
+  (!s||(s==='top'&&depth(p.folder)<=1)||(s==='attention'&&(pend.has(p.folder)||(!p.confirmed&&p.folder!=='.')))));
  $('count').textContent=`${vis.length} of ${map.packs.length} folders · ${map.pending.length} decision(s) pending`;
  const opts=(list,cur)=>'<option value=""></option>'+list.map(x=>`<option${x===cur?' selected':''}>${esc(x)}</option>`).join('');
  $('rows').innerHTML=vis.map(([p,i])=>{const sv=p.survey;

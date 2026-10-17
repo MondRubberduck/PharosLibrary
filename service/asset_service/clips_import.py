@@ -15,7 +15,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from asset_service import measure, skeleton
+from asset_service import library_map, measure, skeleton
 
 CLIPS_DDL = """
 CREATE TABLE IF NOT EXISTS clips (
@@ -72,10 +72,21 @@ def rows_from_records(records, root: Path, section) -> list:
     """Registry rows for the records that are clips."""
     sec_rel = Path(section).resolve().relative_to(Path(root).resolve()).as_posix() \
         if Path(section).is_absolute() else str(section)
+    # a folder inside the section that the map calls something else (the
+    # rig under Animation/Actor is 3d-assets) holds no clips, whatever its
+    # files carry
+    try:
+        look = library_map.Lookup(library_map.load())
+    except Exception:                                         # noqa: BLE001
+        look = None
     out = []
     for rec in records:
         if not _is_clip(rec):
             continue
+        node = look.node(rec["rel"]) if look is not None else None
+        if node and node.get("kind") and node["kind"] != "animation" \
+                and node["folder"].lower().startswith(sec_rel.lower().rstrip("/") + "/"):
+            continue                 # a folder strictly inside the section
         clip = rec["clips"][0]
         names = rec.get("bone_names") or []
         facts = measure.facts_of(rec)

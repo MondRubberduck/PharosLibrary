@@ -174,7 +174,7 @@ def run_ingest(argv=None) -> int:
             report["blend_folders"].append(r["folder"])
     if report["manifest_packs_found"]:
         print(f"  converted pack folder(s): {len(report['manifest_packs_found'])} "
-              f"(recipes import automatically; the scanner skips them)")
+              f"(recipes import automatically; the scanner measures their Exports)")
     if report["blend_folders"]:
         print(f"  blend folders     : {', '.join(report['blend_folders'][:8])}"
               f"{' ...' if len(report['blend_folders']) > 8 else ''}"
@@ -189,10 +189,22 @@ def run_ingest(argv=None) -> int:
         audio_import, meshes_import, agent_docs
 
     failed_steps = 0
+    from asset_service import db as _db
+
+    def _scan(label: str, folder: Path, cmd: list) -> None:
+        # the server signs every folder a scan covered: at its next start
+        # it scans only what changed since (a pack dropped in later)
+        nonlocal failed_steps
+        sig = _db.folder_signature(folder)
+        rc = _run(cmd, dry)
+        if rc:
+            failed_steps += 1
+        elif not dry:
+            _db.remember_scan(config.DB_PATH, label, sig)
+
     for folder in scan_folders:
-        failed_steps += 1 if _run([py, str(
-            Path(REPO) / "service" / "asset_service" / "scanner.py"),
-            str(root / folder)], dry) else 0
+        _scan(f"models:{folder}", root / folder, [py, str(
+            Path(REPO) / "service" / "asset_service" / "scanner.py"), str(root / folder)])
 
     audio_dir = _section("audio")
     audio_jsonl = (root / audio_dir / "library_files.jsonl") if audio_dir         else None
@@ -202,16 +214,15 @@ def run_ingest(argv=None) -> int:
                   f"skipping the folder scan (the crawl's own metadata is "
                   f"richer; scanner rows survive regardless)")
         else:
-            failed_steps += 1 if _run([py, str(
-                Path(REPO) / "service" / "asset_service" / "scanner.py"),
-                str(root / audio_dir)], dry) else 0
+            _scan("audio", root / audio_dir, [py, str(
+                Path(REPO) / "service" / "asset_service" / "scanner.py"), str(root / audio_dir)])
 
     if _section("animation"):
         # the clips table: every clip measured (duration, fps, root
         # motion, skeleton) from one read of the file, cached per folder
-        failed_steps += 1 if _run([py, str(
+        _scan("clips", root / _section("animation"), [py, str(
             Path(REPO) / "service" / "asset_service" / "measure.py"),
-            "--clips", str(root / _section("animation"))], dry) else 0
+            "--clips", str(root / _section("animation"))])
     else:
         print("\n  animation: no clip folder detected -- skipping the clip measure")
 
@@ -291,9 +302,11 @@ def run_ingest(argv=None) -> int:
     else:
         print("  (setup is not complete until these are answered; every 'yes'")
         print("   needs the engine named next to it -- see pipeline/README.md)")
-    qs.append("1. Are these ALL your asset folders? (other drives / "
-              "external disks?) surveyed so far:")
-    qs.append(f"   {root}  ({res.get('files', 0):,} files; map: {library_map.PATH})")
+    page = bool(os.environ.get("PHAROS_SETUP_PAGE"))   # run from /setup: the page knows
+    if not page:
+        qs.append("1. Are these ALL your asset folders? (other drives / "
+                  "external disks?) surveyed so far:")
+        qs.append(f"   {root}  ({res.get('files', 0):,} files; map: {library_map.PATH})")
     raw = [r for r in pend if r["kind"] == "unreal"]
     done = report.get("manifest_packs_found") or []
     if raw:
@@ -362,12 +375,13 @@ def run_ingest(argv=None) -> int:
     for q in qs:
         print("  " + q)
     print("-" * 66)
-    print("\nnext steps:")
-    print(f'  verify setup   : "{sys.executable}" "{REPO}/pharos.py" doctor')
-    print(f'  start serving  : "{sys.executable}" "{REPO}/pharos.py" '
-          f"serve --no-open")
-    print(f'  review the map : http://{(cfg.get("network") or {}).get("host", "127.0.0.1")}:'
-          f'{(cfg.get("network") or {}).get("port", 8765)}/tags  (after serve)')
+    if not page:
+        print("\nnext steps:")
+        print(f'  verify setup   : "{sys.executable}" "{REPO}/pharos.py" doctor')
+        print(f'  start serving  : "{sys.executable}" "{REPO}/pharos.py" '
+              f"serve --no-open")
+        print(f'  review the map : http://{(cfg.get("network") or {}).get("host", "127.0.0.1")}:'
+              f'{(cfg.get("network") or {}).get("port", 8765)}/tags  (after serve)')
     # ---- exit codes are the agent's signal (no prose parsing) ----------
     if dry:
         return 0

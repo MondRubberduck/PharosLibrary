@@ -15,6 +15,7 @@ header a{color:var(--link);text-decoration:none}h1{font-size:15px;margin:0}
 #sheet{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#0f1114;display:block;margin:8px 0 14px}
 #nosheet{padding:14px;border:1px dashed var(--line);border-radius:8px;color:var(--dim);margin:8px 0 14px}
 #nosheet code{color:var(--fg)}
+.kid{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#0f1114;display:block;margin:2px 0 10px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px;display:flex;gap:8px}
 .card img,.card .ph{width:72px;height:72px;border-radius:5px;background:#0f1114;flex:none;object-fit:cover}
@@ -38,6 +39,13 @@ async function loadFolders(){const d=await j('/api/folders');folders=d.folders.f
  $('side').innerHTML=folders.map(f=>`<div class="n" data-f="${esc(f.folder)}"><div><div>${esc(f.name||f.folder.split('/').pop())}</div><div class="f">${esc(f.folder)}</div></div><div class="c">${Number(f.meshes).toLocaleString()}${f.sheet?' 🖼':''}</div></div>`).join('')||'<div class="meta" style="padding:12px">no model folders indexed yet</div>';
  const want=new URLSearchParams(location.search).get('folder');const first=folders.find(f=>f.folder===want)||folders[0];if(first)show(first.folder);}
 $('side').addEventListener('click',e=>{const el=e.target.closest('[data-f]');if(el)show(el.dataset.f);});
+function sheetHtml(f,folder){
+ if(f.sheet)return `<img id="sheet" src="${esc(f.sheet)}" alt="contact sheet">`;
+ // a folder of folders: its children's sheets are its picture
+ const kids=folders.filter(x=>x.sheet&&x.folder.startsWith(folder+'/'));
+ if(kids.length)return kids.slice(0,8).map(k=>`<div class="meta" style="margin-top:6px"><a href="/models?folder=${encodeURIComponent(k.folder)}" style="color:var(--link);text-decoration:none">${esc(k.folder)}</a></div><img class="kid" src="${esc(k.sheet)}" alt="contact sheet of ${esc(k.folder)}">`).join('')
+   +(kids.length>8?`<div class="meta">… ${kids.length-8} more folder(s) below have sheets</div>`:'');
+ return `<div id="nosheet">No contact sheet yet. Render one with <code>python pharos.py previews --sheets --folder "${esc(folder)}"</code> (needs Blender, about a minute per folder).</div>`;}
 async function show(folder,p){cur=folder;page=p||1;$('q').value=$('q').value;
  document.querySelectorAll('#side .n').forEach(n=>n.classList.toggle('on',n.dataset.f===folder));
  history.replaceState(null,'','/models?folder='+encodeURIComponent(folder));
@@ -45,11 +53,11 @@ async function show(folder,p){cur=folder;page=p||1;$('q').value=$('q').value;
  const qs=new URLSearchParams({folder,size:'60',page:String(page),sort:'name'});const q=$('q').value.trim();if(q)qs.set('q',q);
  let d;try{d=await j('/api/meshes?'+qs);}catch(e){$('main').innerHTML=`<p class="meta">${esc(e.message)}</p>`;return;}
  $('count').textContent=`${Number(d.total).toLocaleString()} model(s) in ${folder}`;
- const facts=i=>[i.bbox_m?`${i.bbox_m.map(v=>Number(v).toFixed(2)).join(' × ')} m`:'',i.triangles!=null?`${Number(i.triangles).toLocaleString()} tris`:'',i.pivot?`pivot ${i.pivot}`:'',i.units?i.units:'',i.lods?`${i.lods} LOD`:'',i.skin?'skinned':'',i.scale_suspect?'<span style="color:var(--warn)">size suspect</span>':''].filter(Boolean).join(' · ');
+ const facts=i=>[i.bbox_m?`${i.bbox_m.map(v=>Number(v).toFixed(2)).join(' × ')} m`:'unmeasured',i.triangles!=null?`${Number(i.triangles).toLocaleString()} tris`:'',i.pivot?`pivot ${i.pivot}`:'',i.units?i.units:'',i.lods?`${i.lods} LOD`:'',i.skin?'skinned':'',i.scale_suspect?'<span style="color:var(--warn)">size suspect</span>':''].filter(Boolean).join(' · ');
  const view=i=>/\.(fbx|obj|glb|gltf)$/i.test(i.key.split('#')[0])?` <a href="/viewer?file=${encodeURIComponent(i.key.split('#')[0])}">view 3D</a>`:'';
  const pages=d.total>d.size?`<div class="pages">page ${page} of ${Math.ceil(d.total/d.size)} ${page>1?`<a href="#" data-p="${page-1}">previous</a>`:''}${page*d.size<d.total?`<a href="#" data-p="${page+1}">next</a>`:''}</div>`:'';
  $('main').innerHTML=`<h2 style="margin:0 0 2px;font-size:16px">${esc(f.name||folder)}</h2><div class="meta">${esc(folder)} · ${f.kind||''}${f.units?' · '+esc(f.units):''}${f.pivot?' · common pivot '+esc(f.pivot):''}${f.lod_groups?' · '+f.lod_groups+' LOD groups':''}${f.vendor?' · '+esc(f.vendor):''}</div>
- ${f.sheet?`<img id="sheet" src="${esc(f.sheet)}" alt="contact sheet">`:`<div id="nosheet">No contact sheet yet. Render one with <code>python pharos.py previews --sheets --folder "${esc(folder)}"</code> (needs Blender, about a minute per folder).</div>`}
+ ${sheetHtml(f,folder)}
  ${pages}<div class="grid">${d.items.map(i=>`<div class="card">${i.render?`<img src="${esc(i.render)}" alt="">`:'<div class="ph"></div>'}<div><div class="n">${esc(i.name)}</div><div class="k">${esc(i.key)}</div><div class="facts">${facts(i)}</div>${view(i)}</div></div>`).join('')}</div>${pages}`;
  $('main').scrollTop=0;}
 $('main').addEventListener('click',e=>{if(e.target.dataset.p){e.preventDefault();show(cur,+e.target.dataset.p);}});

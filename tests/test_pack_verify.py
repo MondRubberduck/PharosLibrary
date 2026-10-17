@@ -1375,8 +1375,10 @@ def test_kit_without_metadata_pass_does_not_kill_import():
 def test_scan_rows_of_a_later_converted_pack_are_removed():
     """Release check: ingest #1 scans a model folder holding a RAW pack
     (a vendor FBX inside it becomes a scan row); after the user converts
-    the pack, the scanner skips it -- but the old scan row survived every
-    rebuild, so the mesh showed up twice (one copy without its recipe)."""
+    the pack, the scanner scans only its Exports (the exported files'
+    rows carry the measured file facts and are parked behind the recipe
+    rows); the vendor's source file beside them is not served twice and
+    its old scan row goes."""
     import sqlite3
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -1405,6 +1407,30 @@ def test_scan_rows_of_a_later_converted_pack_are_removed():
         conn.close()
         assert r.returncode == 0 and names == ["loose"], \
             f"scan rows after the pack was converted: {names}"
+        assert "only their Exports are scanned" in r.stdout, r.stdout[-300:]
+        # the exported model is scanned (and would be parked behind its
+        # recipe row); the exported texture is the recipe's, no texture set
+        (ex / "SM_FX_Crate.fbx").write_bytes(_min_fbx())
+        (ex / "Textures").mkdir()
+        (ex / "Textures" / "T_Crate_BC.png").write_bytes(b"\x89PNG")
+        r = scan()
+        conn = sqlite3.connect(str(db))
+        names = sorted(n for (n,) in conn.execute("SELECT name FROM meshes WHERE source='scan'"))
+        tex = [f for (f,) in conn.execute("SELECT folder FROM textures WHERE source='scan'")
+               if "Exports" in str(f)]
+        conn.close()
+        assert r.returncode == 0 and names == ["SM_FX_Crate", "loose"], names
+        assert tex == [], tex
+        # the pack's Exports scanned on its own (the scan list names it so)
+        r = subprocess.run([sys.executable, "-B",
+                            str(REPO / "service" / "asset_service" / "scanner.py"),
+                            str(ex), "--db", str(db)],
+                           capture_output=True, text=True, cwd=str(REPO), timeout=120)
+        conn = sqlite3.connect(str(db))
+        tex = [f for (f,) in conn.execute("SELECT folder FROM textures WHERE source='scan'")
+               if "Exports" in str(f)]
+        conn.close()
+        assert r.returncode == 0 and tex == [] and "models only" in r.stdout, (tex, r.stdout[-200:])
 
 
 
@@ -2107,6 +2133,14 @@ def test_clips_and_folders_tables_from_measured_records():
         (anim / "Walks" / "Sub" / "walk_02.fbx").write_bytes(walk)
         (anim / "Walks" / "body.fbx").write_bytes(F.fbx_bytes([F.global_settings(), F.objects(
             F.box_mesh(), F.model(1, "Body", "Mesh"), F.model(2, "root", "Root"), F.deformer(20))]))
+        # a rig under the section that carries a stack: the map calls its
+        # folder 3d-assets, so it is no clip
+        (anim / "Rig").mkdir()
+        (anim / "Rig" / "dummy.fbx").write_bytes(F.fbx_bytes([F.global_settings(), F.objects(
+            F.box_mesh(), F.model(1, "Body", "Mesh"), F.model(2, "root", "Root"),
+            F.model(3, "hips", "LimbNode"), F.deformer(20),
+            F.anim_stack(30, "TPose", 1.0), F.curve_node(40, "T"), F.curve(41, [0, 1], [0.0, 1.0])),
+            F.connections([(40, 2, "Lcl Translation"), (41, 40, "d|X")])]))
         (anim / "loose.bvh").write_text("HIERARCHY\nROOT Hips\n{\n OFFSET 0 0 0\n CHANNELS 3 Zrotation "
                                        "Xrotation Yrotation\n End Site\n {\n  OFFSET 0 1 0\n }\n}\n"
                                        "MOTION\nFrames: 2\nFrame Time: 0.5\n0 0 0\n0 0 0\n", encoding="utf-8")
@@ -2115,6 +2149,9 @@ def test_clips_and_folders_tables_from_measured_records():
         old = (config.AGENT_FILES, library_map.PATH)
         config.AGENT_FILES = root / "_Agent_Files"
         library_map.PATH = root / "_Agent_Files" / "library_map.csv"
+        library_map.sync([("Animation", "Animation"), ("Animation/Rig", "Rig")])
+        library_map.update("Animation", kind="animation")
+        library_map.update("Animation/Rig", kind="3d-assets")
         conn = None
         try:
             n, st = clips_import.write_clips(reg, root, anim)

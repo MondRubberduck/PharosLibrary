@@ -7,9 +7,13 @@ Discovers:
   - Texture folders (albedo/normal/roughness/… files grouped by stem) → texture sets
   - Audio files (.wav, .ogg, .mp3, .flac) → audio records with duration
   - Converted packs (a folder holding Exports/manifest.json or
-    Exports/kit_manifest.json) are SKIPPED: they are imported through their
-    manifests (pharos.py ingest). Scanning an Exports folder directly still
-    reads its manifest.json for GEOMETRY STATS (triangles/bbox)
+    Exports/kit_manifest.json): only their Exports folder is scanned (the
+    vendor's source files beside it are not served a second time); the
+    rows are imported through their manifests (pharos.py ingest), the
+    scan rows of the exported files are parked behind them and lend them
+    the measured file facts (units, pivot, LOD, skin). Scanning an
+    Exports folder directly still reads its manifest.json for GEOMETRY
+    STATS (triangles/bbox)
   - A model file that already has a row from a richer source (native/blend
     measured in Blender, leartes/kitbash3d from a manifest) is SKIPPED: one
     file, one description. An earlier scan row of such a file is removed
@@ -175,21 +179,31 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
     converted = {m.parent.parent for pat in ("Exports/manifest.json",
                                              "Exports/kit_manifest.json")
                  for m in folder.rglob(pat)}
-    # a pack scanned while still RAW keeps its old scan rows after it is
-    # converted (scan rows survive every rebuild): drop them, or the mesh
-    # shows up twice -- once from the manifest (with recipe), once here
+    if folder.name == "Exports" and ((folder / "manifest.json").is_file()
+                                     or (folder / "kit_manifest.json").is_file()):
+        converted.add(folder.parent)       # the scanned folder is a pack's Exports
+    exports = {c / "Exports" for c in converted}
+    # a pack scanned while still RAW keeps the scan rows of its source
+    # files after it is converted (scan rows survive every rebuild): drop
+    # those, or the mesh shows up twice -- once from the manifest (with
+    # recipe), once from the vendor's file. The model rows of its Exports
+    # stay: the importer parks them behind the recipe rows (meshes_import)
+    # and takes the measured file facts from them. Its textures are the
+    # recipes' (exported per model), never texture sets: those rows go
     if converted and conn is not None:
         from asset_service.db import path_under
         stale = [(tbl, rid) for tbl, col in (("meshes", "fbx"),
                                              ("textures", "folder"))
                  for rid, val in conn.execute(
                      f"SELECT id, {col} FROM {tbl} WHERE source='scan'")
-                 if val and any(path_under(val, c) for c in converted)]
+                 if val and any(path_under(val, c) and
+                                (tbl == "textures" or not path_under(val, c / "Exports"))
+                                for c in converted)]
         for tbl, rid in stale:
             conn.execute(f"DELETE FROM {tbl} WHERE id=?", (rid,))
         if stale:
             conn.commit()
-            print(f"  removed {len(stale)} earlier scan row(s) inside "
+            print(f"  removed {len(stale)} earlier scan row(s) of source files inside "
                   f"converted pack(s)", flush=True)
 
     manifests = {}
@@ -220,23 +234,22 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
         # meshes/audio and polluted every size filter
         if p.name.startswith("._") or p.name == ".DS_Store":
             continue
-        if converted and any(a in converted for a in p.parents):
-            summary["skipped"] += 1
-            continue
         ext = p.suffix.lower()
+        if converted and any(a in converted for a in p.parents) and not (
+                any(a in exports for a in p.parents) and (ext in MESH_EXTS or ext in BLEND_EXTS)):
+            summary["skipped"] += 1          # a source file, or an exported texture
+            continue
         if ext in MESH_EXTS or ext in BLEND_EXTS:
             mesh_files.append(p)
         elif ext in AUDIO_EXTS:
             audio_files.append(p)
         elif ext in IMAGE_EXTS:
             image_files.append(p)
-    if summary["skipped"]:
-        print(f"  skipped {summary['skipped']} file(s) in {len(converted)} "
-              f"converted pack folder(s) "
-              f"({', '.join(sorted(c.name for c in converted))}): they hold "
-              f"Exports/manifest.json or Exports/kit_manifest.json and are "
-              f"imported through their manifests by 'pharos.py ingest', "
-              f"not scanned", flush=True)
+    if converted:
+        print(f"  {len(converted)} converted pack folder(s): only their Exports are "
+              f"scanned, models only ({summary['skipped']} source file(s) and exported "
+              f"texture(s) left aside); 'pharos.py ingest' imports their recipes "
+              f"and parks the scan rows behind them", flush=True)
 
     # a model file that already has a row from a richer source (native/
     # blend: measured in Blender; leartes/kitbash3d: export manifest) gets
