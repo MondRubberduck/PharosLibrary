@@ -406,6 +406,9 @@ def test_the_review_cases_of_the_map():
                 and row["tags"] == ["crates"], row
             lm.apply_to_config(lm.load(), cfg, lib)
             assert str(lib / "UE") in cfg["manifest_roots"], cfg["manifest_roots"]
+            # the converted pack's Exports folder joins the scan list (its
+            # exported FBX get measured; the importer parks those rows)
+            assert "UE/RawPack/Exports" in cfg["scan_folders"], cfg["scan_folders"]
             # a decision word that does not fit is refused before the write
             lm.update("Kits", action="extract")
             try:

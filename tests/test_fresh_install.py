@@ -193,6 +193,10 @@ def main() -> int:
             capture_output=True, text=True, cwd=str(REPO), timeout=1500)
         print(r.stdout[-3000:])
         if r.returncode != 0:
+            # every failed check with its detail, wherever it was in the run
+            for line in r.stdout.splitlines():
+                if "[FAIL]" in line:
+                    print(line)
             print(r.stderr[-1500:])
         return r.returncode
 
@@ -1100,8 +1104,18 @@ def main() -> int:
         paths = agent_docs.generate(dbp, repo_hint=str(REPO))
         start_file = config.AGENT_FILES / "AGENT_START_HERE.md"
         body = paths[0].read_text(encoding="utf-8")
+        import sqlite3 as _sq6
+        _c6 = _sq6.connect(dbp)
+        _rows6 = [(p, sr, (f or "")[-40:]) for (p, sr, f) in
+                  _c6.execute("SELECT pack, source, fbx FROM meshes ORDER BY pack, fbx")]
+        _c6.close()
+        # four packs: MyModels, Misc, the converted FixturePack, and
+        # Downloads -- a configured model folder no ingest had scanned,
+        # which the server boot above scanned itself (a pack dropped in
+        # is indexed at the next start)
         check("AGENT_START_HERE generated with live counts",
-              "Meshes" in body and "(3 packs)" in body)
+              "Meshes" in body and "(4 packs)" in body,
+              body[body.find("| Meshes"):][:40] + " rows=" + str(_rows6))
         # E1: the generated docs carry the CONFIGURED port, not a
         # hardcoded 8765; and the honest zero-section wording
         check("E1: docs carry the configured port",

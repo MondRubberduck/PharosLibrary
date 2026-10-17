@@ -508,6 +508,20 @@ def apply_to_config(rows: dict, cfg: dict, root=None, weights=None) -> dict:
                 and included(r, rows) and effective_action(r, rows) == "index-files":
             assets = root / r["folder"] / "Assets"
             scan.append(f"{r['folder']}/Assets" if assets.is_dir() else r["folder"])
+    # a converted Unreal pack and an exported Blender kit keep their FBX
+    # under Exports/: the scanner measures them there (the importer parks
+    # the scan rows behind the recipe rows and lends them the file facts:
+    # units, pivot class, LOD, skin), unless a scanned folder holds them
+    for r in sorted(rows.values(), key=lambda r: r["folder"].lower()):
+        converted = (r["kind"] == "unreal" and r["state"] == "converted") or \
+            (r["kind"] == "blender" and r["state"] == "kit-exported")
+        if not (converted and included(r, rows)):
+            continue
+        if any(r["folder"].lower() == s.lower() or r["folder"].lower().startswith(s.lower() + "/")
+               for s in scan):
+            continue
+        if (root / r["folder"] / "Exports").is_dir():
+            scan.append(f"{r['folder']}/Exports")
     cfg["scan_folders"] = scan
     roots = []
     for r in rows.values():

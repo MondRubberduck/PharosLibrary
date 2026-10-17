@@ -348,6 +348,7 @@ def _preview_key(rel: str) -> str:
 def api_stats() -> dict:
     conn = db.connect(_DB_PATH)
     stats = db.db_stats(conn)
+    stats["registry"] = str(_DB_PATH)     # doctor tells two servers apart by it
     sections = {}
     for tbl in ("meshes", "textures", "audio", "collection"):
         try:
@@ -1424,7 +1425,10 @@ def _mesh_item(r: dict, tier: int) -> dict:
     item = {
         "key": r["key"], "name": r["name"], "pack": r["pack"],
         "source": r["source"], "kind": r["kind"],
-        "bbox_m": [r["bbox_x"], r["bbox_y"], r["bbox_z"]],   # Z-up
+        # Z-up; null when nothing measured the file (a .blend without the
+        # Blender measure): a zero box read as "0.00 m" on the Models page
+        "bbox_m": ([r["bbox_x"], r["bbox_y"], r["bbox_z"]]
+                   if (r["bbox_x"] or r["bbox_y"] or r["bbox_z"]) else None),
         "triangles": r["triangles"],
         "texture_count": r["texture_count"],
         "wired": bool(r.get("wired")),    # a resolved material recipe exists
@@ -3113,21 +3117,126 @@ def _dirs_below(root, depth: int) -> list:
     return out
 
 
+def _scan_jobs(db_path: str) -> list:
+    """The scans `pharos.py ingest` runs, for the server to run itself
+    when their folder changed: (label, folder, command) for every model
+    folder (scanner.py), the audio folder without a crawl index
+    (scanner.py) and the animation section (measure.py --clips). The
+    sections come from the config file as written (a folder the map left
+    out has no entry; the defaults config fills in are not folders the
+    owner chose). Every job writes into the server's registry."""
+    root = Path(config.LIBRARY_ROOT)
+    here = Path(__file__).resolve().parent
+    try:
+        raw = json.loads(Path(config._CONFIG_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = {}
+    sec = raw.get("sections") or {}
+    jobs = []
+    for f in raw.get("scan_folders") or []:
+        d = root / f
+        if d.is_dir():
+            jobs.append((f"models:{f}", d,
+                         [sys.executable, str(here / "scanner.py"), str(d), "--db", str(db_path)]))
+    audio = root / sec["audio"] if sec.get("audio") else None
+    if audio and audio.is_dir() and not (audio / "library_files.jsonl").is_file():
+        jobs.append(("audio", audio,
+                     [sys.executable, str(here / "scanner.py"), str(audio), "--db", str(db_path)]))
+    anim = root / sec["animation"] if sec.get("animation") else None
+    if anim and anim.is_dir():
+        jobs.append(("clips", anim, [sys.executable, str(here / "measure.py"), "--clips",
+                                     str(anim), "--db", str(db_path)]))
+    return jobs
+
+
+def _registry_knows(db_path: str, label: str, folder) -> bool:
+    """Whether the registry already holds rows from this scan's folder: a
+    folder scanned by ingest before the server ever signed it is adopted,
+    a folder that never got scanned is not."""
+    conn = db.connect(db_path)
+    try:
+        if label == "audio":
+            return bool(conn.execute("SELECT 1 FROM audio LIMIT 1").fetchone())
+        if label == "clips":
+            return bool(conn.execute("SELECT 1 FROM clips LIMIT 1").fetchone())
+        for tbl in ("meshes", "meshes_parked"):
+            try:
+                for (fbx,) in conn.execute(f"SELECT fbx FROM {tbl} WHERE fbx IS NOT NULL AND fbx != ''"):
+                    if db.path_under(fbx, folder):
+                        return True
+            except sqlite3.OperationalError:
+                continue
+        return False
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        conn.close()
+
+
+def _rescan_changed(db_path: str, force: bool = False) -> int:
+    """Run the scans whose folder changed since they last ran (all of them
+    with `force`): a pack dropped into a model folder is indexed at the
+    next start, as `pharos.py ingest` would index it (ingest signs the
+    folders it scanned, so they are not scanned twice). A folder the
+    registry already holds rows from but nobody signed is adopted as it
+    is; one the registry knows nothing of is scanned. Returns how many
+    scans ran."""
+    jobs = _scan_jobs(db_path)
+    if not jobs:
+        return 0
+    conn = db.connect(db_path)
+    try:
+        last = {label: db.get_meta(conn, "scan_sig:" + label) for label, _, _ in jobs}
+    finally:
+        conn.close()
+    ran = 0
+    for label, folder, cmd in jobs:
+        sig = db.folder_signature(folder)
+        if not force:
+            if sig == last.get(label):
+                continue
+            if last.get(label) is None and _registry_knows(db_path, label, folder):
+                db.remember_scan(db_path, label, sig)
+                continue
+        print(f"{label}: the folder changed -- scanning {folder} ...", flush=True)
+        try:
+            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               encoding="utf-8", errors="replace", timeout=7200)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"{label}: scan failed: {exc} -- again at the next start", flush=True)
+            continue
+        for line in (r.stdout or "").strip().splitlines()[-3:]:
+            print("  " + line, flush=True)
+        if r.returncode:
+            print(f"{label}: scan exit {r.returncode} -- again at the next start", flush=True)
+            continue
+        db.remember_scan(db_path, label, sig)
+        ran += 1
+    return ran
+
+
 def _startup_imports(db_path: str, force: bool = False) -> dict:
-    """What the server does before it answers: schema, every importer
-    (each failing on its own), the folders table, the map, the registry
-    stamp, the preview cache. Returns the per-section counts for the
-    banner. A registry whose sources did not change since the last start
-    (nothing ingested, scanned or measured; no index, map, CSV or config
-    edit) is served as it is: a warm start takes well under a second
-    instead of every importer again (`serve --rebuild` forces them)."""
+    """What the server does before it answers: the scans whose folders
+    changed (a new pack, a new clip), schema, every importer (each
+    failing on its own), the folders table, the map, the registry stamp,
+    the preview cache. Returns the per-section counts for the banner. A
+    registry whose sources did not change since the last start (nothing
+    ingested, scanned or measured; no folder, index, map, CSV or config
+    change) is served as it is: a warm start takes well under a second
+    instead of every importer again (`serve --rebuild` forces the scans
+    and the importers)."""
     db.init_db(db_path)   # applies schema migrations
     counts = {"collection": 0, "textures": 0, "audio": 0, "meshes": 0}
+    try:
+        scanned = _rescan_changed(db_path, force)
+    except Exception as exc:                                 # noqa: BLE001
+        print(f"folder scan skipped: {exc}", flush=True)
+        scanned = 0
     sig = db.sources_signature(db_path, _source_files())
     conn = db.connect(db_path)
     served = db.get_meta(conn, "served_signature")
     conn.close()
-    if sig == served and not force:
+    if sig == served and not force and not scanned:
         conn = db.connect(db_path)
         for tbl in ("collection", "textures", "audio", "meshes"):
             try:
@@ -3135,8 +3244,9 @@ def _startup_imports(db_path: str, force: bool = False) -> dict:
             except sqlite3.OperationalError:
                 counts[tbl] = 0
         conn.close()
-        print("registry up to date -- importers skipped (sources unchanged since "
-              "the last start; python pharos.py serve --rebuild runs them again)", flush=True)
+        print("registry up to date -- importers skipped (no folder, index, map or "
+              "config changed since the last start; python pharos.py serve --rebuild "
+              "scans and imports everything again)", flush=True)
     else:
         failed = False
         steps = (("collection", lambda: collection_import.import_collection(db_path), "assets"),
@@ -3253,7 +3363,8 @@ def main(argv=None) -> int:
     parser.add_argument("--setup", action="store_true",
                         help="open the setup page (pick the library, correct the map, index)")
     parser.add_argument("--rebuild", action="store_true",
-                        help="run every importer at start even when no source changed")
+                        help="scan every model, audio and clip folder and run every "
+                             "importer at start, even when nothing changed")
     parser.add_argument("--init", action="store_true",
                         help="first-run: detect folders and write pharos_config.json")
     args = parser.parse_args(argv)

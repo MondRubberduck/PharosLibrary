@@ -748,9 +748,19 @@ def import_meshes(db_path: str | Path) -> int:
         scan_rows = [list(r) for r in conn.execute(
             "SELECT " + ",".join(scan_cols) +
             " FROM meshes WHERE source='scan'")]
-        # ...and the parked ones: each import decides again (see below)
-        scan_rows += [list(r) for r in conn.execute(
+        # ...and the parked ones: each import decides again (see below).
+        # A parked row whose file is gone (the converted pack that covered
+        # it was removed, Exports and all) is not served again; live scan
+        # rows are never judged by file presence (they survive a rebuild
+        # with the drive away)
+        fx = scan_cols.index("fbx")
+        parked_rows = [list(r) for r in conn.execute(
             "SELECT " + ",".join(scan_cols) + " FROM meshes_parked")]
+        back = [r for r in parked_rows if r[fx] and Path(r[fx]).is_file()]
+        if len(back) != len(parked_rows):
+            print(f"meshes import: {len(parked_rows) - len(back)} parked scan row(s) "
+                  f"dropped: their files are gone", flush=True)
+        scan_rows += back
         conn.execute("DELETE FROM meshes_parked")
 
         conn.execute("DELETE FROM meshes")
@@ -824,17 +834,37 @@ def import_meshes(db_path: str | Path) -> int:
             # file-level scan row beside them -- the two disagreed on
             # triangles and size for the same file. Such a row is PARKED,
             # and comes back once no richer row covers the file any more.
-            from asset_service.db import _norm_path
-            covered = {_norm_path(r[0]) for r in conn.execute(
+            # real paths on both sides: a junction, a symlink or a mapped
+            # drive spells one file two ways (the index writers keep the
+            # config's spelling, the scanner the resolved one)
+            from asset_service.db import _norm_path, _real_path
+            covered = {_real_path(r[0]) for r in conn.execute(
                 "SELECT fbx FROM meshes WHERE fbx IS NOT NULL AND fbx != ''")}
             seen: set = set()
             unique_rows, parked = [], []
+            export_dirs: dict = {}
+
+            def _exported(path: str) -> bool:
+                # a file under a converted pack's Exports (a manifest lies
+                # there): its scan row only lends facts to the recipe row,
+                # it is never served on its own -- the pack is the recipe's
+                for a in Path(path).parents:
+                    if a.name != "Exports":
+                        continue
+                    hit = export_dirs.get(a)
+                    if hit is None:
+                        hit = export_dirs[a] = ((a / "manifest.json").is_file()
+                                                or (a / "kit_manifest.json").is_file())
+                    if hit:
+                        return True
+                return False
+
             for r in scan_rows:
                 if r[fi] in seen:
                     continue
                 seen.add(r[fi])
                 r[ti], r[mi] = scan_meta(r[ni] or "", r[pi] or "", r[fi] or "")
-                (parked if r[fi] and _norm_path(r[fi]) in covered
+                (parked if r[fi] and (_real_path(r[fi]) in covered or _exported(r[fi]))
                  else unique_rows).append(tuple(r))
             marks = ",".join("?" for _ in scan_cols)
             conn.executemany(
@@ -854,7 +884,7 @@ def import_meshes(db_path: str | Path) -> int:
                 by_file: dict = {}
                 for rid, fbx in conn.execute(
                         "SELECT id, fbx FROM meshes WHERE facts IS NULL AND fbx != ''"):
-                    by_file.setdefault(_norm_path(fbx), []).append(rid)
+                    by_file.setdefault(_real_path(fbx), []).append(rid)
                 merged = 0
                 for r in parked:
                     if not r[xi]:
@@ -866,7 +896,7 @@ def import_meshes(db_path: str | Path) -> int:
                     f.pop("pivot", None)
                     if not f:
                         continue
-                    for rid in by_file.get(_norm_path(r[fi]), ()):
+                    for rid in by_file.get(_real_path(r[fi]), ()):
                         conn.execute("UPDATE meshes SET facts=? WHERE id=? AND facts IS NULL",
                                      (json.dumps(f, ensure_ascii=False), rid))
                         merged += 1
