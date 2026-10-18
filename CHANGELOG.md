@@ -1,12 +1,24 @@
 # Changelog
 
-## Unreleased (towards 1.0)
+## 0.95.0 (2026-10-18)
+
+The 1.0 restructuring as a release candidate. Setup happens on one page
+instead of a terminal interview; every FBX, OBJ, glTF, STL and BVH file
+is measured once without an engine (size, pivot, units, LOD, skin, clip
+duration, root motion); contact sheets and a Models page show the
+library; the 3D viewer opens FBX, BVH, OBJ, GLB and glTF; the Kiosk-era
+pack layer is gone; a pack dropped into a folder Pharos already indexes
+is indexed at the next server start. Seven review rounds fixed 115
+findings, a new-user run on a fresh clone nine more. Left for 1.0: a run
+on a second machine, the merge of
+the setup and library-map pages, the Blender measure for .blend
+containers.
 
 Phase 5 of the 1.0 plan: seeing.
 
 - **Contact sheets.** `pharos.py previews --sheets` renders, in one headless Blender pass per folder, a picture of up to 36 representative models of every folder node that holds models (full models only: no lower LODs, collision hulls or impostor cards; one per variant group; dealt out across the folder's sub-folders), each labelled with its file name, and lays them out as one PNG under `<previews_dir>/sheets/` (6 per row; the keys in reading order come with `/api/folders?folder=`). Resumable: rendered tiles are kept under `<previews_dir>/models/`, a folder with a sheet is skipped. `--keys <key> ...` renders the models of a shortlist on demand. Served as `/sheet/<name>.png` and `/render/<hash>.png`; `/api/folders` carries `sheet` (and `sheet_keys` for one folder), a mesh item `render`. A crashed or timed-out Blender run keeps the tiles it finished; a folder whose tiles all failed gets no sheet and is tried again. The tiles are 256 px, 3/4 view, Workbench studio light, textures where the file has them. The composition is standard library (a BMP reader, a PNG reader and writer), no image package.
 - **Models page** (`/models`): every model folder with its contact sheet, its models with their measured facts, and the 3D viewer. The dashboard gained a Models tile; the purchases tile appears only when the library has a purchase list. `/api/meshes` filters by `folder=`.
-- **A pack dropped into the library is indexed at the next server start.** The server signs every model, audio and clip folder (their sub-folders four levels down) and runs the scan whose folder changed before the importers, as `pharos.py ingest` would; `serve --rebuild` scans and imports everything. The warm-start line says what it watched.
+- **A pack dropped into a folder Pharos already indexes is indexed at the next server start.** The server signs every model, audio and clip folder (every folder below them, by mtime) and runs the scan whose folder changed before the importers, as `pharos.py ingest` would; a new top-level folder still needs `ingest`; `serve --rebuild` scans and imports everything. The warm-start line says what it watched.
 - **Converted packs are measured too.** A converted Unreal pack and an exported Blender kit join the scan list with their Exports folder (inside a converted pack only Exports is scanned, the vendor's source files are not served a second time); the scan rows are parked behind the recipe rows, compared by real path, and lend them the measured file facts (units, pivot, LOD, skin), so `pivot=`, `units=`, `lod=` and `skin=` filters see them. On the owner's library: facts on 11 335 of 12 434 models, from 2 179.
 - A rig stored under the animation section (a folder the map calls 3d-assets) is no longer listed as a clip; unmeasured rows carry `bbox_m: null` and read "unmeasured" on the Models page; a folder of folders shows its children's contact sheets; `doctor` tells whether the Pharos on the port serves this registry, another one, or is not Pharos at all; the setup page names the pending folders, keeps the terminal-only advice out of its log, offers its own registry field in the STOP banner and no longer counts the root row as unconfirmed.
 - **3D viewer** (`/viewer?file=`): opens OBJ (with its MTL files and textures), GLB and glTF (external buffers and textures; Draco-compressed files are reported, not loaded) besides FBX and BVH. The three.js loaders are vendored under `static/jsm` like the FBX loader and fetched only when such a file is opened. `/res/` serves `.mtl`, `.bin` and `.avif` next to the textures, takes the model's folder as real path segments (a file's `../` lands in the sibling folder), and finds a texture the file names by a path that is not there (OBJ kits keep the author's absolute paths) by its file name under the model's map folder or the folders above it (a kit downloaded in parts keeps its textures in a sibling part; the path the file gave picks among 1k/2k/4k variants).

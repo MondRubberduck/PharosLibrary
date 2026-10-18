@@ -3,12 +3,13 @@
 
 # Pharos Library
 
-A local asset-intelligence server for coding agents. Point it at a
-folder of 3D assets, textures, audio, or animations. Pharos indexes
-everything into a queryable SQLite registry and serves an HTTP API, a
-dashboard, and MCP tools, so a coding agent can find, filter, and
-select assets by real-world dimensions, materials, themes, and
-availability — without walking the filesystem.
+A local server that knows your 3D asset library, for you and your coding
+agent. Point it at the folder that holds your models, textures, sounds
+and animations. It measures each file it can read once, keeps the facts
+in a small database and answers over HTTP and as MCP tools: real sizes,
+triangle counts, pivots, units, materials, clip durations, what you own.
+Searching needs no engine; Blender and Unreal only do what they alone
+can do.
 
 | Dashboard | Textures |
 |---|---|
@@ -16,174 +17,118 @@ availability — without walking the filesystem.
 | **Animations** | **3D viewer** |
 | ![animations](docs/screenshots/animations.png) | ![viewer](docs/screenshots/viewer.png) |
 
-**You need**
+## Get started
 
-- **A coding agent** that can run commands on your computer, for example Claude Code, Codex or Cursor.
-- **Python 3.10 or newer** ([python.org](https://www.python.org/downloads/); on Windows tick "Add python.exe to PATH") and **Git** ([git-scm.com](https://git-scm.com/downloads)).
-- **Optional:** Blender 5.x to build scenes and export Blender kits. Unreal Editor 5.x (Windows) only to pull models and material recipes out of Unreal packs.
+You need Python 3.10 or newer, Git, and a coding agent that can run
+commands on your computer (Claude Code, Codex, Cursor). Blender 5.x is
+optional: contact sheets, scene builds and Blender-kit export need it.
+The MCP tools need one package: `pip install "mcp<2"`.
 
-**1. Set it up (one time).** Open your agent in any folder and paste this. Change the last line to your asset folder:
+**1. Set up, once.**
+
+```
+git clone https://github.com/MondRubberduck/PharosLibrary
+cd PharosLibrary
+python pharos.py setup
+```
+
+A page opens: pick your asset folder, check what the survey found (one
+line per pack, project, kit or texture folder, with its evidence),
+answer the few decisions that need you, press **Start indexing**. Or
+paste this to your agent, which drives the same page:
 
 ```
 Clone https://github.com/MondRubberduck/PharosLibrary and set up Pharos
-for my asset library. Setup only, no scenes yet.
-Read README.md, then docs/AGENT_SETUP.md, and follow it exactly.
-Open the setup page for me, or show me what the survey found before
-indexing anything.
+for my asset library. Read README.md, then docs/AGENT_SETUP.md, and follow it.
 My assets live at: D:\path\to\my\assets
 ```
 
-**2. Answer its questions.** The agent scans your folder, then asks what only you can decide:
+To answer what you own, put a CSV with Name and URL or Price columns
+into a folder of your library before setup.
 
-- Are there other asset folders, on other drives?
-- Should it convert your Unreal packs? This is slow: roughly 1–30 minutes per pack.
-- Should it export your Blender kits or list what is inside your .blend files?
-- Do you have a purchase list (a CSV with Name, URL, Price)?
+**2. Look.** The dashboard at http://127.0.0.1:8765 shows your models
+with their measured facts, textures, sounds and animation clips, and
+opens FBX, OBJ and glTF models in the 3D viewer. `python pharos.py
+previews --sheets` renders a contact sheet per model folder (Blender,
+about a minute per folder). Next time: `python pharos.py serve`.
+Something wrong? `python pharos.py doctor` prints the fix.
 
-Not sure? Say **no**. Every step can be done later. Nothing slow starts without your yes.
-
-**3. Wait for "setup complete".** The agent reports how many models, textures, sounds and animations it indexed, then stops.
-
-**4. Build scenes whenever you like.** Replace both placeholders:
+**3. Build.** Tell your agent:
 
 ```
 Build me a scene with my Pharos library: <your idea>.
-Read <your asset folder>/_Agent_Files/AGENT_START_HERE.md first and
-follow <the Pharos folder>/docs/AGENT_PLAYBOOK.md, phase 2.
+Read <your asset folder>/_Agent_Files/AGENT_START_HERE.md first.
 ```
 
-**Next day, or after adding new assets?** Tell your agent to "run `python pharos.py ingest`, then start the Pharos server". The dashboard opens at http://127.0.0.1:8765.
+It searches, picks by measured facts, writes a scene file and builds it
+headless in Blender.
 
-**Your files stay untouched.** Pharos only reads your assets. Inside your library it writes its index folder `_Agent_Files` and an `Exports` folder for Unreal or Blender conversions you approved. 
+**Added assets?** New files in a folder Pharos already indexes are
+picked up at the next server start. A new top-level folder needs
+`python pharos.py ingest`.
 
+**Your files stay untouched.** Inside your library Pharos writes only
+its own `_Agent_Files` folder, plus `Exports` for conversions you
+approved. Its database and previews live in `~/.pharos` unless you
+choose another folder on the setup page.
 
-## Why it pays off
+## What your agent gets
 
-Your coding agent gets **facts** in one short answer: real-world size, triangle count, material and texture maps, duration and ownership. Without Pharos it would have to walk the folders and open files, and most of these facts are in no readable file at all.
+One short answer with facts, instead of a walk through the folders.
+Measured on a library of 81,677 files (12,280 models, 2,438 texture
+sets, 4,737 sounds, 1,930 clips):
 
-Measured on a real library of 81,677 files (12,280 models, 2,438 texture sets, 4,737 sounds, 1,930 animation clips). Tokens are roughly bytes ÷ 4.
-
-| Your agent asks for… | Pharos answers with | Without Pharos, the agent has to… |
+| Your agent asks for | Pharos answers with | Without Pharos it has to |
 |---|---|---|
-| a brick-wall texture set with all its maps | 10 matching sets with measured pixel size and the maps each has: **~1,200 tokens**; every file and its role for the set you pick: ~1,750 more | find them in the folder tree. Even just the 727 file names containing "brick" are ~25,000 tokens, and a folder name like "4K" is no proof of the pixel size. |
-| a thunder or rain sound, 5–30 seconds | 10 sounds with durations: **~480 tokens** | read 194 candidate names (~3,900 tokens), then open each file to learn its length |
-| crates under 1.2 m | 10 crates with size and triangle count: **~1,050 tokens**; the material recipe of the one you pick: ~650 more | read 59 candidate file names (~1,600 tokens), then open and measure every one: sizes and triangle counts are written in no text file |
-| a street pole at least 4 m tall | 10 poles with the same facts: **~1,050 tokens**; one recipe: ~1,850 more | the same, for 209 candidates |
+| crates under 1.2 m | 10 crates with size and triangle count, about 1,050 tokens | read 59 file names, then open and measure each: sizes are in no text file |
+| a brick-wall texture set with its maps | 10 sets with pixel size and maps, about 1,200 tokens | read the 727 file names containing "brick", about 25,000 tokens; a folder named "4K" proves nothing |
+| a thunder or rain sound, 5 to 30 seconds | 10 sounds with durations, about 480 tokens | read 194 names, then open each file for its length |
 
-For comparison, one plain listing of every file path in that library is about **2.4 million tokens**. Unreal packs can't be read at all without the Unreal Editor. Pharos converts them once, with your permission.
+A listing of every file path in that library is about 2.4 million tokens.
 
-Setup on a fresh machine took about **40 minutes** on a 9 GB test library, with the agent asking its questions and converting one Unreal pack. Every change is tested on Windows, Linux and macOS, including a headless Blender build.
+## With and without engines
 
-## Get started (no coding needed)
-
-Your coding agent does all the technical work. You pick the folder, answer a few questions, and describe the scenes you want.
-
-The picking happens on one page: `python pharos.py setup` starts Pharos and
-opens it in your browser. Choose the folder that holds your assets, look at
-what the survey found (one line per pack, project, kit or texture library,
-with its evidence), correct what is wrong, answer the decisions that need
-you, press **Start indexing**. Your agent can drive the same page through
-its API, so either of you can do it. A server started without a library
-serves that page and prints its address.
-
-
-
-## What your agent does
-
-**Setup** — the agent's contract is `docs/AGENT_SETUP.md`:
-
-1. `pharos.py doctor` probes the machine and reports every gap with the
-   exact command that fixes it.
-2. `pharos.py init` surveys your library and writes the **library map**
-   (`_Agent_Files/library_map.csv`): one row per folder that is a thing,
-   with what it is (3D assets, Unreal, Unity, Blender, textures, HDRI,
-   animation, audio, purchases) and the evidence. The agent shows you the
-   tree; you correct it in the file, on the server's `/tags` page or with
-   `pharos.py map set`. Your rows are never overwritten by a re-survey.
-3. `pharos.py ingest` indexes everything that needs no engine, then asks
-   you the decisions that are yours, each with its answer command: export
-   the Unreal packs or leave them in Unreal? extract the Blender kits and
-   .blend files or leave them? index a Unity project's files? render
-   animation previews?
-4. Nothing with an engine runs without your answer in the map:
-   `pharos.py convert`, `extract` and `previews` refuse without it. After
-   your answers the server starts and prints INGESTION COMPLETE with
-   per-section counts.
-
-**Building** — `docs/AGENT_PLAYBOOK.md`, phase 2: query the API, author
-a scene manifest, validate it, check the triangle budget, build
-headless in Blender, reopen the .blend and verify the result. The
-priority ladder: on disk → use it; owned but not downloaded → ask you;
-absent → model it and say so.
-
-## What works with and without engines
-
-| Capability | Python only | + Blender | + Unreal Editor 5.x |
+| | Python only | + Blender | + Unreal Editor 5.x (Windows) |
 |---|---|---|---|
-| Search: names, paths, tags, themes, your pack tags, availability | ✅ | ✅ | ✅ |
-| Measured facts: size, triangles, pivot class, units, LOD and variant groups, skin and bones; clip duration, fps, root motion, skeleton | ✅ | ✅ | ✅ |
-| Contact sheets per model folder and pictures of shortlisted models (`pharos.py previews --sheets` / `--keys`) | — | ✅ | ✅ |
-| FBX dimensions + triangle counts | ✅ | ✅ | ✅ |
-| Texture sets, audio durations, purchase catalog | ✅ | ✅ | ✅ |
-| OBJ/GLB/STL measured geometry | ✅ | ✅ | ✅ |
-| .blend / USD container enumeration | — | ✅ | ✅ |
-| Kits → per-assembly FBX + manifests | — | ✅ | ✅ |
-| Engine-exact material recipes | — | — | ✅ |
-| Scene manifest → headless Blender build | — | ✅ | ✅ |
+| Search by name, path, tags, themes, ownership | ✅ | ✅ | ✅ |
+| Measured facts: size, triangles, pivot, units, LOD, skin; clip duration, fps, root motion | ✅ | ✅ | ✅ |
+| Texture sets, sounds with durations, purchase list | ✅ | ✅ | ✅ |
+| Contact sheets and pictures of models | – | ✅ | ✅ |
+| Blender kits exported to FBX; .blend containers listed and measured | – | ✅ | ✅ |
+| Scenes built headless in Blender | – | ✅ | ✅ |
+| Unreal packs converted, with engine-exact material recipes | – | – | ✅ |
 
-A section without content or without its engine serves empty results,
-never errors.
+Unreal conversion, Blender extraction and clip previews never run
+without your decision in the library map. A section without content
+answers empty, never with an error.
 
-## Requirements
+## How it works
 
-- Python 3.10+. The core server is stdlib-only; the optional MCP
-  integration adds one package (`pip install "mcp<2"`).
-- Optional: Blender 5.x (scene building, Blender kit export, .blend
-  enumeration), Unreal Editor 5.x on Windows with Git Bash (Unreal pack
-  conversion).
-- Windows, Linux and macOS are covered by CI.
-
-## How it fits together
-
-```
-service/asset_service/    HTTP server, importers, MCP, scanner, doctor, ingest
-                          (templates/ + static/ live inside it)
-pipeline/                 optional conversion and index chains (UE, Blender)
-tools/ tests/ docs/       PII gate, test suite, documentation
-pharos.py                 CLI: init | doctor | ingest | serve | docs
-```
-
-The SQLite registry is derived data: the importers rebuild it from the
-index files and disk at a server start when a source changed (`pharos.py
-serve --rebuild` forces them; `pharos.py ingest` rebuilds everything). Crawler-sourced tables rebuild
-automatically; scanner-indexed rows return on the next
-`pharos.py ingest`.
-Asset files are never modified — the only writes into a library are
-generated index files.
+One CLI, `pharos.py` (`python pharos.py` lists its commands: setup,
+doctor, ingest, serve, previews, convert, extract, map and more). The
+survey writes the **library map** (`_Agent_Files/library_map.csv`: one
+row per folder that is a thing, with its kind and your decisions).
+`ingest` measures everything that needs no engine and writes the agent's
+entry files. The server imports it all into a SQLite registry, derived
+data rebuilt whenever a source changes, and serves the API and the
+pages; `service/pharos_mcp_server.py` gives the same answers as MCP
+tools. Every change is tested on Windows, Linux and macOS, with a
+headless Blender.
 
 ## Documentation
 
 | For | Read |
 |---|---|
-| The agent's setup contract: the library map, the decisions, the steps | [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md) |
-| The build doctrine and priority ladders | [docs/AGENT_PLAYBOOK.md](docs/AGENT_PLAYBOOK.md) |
-| Every capability and limit, verifiable | [docs/CAPABILITIES.md](docs/CAPABILITIES.md) |
+| Setting up with an agent: the map, the decisions, the steps | [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md) |
+| Building scenes with an agent | [docs/AGENT_PLAYBOOK.md](docs/AGENT_PLAYBOOK.md) |
+| Every capability and limit | [docs/CAPABILITIES.md](docs/CAPABILITIES.md) |
 | MCP client configuration | [docs/MCP_SETUP.md](docs/MCP_SETUP.md) |
+| The optional engine chains (Unreal, Blender) | [pipeline/README.md](pipeline/README.md) |
+
+## Support
+
+If Pharos helps your pipeline: [Donate via PayPal](https://www.paypal.com/donate/?hosted_button_id=5XKG8WLLRWZ44) · [Support on Patreon](https://www.patreon.com/NGallist)
 
 ## License
 
-### Support & Donations
-
-If you find **Pharos Library** useful for your 3D workflow or pipeline, you can support ongoing maintenance and development:
-
-* [![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?hosted_button_id=5XKG8WLLRWZ44) &nbsp; [Donate via PayPal](https://www.paypal.com/donate/?hosted_button_id=5XKG8WLLRWZ44)
-* [![Support on Patreon](https://img.shields.io/badge/Support-Patreon-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/NGallist) &nbsp; [Support on Patreon](https://www.patreon.com/NGallist)
-
----
-
-### License & Legal Notice
-
-This project is open-source software licensed under the **BSD 3-Clause License**.  
-All modifications and modernizations: Copyright (c) 2026 MondRubberduck and Contributors.  
-
-MIT
+MIT. Copyright (c) 2026 MondRubberduck and contributors.
