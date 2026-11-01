@@ -185,12 +185,10 @@ def test_drivers_print_sandbox_remediation():
         print("SKIP: no usable bash on this machine -- the shell drivers "
               "cannot run here, so their remediation cannot be tested")
         return
-    real_sandbox = REPO / "pipeline" / "conversion" / "sandbox"
-    parked = None
-    if real_sandbox.is_dir():
-        parked = real_sandbox.with_name("sandbox.parked-for-test")
-        real_sandbox.rename(parked)
-    try:
+    # the drivers take the sandbox folder from PHAROS_SANDBOX_DIR: the test
+    # points it at an empty temp folder and never touches the live one (it
+    # used to rename it, and failed while a conversion was running)
+    with tempfile.TemporaryDirectory() as tmp:
         for driver in ("convert_packs.sh", "relink_pack.sh"):
             r = subprocess.run(
                 [bash, str(REPO / "pipeline" / "conversion" / driver),
@@ -200,14 +198,12 @@ def test_drivers_print_sandbox_remediation():
                      # any real file passes the UE check so the sandbox
                      # check (and its remediation message) is what fires
                      "UE_EXE": sys.executable,
-                     "ASSETS_ROOT": REPO.as_posix()})
+                     "ASSETS_ROOT": REPO.as_posix(),
+                     "PHAROS_SANDBOX_DIR": str(Path(tmp) / "no-sandbox-here")})
             combined = (r.stdout or "") + (r.stderr or "")
             assert r.returncode == 2, (driver, r.returncode, combined[-200:])
             assert "make_sandbox.py" in combined, \
                 f"{driver} no longer points at the generator: {combined[-300:]}"
-    finally:
-        if parked is not None and parked.is_dir() and not real_sandbox.exists():
-            parked.rename(real_sandbox)
 
 
 def _png(w=1, h=1):
@@ -2383,6 +2379,81 @@ def test_blender_renders_tiles_and_a_sheet():
         finally:
             config.PREVIEW_DIR = old
 
+
+def test_pack_status_passes_with_texture_gaps_and_fails_on_meshes():
+    """The conversion verdict: textures the engine's exporter refused are
+    gaps of a PASS (13 of 706 textures once failed the whole pack and
+    skipped the relink: no recipes at all); a mesh that did not export,
+    or a verifier FAIL, is a FAIL."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "pack_status", str(REPO / "pipeline" / "conversion" / "pack_status.py"))
+    ps = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ps)
+    tex = [{"asset": "/Game/T_AO", "stage": "texture_export", "error": "No png exporter"},
+           {"asset": "/Game/T_N", "stage": "texture_load", "error": "load returned None"}]
+    ok = {"result": "PASS"}
+    assert ps.verdict_of({"failures": tex, "counts": {"failures": 2}}, ok)[0] == "PASS"
+    st, mesh, t, other = ps.verdict_of(
+        {"failures": tex + [{"asset": "/Game/SM_X", "stage": "mesh_export", "error": "x"}]}, ok)
+    assert st == "FAIL" and len(mesh) == 1 and len(t) == 2 and other == []
+    assert ps.verdict_of({"failures": []}, {"result": "FAIL"})[0] == "FAIL"
+    assert ps.verdict_of({"failures": [{"asset": "a", "stage": "material_slots", "error": "e"}]},
+                         ok)[0] == "PASS"
+    # the CLI writes the status with the gaps and appends the log line
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "manifest.json").write_text(json.dumps(
+            {"failures": tex, "counts": {"fbx_written": 333, "texture_files_written": 693,
+                                         "failures": 2}, "elapsed_seconds": 1770}),
+            encoding="utf-8")
+        (tmp / "verify.json").write_text(json.dumps(ok), encoding="utf-8")
+        rc = ps.main([str(tmp / "manifest.json"), str(tmp / "verify.json"),
+                      str(tmp / "status.json"), str(tmp / "status.log"),
+                      "Pack", "label", "0", "1770", "0"])
+        st = json.loads((tmp / "status.json").read_text(encoding="utf-8"))
+        assert rc == 0 and st["status"] == "PASS" and st["gaps"]["textures_failed"] == 2 \
+            and st["gaps"]["textures"] == ["/Game/T_AO", "/Game/T_N"], st
+        assert "texfail=2" in (tmp / "status.log").read_text(encoding="utf-8")
+        # the driver reads the verdict with the same one-liner as before
+        assert "PASS" == subprocess.run(
+            [sys.executable, "-c", "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['status'])",
+             str(tmp / "status.json")], capture_output=True, text=True).stdout.strip()
+
+
+def test_doctor_finds_unreal_through_the_launcher_manifest():
+    """Three installs (one in Program Files, two on another drive from the
+    Epic launcher): the newest wins; UE_EXE wins over all; no install, no
+    hit."""
+    from asset_service import doctor
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        exes = {}
+        for ver in ("5.4", "5.8", "5.5"):
+            exe = tmp / f"UE_{ver}" / "Engine" / "Binaries" / "Win64" / "UnrealEditor-Cmd.exe"
+            exe.parent.mkdir(parents=True)
+            exe.write_bytes(b"MZ")
+            exes[ver] = exe
+        man = tmp / "LauncherInstalled.dat"
+        man.write_text(json.dumps({"InstallationList": [
+            {"InstallLocation": str(tmp / "UE_5.8"), "AppName": "UE_5.8", "AppVersion": "5.8.0"},
+            {"InstallLocation": str(tmp / "UE_5.5"), "AppName": "UE_5.5", "AppVersion": "5.5.1"},
+            {"InstallLocation": str(tmp / "Fortnite"), "AppName": "Fortnite"}]}), encoding="utf-8")
+        pat = (tmp / "UE_5.4" / "Engine" / "Binaries" / "Win64" / "UnrealEditor-Cmd.exe").as_posix()
+        assert doctor._find_ue(manifest=man, patterns=(pat,)) == str(exes["5.8"])
+        assert doctor._find_ue(manifest=tmp / "missing.dat", patterns=(pat,)) == str(exes["5.4"])
+        assert doctor._find_ue(manifest=tmp / "missing.dat", patterns=(str(tmp / "none" / "*"),)) == ""
+        assert doctor._ue_version(str(exes["5.8"])) == (5, 8) and doctor._ue_version("x") == (0, 0)
+        old = os.environ.get("UE_EXE")
+        os.environ["UE_EXE"] = str(exes["5.4"])
+        try:
+            from asset_service import chains
+            assert chains._ue() == str(exes["5.4"])
+        finally:
+            if old is None:
+                os.environ.pop("UE_EXE", None)
+            else:
+                os.environ["UE_EXE"] = old
 
 
 if __name__ == "__main__":

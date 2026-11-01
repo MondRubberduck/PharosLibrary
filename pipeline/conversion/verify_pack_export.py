@@ -376,7 +376,7 @@ def main():
                                 "slots_resolved": res, "slots_total": total,
                                 "top_unresolved_reasons": dict(top)}
         if R["degraded"]:
-            warnings.append("DEGRADED wiring: %d of %d slots resolved (%.3f < %.1f) -- "
+            warnings.append("DEGRADED wiring: %d of %d slots resolved (%.4f < %.2f) -- "
                             "PASS/FAIL is unaffected, this is a quality signal.  Top "
                             "unresolved_reasons: %s"
                             % (res, total, ratio, DEGRADED_RATIO,

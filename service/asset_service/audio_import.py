@@ -127,10 +127,9 @@ def import_audio(db_path: str | Path, root=None) -> int:
         # rows must survive a restart (previously the DELETE below ran
         # first and the later open() failure could take them with it)
         if not jsonl_file.is_file():
-            kept = conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]
-            print(f"audio import: no crawl index ({jsonl_file}) -- keeping "
-                  f"{kept} scanner-indexed row(s)")
-            return kept
+            # the usual case: the scanner indexed the sounds, there is no
+            # crawl index to import (not worth a line of its own)
+            return conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]
         # scanner rows (source='scan') survive the rebuild: only this
         # importer's own rows (NULL / 'crawl') are replaced. UNIQUE(rel)
         # means a file indexed by BOTH sides cannot keep two rows -- the

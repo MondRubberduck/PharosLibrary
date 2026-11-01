@@ -96,13 +96,39 @@ def _find_blender() -> str:
     return ""
 
 
-def _find_ue() -> str:
-    for pat in ("C:/Program Files/Epic Games/UE_*/Engine/Binaries/Win64/"
-                "UnrealEditor-Cmd.exe",):
-        hits = sorted(glob.glob(pat))
-        if hits:
-            return hits[-1]
-    return ""
+_UE_EXE_REL = Path("Engine") / "Binaries" / "Win64" / "UnrealEditor-Cmd.exe"
+
+
+def _ue_version(path: str) -> tuple:
+    """(5, 4) from '.../UE_5.4/...'; (0, 0) when the path does not say."""
+    m = re.search(r"UE_(\d+)\.(\d+)", str(path))
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def _find_ue(manifest=None, patterns=None) -> str:
+    """UnrealEditor-Cmd.exe: every install the Epic launcher made (its
+    manifest lists them, on any drive), then the standard folder; the
+    newest version wins. Blender was found this way, Unreal only through
+    UE_EXE, and a machine with three installs reported 'absent'."""
+    cands = []
+    man = Path(manifest or os.environ.get("PHAROS_EPIC_MANIFEST")
+               or Path(os.environ.get("ProgramData", r"C:\ProgramData"))
+               / "Epic" / "UnrealEngineLauncher" / "LauncherInstalled.dat")
+    try:
+        for item in json.loads(man.read_text(encoding="utf-8")).get("InstallationList") or []:
+            loc = item.get("InstallLocation") or ""
+            if loc and str(item.get("AppName") or "").startswith("UE_"):
+                exe = Path(loc) / _UE_EXE_REL
+                if exe.is_file():
+                    cands.append(str(exe))
+    except (OSError, ValueError, AttributeError):
+        pass
+    for pat in patterns or ("C:/Program Files/Epic Games/UE_*/Engine/Binaries/Win64/"
+                            "UnrealEditor-Cmd.exe",):
+        cands += glob.glob(pat)
+    if not cands:
+        return ""
+    return str(Path(max(dict.fromkeys(cands), key=lambda c: (_ue_version(c), c))))
 
 
 def run_doctor(argv=None) -> int:
@@ -328,7 +354,8 @@ def run_doctor(argv=None) -> int:
     checks.append(_check(
         "unreal", "found" if ue else "absent",
         ue or "chain 1 (UE pack crawl) disabled -- optional",
-        "" if ue else "set UE_EXE to UnrealEditor-Cmd.exe to enable chain 1"))
+        "" if ue else "install Unreal Engine 5.x through the Epic launcher, or set UE_EXE "
+                      "to UnrealEditor-Cmd.exe, to enable chain 1"))
     bash = shutil.which("bash")
     checks.append(_check(
         "git-bash", "found" if bash else "absent",

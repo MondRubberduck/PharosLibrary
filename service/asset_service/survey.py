@@ -295,9 +295,17 @@ def _marker(node: Node, d: _Dir, root: Path) -> bool:
                 node.children.append(ch)
         return True
     kit = [x for x in d.dirs if x.lower().endswith(".blender.native")]
-    if kit:
+    # the second KitBash3D layout: the .blend in the kit root beside
+    # kb3d_metadata.json / KB3DTextures (the exporter reads both layouts;
+    # surveyed as loose files, a kit was extracted as records, not FBX)
+    files_l = [f.lower() for f in d.files]
+    root_kit = ("kb3d_metadata.json" in files_l
+                or any(f.startswith("kb3d_") and f.endswith(".blend") for f in files_l)
+                or ("kb3dtextures" in dirs_l and any(f.endswith(".blend") for f in files_l)))
+    if kit or root_kit:
         _subtree(d)
-        _know(node, "blender", "kit", f"{kit[0]}/: KitBash3D kit layout")
+        _know(node, "blender", "kit", f"{kit[0]}/: KitBash3D kit layout" if kit else
+              "kb3d_*.blend / kb3d_metadata.json in the kit root: KitBash3D kit layout")
         return True
     if "content" in dirs_l:
         content = _Dir(d.path / dirs_l["content"])

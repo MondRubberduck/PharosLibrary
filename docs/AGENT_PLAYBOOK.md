@@ -3,7 +3,9 @@
 This is the operating manual for any coding agent working with a Pharos
 library. Two phases, always in this order. **Phase boundaries are
 conversation boundaries**: end Phase 1 by talking to your user; start
-Phase 2 only with their answers.
+Phase 2 only with their answers. Answers the user already gave in the
+task (the folder, the engine decisions, "no previews") count as the
+interview: do not ask them again.
 
 > Blender needs NO plugin, NO MCP, NO setup. The builder runs via
 > `blender --background --factory-startup --python scene_builder.py`.

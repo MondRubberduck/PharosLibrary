@@ -42,7 +42,7 @@ if [[ -z "$BLENDER_EXE" ]]; then    # unset -> the pipeline finder (_config.blen
   BLENDER_EXE="${BLENDER_EXE//$'\r'/}"
 fi
 TOOLS="$CONV_ROOT"    # the helper scripts live beside this driver
-SANDBOX="$CONV_ROOT/sandbox"
+SANDBOX="${PHAROS_SANDBOX_DIR:-$CONV_ROOT/sandbox}"   # the tests point this elsewhere
 SANDBOX_CONTENT="$SANDBOX/Content"
 PROJECT="$SANDBOX/Sandbox.uproject"
 LOGDIR="$CONV_ROOT/logs"
@@ -410,46 +410,10 @@ fi
 # ---------- 7. status ----------
 echo
 echo "--- [7/7] status ---"
-python - "$MANIFEST" "$VERIFY_JSON" "$STATUS_JSON" "$STATUS_LOG" "$PACK" "$LABEL" "$UE_RC" "$UE_ELAPSED" "$VERIFY_RC" <<'PY'
-import datetime, json, os, sys
-man_p, ver_p, st_p, log_p, pack, label, ue_rc, ue_el, ver_rc = sys.argv[1:11]
-m = json.load(open(man_p, encoding="utf-8"))
-try:
-    v = json.load(open(ver_p, encoding="utf-8"))
-except Exception:
-    v = {}
-c = m.get("counts") or {}
-verdict = "PASS" if (v.get("result") == "PASS" and c.get("failures", 0) == 0) else "FAIL"
-st = {
-    "pack": pack, "label": label,
-    "status": verdict,
-    "at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-    "exports_dir": os.path.dirname(os.path.abspath(man_p)),
-    "manifest": os.path.abspath(man_p),
-    "game_root": m.get("game_root"), "game_roots": m.get("game_roots"),
-    "content_root": m.get("content_root"),
-    "counts": c,
-    "broken_links": v.get("broken_links"),
-    "mesh_stats": v.get("meshes"),
-    "texture_stats": v.get("textures"),
-    "ue_exit_code": int(ue_rc), "ue_elapsed_s": int(ue_el),
-    "verify_exit_code": int(ver_rc),
-    "engine_elapsed_s": m.get("elapsed_seconds"),
-    "not_exported_texturecube": len((m.get("not_exported") or {}).get("texturecube") or []),
-    "failures": m.get("failures") or [],
-}
-json.dump(st, open(st_p, "w", encoding="utf-8"), indent=1)
-line = ("%s  %-52s %-4s  sm=%-5s skm=%-3s tex=%-5s cube=%-3s fbx=%-5s tfiles=%-5s "
-        "fail=%-3s broken=%-3s eng=%ss  ue_rc=%s") % (
-    st["at"], pack[:52], verdict,
-    c.get("static_mesh"), c.get("skeletal_mesh"), c.get("texture2d"),
-    c.get("texturecube_skipped"), c.get("fbx_written"),
-    c.get("texture_files_written"), c.get("failures"), v.get("broken_links"),
-    m.get("elapsed_seconds"), ue_rc)
-with open(log_p, "a", encoding="utf-8") as fh:
-    fh.write(line + "\n")
-print(line)
-PY
+# the verdict lives in pack_status.py (testable without an engine): PASS =
+# verify PASS and every mesh exported; textures the exporter refused are
+# gaps in the status, not a failed pack
+python "$TOOLS/pack_status.py" "$MANIFEST" "$VERIFY_JSON" "$STATUS_JSON" "$STATUS_LOG" "$PACK" "$LABEL" "$UE_RC" "$UE_ELAPSED" "$VERIFY_RC"
 
 if [[ "$(python -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['status'])" "$STATUS_JSON")" == "PASS" ]]; then
   echo

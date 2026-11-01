@@ -610,10 +610,15 @@ def run_map(argv=None) -> int:
         if not rows:
             print(f"no map yet at {PATH} -- run: pharos.py map refresh")
             return 0
+        pend = {p["folder"] for p in pending(rows)}
         for r in sorted(rows.values(), key=lambda r: (r["folder"] != ".", r["folder"].lower())):
             flags = ("" if r["include"] else " [out]") + (" *" if r["confirmed"] else "")
-            act = f" action={r['action']}" if r["action"] else (
-                "  DECISION PENDING" if decision_options(r["kind"], r["state"]) else "")
+            eff = effective_action(r, rows)
+            # a folder below a decided one inherits the decision: it is not
+            # pending (map pending never listed it; show said it was)
+            act = (f" action={r['action']}" if r["action"] else
+                   f" action={eff} (inherited)" if eff else
+                   "  DECISION PENDING" if r["folder"] in pend else "")
             print(f"{r['folder']:<50} {r['kind']:<10} {r['state']:<12}{act}{flags}"
                   + (f"  {', '.join(r['styles'] + r['tags'])}" if r["styles"] or r["tags"] else ""))
         print(f"\n{len(rows)} rows in {PATH}  (* = confirmed, [out] = not indexed)")
@@ -683,7 +688,8 @@ def run_map(argv=None) -> int:
         except ValueError as exc:
             print(exc)
             return 2
-        print(f"{r['folder']}: kind={r['kind']} include={'yes' if r['include'] else 'no'} "
+        print(f"{r['folder']}: kind={r['kind']} state={r['state'] or '-'} "
+              f"include={'yes' if r['include'] else 'no'} "
               f"action={r['action'] or '-'} confirmed={'yes' if r['confirmed'] else 'no'}")
         return 0
     return 2

@@ -879,8 +879,8 @@ def main() -> int:
             capture_output=True, text=True, cwd=str(REPO), timeout=120)
         a_kept = browse.api_audio_items({"q": [""]})["total"]
         check("audio_import no-jsonl: exit 0, keeps scanner rows",
-              r.returncode == 0 and "keeping" in (r.stdout or "")
-              and a_kept >= 1,
+              r.returncode == 0 and a_kept >= 1
+              and "no crawl index" not in (r.stdout or ""),     # not worth a line
               f"rc={r.returncode} kept={a_kept}")
 
         a2 = browse.api_audio_items({"q": [""]})
@@ -1465,7 +1465,8 @@ def main() -> int:
             capture_output=True, text=True, cwd=str(REPO), timeout=600)
         out6 = (r.stdout or "") + (r.stderr or "")
         check("ingest survives a CSV-less library (exit 0, skip logged)",
-              r.returncode == 0 and "collection import skipped" in out6,
+              r.returncode == 0 and "purchases: no purchase list" in out6
+              and "Errno" not in out6,
               f"rc={r.returncode} tail={out6.strip()[-90:]!r}")
         cfg_now["library_root"] = str(lib)
         cfg_now["registry_dir"] = str(reg)

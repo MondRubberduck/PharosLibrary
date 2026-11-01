@@ -40,7 +40,7 @@ async function loadFolders(){const d=await j('/api/folders');folders=d.folders.f
  const want=new URLSearchParams(location.search).get('folder');const first=folders.find(f=>f.folder===want)||folders[0];if(first)show(first.folder);}
 $('side').addEventListener('click',e=>{const el=e.target.closest('[data-f]');if(el)show(el.dataset.f);});
 function sheetHtml(f,folder){
- if(f.sheet)return `<img id="sheet" src="${esc(f.sheet)}" alt="contact sheet">`;
+ if(f.sheet)return `<img id="sheet" src="${esc(f.sheet)}" alt="contact sheet">`+(f.sheet_tiles&&f.meshes>f.sheet_tiles?`<div class="meta" style="margin:-8px 0 12px">${f.sheet_tiles} of ${Number(f.meshes).toLocaleString()} models on this sheet (one per variant group, the biggest first)</div>`:'');
  // a folder of folders: its children's sheets are its picture
  const kids=folders.filter(x=>x.sheet&&x.folder.startsWith(folder+'/'));
  if(kids.length)return kids.slice(0,8).map(k=>`<div class="meta" style="margin-top:6px"><a href="/models?folder=${encodeURIComponent(k.folder)}" style="color:var(--link);text-decoration:none">${esc(k.folder)}</a></div><img class="kid" src="${esc(k.sheet)}" alt="contact sheet of ${esc(k.folder)}">`).join('')

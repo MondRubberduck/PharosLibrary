@@ -62,7 +62,7 @@ def build(manifest_path: str, save_path: str = None):
     bpy.context.scene.unit_settings.system = 'METRIC'
     bpy.context.scene.unit_settings.scale_length = 1.0
 
-    print(f"\\n{'=' * 60}")
+    print(f"\n{'=' * 60}")
     print(f"Building: {scene_name}")
     print(f"Assets: {len(manifest.get('assets', []))}")
     print(f"Crowd: {sum(c.get('count', 1) for c in manifest.get('crowd', []))}")

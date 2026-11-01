@@ -2355,12 +2355,14 @@ def api_folders(params: dict) -> dict:
         rows = folders_import.rows(conn, folder or None)
     finally:
         conn.close()
+    index = sheets.load_index()
     for r in rows:
         r["sheet"] = sheets.sheet_url(r["folder"])
+        if r["sheet"]:
+            r["sheet_tiles"] = len((index.get(r["folder"]) or {}).get("keys") or [])
     if folder and rows:
         # the keys behind the sheet's tiles (reading order), one folder at
         # a time: the all-folders answer stays small
-        index = sheets.load_index()
         rows[0]["sheet_keys"] = ((index.get(rows[0]["folder"]) or {}).get("keys") or []
                                  if rows[0]["sheet"] else [])
     if folder:
@@ -3258,9 +3260,11 @@ def _startup_imports(db_path: str, force: bool = False) -> dict:
                 counts[name] = fn()
                 print(f"{name} imported: {counts[name]} {unit}", flush=True)
             except Exception as exc:  # noqa: BLE001 -- a missing source must not kill the app
-                print(f"{name} import skipped: {exc}", flush=True)
                 # an absent purchase CSV is a state, not a failure
-                if not (name == "collection" and isinstance(exc, FileNotFoundError)):
+                if name == "collection" and isinstance(exc, FileNotFoundError):
+                    print("purchases: no purchase list in this library", flush=True)
+                else:
+                    print(f"{name} import skipped: {exc}", flush=True)
                     failed = True
         try:
             n_f = folders_import.build(db_path, config.LIBRARY_ROOT)

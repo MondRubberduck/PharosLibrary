@@ -97,16 +97,30 @@ def convert(argv: list) -> int:
                                              "from the Unreal packs the owner approved")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--pack", help="one map folder only")
+    ap.add_argument("--relink-only", action="store_true",
+                    help="no engine export: rewire and verify the approved packs that "
+                         "already have a manifest (recipes missing after a failed relink)")
     args = ap.parse_args(argv)
     root = config.LIBRARY_ROOT
-    ready, undecided = _rows("unreal", "export", states=("raw", "project"))
+    # the decision covers raw packs and, for --relink-only, the converted ones
+    ready, undecided = _rows("unreal", "export",
+                             states=("raw", "project", "converted") if args.relink_only
+                             else ("raw", "project"))
     if args.pack:
         ready = [r for r in ready if r["folder"].lower() == args.pack.replace("\\", "/").strip("/").lower()]
-    todo = [r for r in ready
-            if not (root / r["folder"] / "Exports" / "manifest.json").is_file()]
+    has_manifest = lambda r: (root / r["folder"] / "Exports" / "manifest.json").is_file()  # noqa: E731
+    if args.relink_only:
+        todo = [r for r in ready if has_manifest(r)]
+        if not todo:
+            _say("no approved pack with an Exports/manifest.json to relink"
+                 + (f" (approved: {len(ready)})" if ready else ""))
+            return 0 if ready else _refuse(undecided, "export", "Unreal")
+    else:
+        todo = [r for r in ready if not has_manifest(r)]
     if not todo:
         if ready:
-            _say(f"every approved Unreal pack is converted already ({len(ready)})")
+            _say(f"every approved Unreal pack is converted already ({len(ready)}); "
+                 f"pharos.py convert --relink-only rewires one whose recipes are missing")
             return 0
         return _refuse(undecided, "export", "Unreal")
     ue = _ue()
@@ -127,9 +141,18 @@ def convert(argv: list) -> int:
     for r in todo:
         pack = root / r["folder"]
         env = {"ASSETS_ROOT": str(pack.parent), "UE_EXE": ue}
-        _say(f"\nconverting {r['folder']} (map decision: export)")
-        rc = _run([bash or "bash", conv / "convert_packs.sh", "--pack", pack.name,
-                   "--assets-root", str(pack.parent)], conv, args.dry_run, env)
+        rc = 0
+        if not args.relink_only:
+            _say(f"\nconverting {r['folder']} (map decision: export)")
+            rc = _run([bash or "bash", conv / "convert_packs.sh", "--pack", pack.name,
+                       "--assets-root", str(pack.parent)], conv, args.dry_run, env)
+            if rc and not args.dry_run and has_manifest(r):
+                # the engine wrote the pack but the driver's verdict was FAIL:
+                # the manifest is there, the recipes are not
+                _say(f"  the export left a manifest; after the cause is fixed: "
+                     f"pharos.py convert --relink-only --pack \"{r['folder']}\"")
+        else:
+            _say(f"\nrelinking {r['folder']} (manifest present, map decision: export)")
         if rc == 0:
             rc = _run([bash or "bash", conv / "relink_pack.sh", "--pack", pack.name,
                        "--assets-root", str(pack.parent)], conv, args.dry_run, env)
@@ -137,7 +160,8 @@ def convert(argv: list) -> int:
             rc = _run([sys.executable, conv / "verify_pack_export.py",
                        pack / "Exports"], conv, args.dry_run)
         failed += 1 if rc else 0
-    _say(f"\nconverted {len(todo) - failed} of {len(todo)} pack(s)"
+    what = "relinked" if args.relink_only else "converted"
+    _say(f"\n{what} {len(todo) - failed} of {len(todo)} pack(s)"
          + ("; run pharos.py ingest to import them" if not args.dry_run else ""))
     return 4 if failed else 0
 

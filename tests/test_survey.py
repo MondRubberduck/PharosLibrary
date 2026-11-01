@@ -343,6 +343,18 @@ def test_engine_chains_run_only_on_the_maps_decisions():
             lm.update("Blend/Office", action="extract")
             rc, out = run(chains.extract, "--dry-run")
             assert "make_native_manifest2.py" in out and "promote_blends.py" in out, out
+            # a converted pack is not converted again; its recipes can be
+            # rewired without the engine export (--relink-only)
+            man = lib / "UE" / "RawPack" / "Exports" / "manifest.json"
+            man.parent.mkdir(parents=True, exist_ok=True)
+            man.write_text('{"schema": "pharos.pack.export/v2", "meshes": []}', encoding="utf-8")
+            rc, out = run(chains.convert, "--dry-run")
+            assert rc == 0 and "converted already" in out and "--relink-only" in out, out
+            rc, out = run(chains.convert, "--relink-only", "--dry-run")
+            assert rc == 0 and "relink_pack.sh" in out and "convert_packs.sh" not in out                 and "relinked 1 of 1" in out, out
+            man.unlink()
+            rc, out = run(chains.convert, "--relink-only", "--dry-run")
+            assert rc == 0 and "no approved pack with an Exports/manifest.json" in out, out
             rc, out = run(chains.previews, "--dry-run")
             assert rc == 2 and 'map set "Anim" action=previews' in out, out
             lm.update("Anim", action="previews")
@@ -508,6 +520,47 @@ def test_init_keeps_the_owners_previews_folder_for_the_same_library():
             assert cfg["previews_dir"] == str(Path(tmp) / "reg2" / "previews"), cfg["previews_dir"]
         finally:
             config._CONFIG_FILE = old_cf
+
+def test_survey_knows_the_kitbash_root_layout_and_show_marks_inherited():
+    """A KitBash3D kit whose .blend sits in the kit root (kb3d_*.blend,
+    kb3d_metadata.json, KB3DTextures/) is a kit like the .blender.native
+    layout; `map show` prints an inherited decision instead of PENDING and
+    `map set` echoes the state."""
+    import io
+    from contextlib import redirect_stdout
+    from asset_service import library_map as lm, survey
+    with tempfile.TemporaryDirectory() as tmp:
+        lib, restore = _map_env(tmp)
+        try:
+            root_kit = lib / "Kits" / "Beta"
+            (root_kit / "KB3DTextures" / "4k").mkdir(parents=True)
+            (root_kit / "kb3d_Beta.png.2k").mkdir()
+            (root_kit / "kb3d_Beta-native.blend").write_bytes(b"BLENDER-stub")
+            (root_kit / "kb3d_metadata.json").write_text("{}", encoding="utf-8")
+            meta_only = lib / "Kits" / "Gamma"
+            (meta_only / "KB3DTextures").mkdir(parents=True)
+            (meta_only / "gamma_kit.blend").write_bytes(b"BLENDER-stub")
+            (lib / "Blend" / "Loose").mkdir(parents=True)
+            (lib / "Blend" / "Loose" / "scene.blend").write_bytes(b"BLENDER-stub")
+            by = {n["folder"]: n for n in survey.survey(lib)["nodes"]}
+            assert (by["Kits/Beta"]["kind"], by["Kits/Beta"]["state"]) == ("blender", "kit"), by["Kits/Beta"]
+            assert (by["Kits/Gamma"]["kind"], by["Kits/Gamma"]["state"]) == ("blender", "kit"), by["Kits/Gamma"]
+            assert by["Blend/Loose"]["state"] != "kit", by["Blend/Loose"]
+            lm.refresh(lib)
+            lm.update("Kits", action="extract")
+
+            def cli(*argv):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = lm.run_map(list(argv))
+                return rc, buf.getvalue()
+            rc, out = cli("show")
+            beta = next(l for l in out.splitlines() if l.startswith("Kits/Beta"))
+            assert rc == 0 and "inherited" in beta and "PENDING" not in beta, beta
+            rc, out = cli("set", "Kits/Beta", "state=kit", "confirmed=yes")
+            assert rc == 0 and "state=kit" in out, out
+        finally:
+            restore()
 
 
 if __name__ == "__main__":
