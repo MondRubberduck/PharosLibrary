@@ -578,6 +578,19 @@ def test_kb3d_key_symmetry():
 
 
 
+def test_kb3d_root_layout_dead_path():
+    """A kit whose .blend sits in the kit root references
+    'KB3DTextures/4k/X.png' beside it, with no '.blender.native' folder:
+    the remap once skipped every such path and the whole kit rendered
+    untextured. Both layouts resolve to their kit folder."""
+    from asset_service.kb3d_paths import dead_texture_kit
+    kit, key = dead_texture_kit("C:/Lib/Kitbash/KB3DTextures/4k/KB3D_X_basecolor.png")
+    assert Path(kit) == Path("C:/Lib/Kitbash") and key == ""
+    kit, key = dead_texture_kit("E:/K/Apo/kb3d_Apocalypse.blender.native/KB3DTextures/4k/T.png")
+    assert Path(kit) == Path("E:/K/Apo") and key == "apocalypse"
+    assert dead_texture_kit("C:/Lib/Other/textures/T.png") == (None, "")
+
+
 
 def _native_copy(dest=None) -> Path:
     """A throwaway copy of pipeline/_config.py + pipeline/native/: the
@@ -2454,6 +2467,98 @@ def test_doctor_finds_unreal_through_the_launcher_manifest():
                 os.environ.pop("UE_EXE", None)
             else:
                 os.environ["UE_EXE"] = old
+
+def test_placed_bbox_follows_the_pivot_class():
+    """`placed_bbox` is the box as the builder places the model (pivot at
+    the position): known for base-centre and centre pivots, null
+    otherwise; `bbox_min/max` stay the file's own corners."""
+    from asset_service import browse
+    row = {"bbox_min_x": 4.92, "bbox_min_y": -1.0, "bbox_min_z": 0.0,
+           "bbox_max_x": 11.30, "bbox_max_y": 1.0, "bbox_max_z": 3.0}
+    assert browse._placed_bbox(row, "base-centre") == [[-3.19, -1.0, 0.0], [3.19, 1.0, 3.0]]
+    assert browse._placed_bbox(row, "centre") == [[-3.19, -1.0, -1.5], [3.19, 1.0, 1.5]]
+    assert browse._placed_bbox(row, "corner") is None and browse._placed_bbox(row, None) is None
+    assert browse._placed_bbox({"bbox_min_x": None}, "centre") is None
+    item = browse._mesh_extras({**row, "facts": json.dumps({"pivot": "base-centre"}), "recipe": {}, "meta": {}})
+    assert item["placed_bbox"][1] == [3.19, 1.0, 3.0] and item["bbox_min"] == [4.92, -1.0, 0.0]
+
+
+def test_builder_imports_once_merges_and_reports_missing_textures():
+    """With Blender: the same file twice is one import and a linked
+    duplicate (one mesh); images naming the same file and materials that
+    are the same material are merged; texture paths are saved absolute;
+    a named texture that is not on disk ends the build with exit 5 (the
+    .blend is still saved); without --save the build lands in the
+    library's _Agent_Files/builds/<scene>/. SKIP without Blender unless
+    PHAROS_REQUIRE_BLENDER=1."""
+    import tempfile
+    from asset_service import sheets
+    exe = _blender_for_checks()
+    if not exe:
+        assert os.environ.get("PHAROS_REQUIRE_BLENDER") != "1"
+        print("SKIP: no Blender on this machine -- builder checks not run")
+        return
+    builder = REPO / "service" / "asset_service" / "scene_builder.py"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        lib = tmp / "Lib"
+        (lib / "Props").mkdir(parents=True)
+        verts = [f"v {x} {y} {z}" for x in (-0.5, 0.5) for y in (0, 1) for z in (-0.5, 0.5)]
+        faces = ["f 1 2 4 3", "f 5 7 8 6", "f 1 3 7 5", "f 2 6 8 4", "f 1 5 6 2", "f 3 4 8 7"]
+        sheets.write_png(lib / "Props" / "crate.png", 2, 2, [b"\x80\x40\x20" * 2] * 2)
+        (lib / "Props" / "crate.mtl").write_text("newmtl Wood\nKd 0.8 0.8 0.8\nmap_Kd crate.png\n", encoding="utf-8")
+        (lib / "Props" / "crate.obj").write_text("mtllib crate.mtl\nusemtl Wood\n" + "\n".join(verts + faces) + "\n", encoding="utf-8")
+        (lib / "Props" / "ghost.mtl").write_text("newmtl Ghost\nmap_Kd not_there.png\n", encoding="utf-8")
+        (lib / "Props" / "ghost.obj").write_text("mtllib ghost.mtl\nusemtl Ghost\n" + "\n".join(verts + faces) + "\n", encoding="utf-8")
+        crate, ghost = str(lib / "Props" / "crate.obj"), str(lib / "Props" / "ghost.obj")
+        scene = {"schema": "pharos.scene/v1", "scene": "Dedup check", "units": "meters", "up_axis": "Y",
+                 "ground_y": 0.0,
+                 "assets": [{"id": "a", "fbx": crate, "position": [0, 0, 0], "snap_to_ground": True},
+                            {"id": "b", "fbx": crate, "position": [3, 0, 0], "snap_to_ground": True},
+                            {"id": "c", "fbx": crate, "position": [6, 0, 0], "rotation": [0, 1.57, 0]},
+                            {"id": "g", "fbx": ghost, "position": [0, 0, 4]}]}
+        man = tmp / "scene.json"
+        man.write_text(json.dumps(scene), encoding="utf-8")
+        cfg = tmp / "pharos_config.json"
+        cfg.write_text(json.dumps({"library_root": str(lib), "registry_dir": str(tmp / "reg"),
+                                   "sections": {}, "scan_folders": ["Props"]}), encoding="utf-8")
+        env = {**os.environ, "PHAROS_CONFIG": str(cfg)}
+        out_blend = tmp / "out.blend"
+        r = subprocess.run([exe, "--background", "--factory-startup", "--python", str(builder),
+                            "--", str(man), "--save", str(out_blend)],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           env=env, timeout=600)
+        log = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode == 5 and out_blend.is_file(), (r.returncode, log[-1200:])
+        assert "linked duplicate" in log and "BUILD WITH MISSING TEXTURES: 1" in log \
+            and "not_there.png" in log, log[-1500:]
+        probe = tmp / "probe.py"
+        probe.write_text(
+            "import bpy, json\n"
+            "meshes = [o for o in bpy.data.objects if o.type == 'MESH']\n"
+            "crates = [o for o in meshes if any(p.name.startswith(('a_root','b_root','c_root')) for p in [o.parent] if p)]\n"
+            "info = {'mesh_datablocks_crates': len({o.data.name for o in crates}), 'crate_objects': len(crates),\n"
+            "        'images': sorted((i.name, i.filepath) for i in bpy.data.images if i.users),\n"
+            "        'materials': sorted(m.name for m in bpy.data.materials if m.users),\n"
+            "        'roots': {o.name: [round(v, 2) for v in o.location] for o in bpy.data.objects if o.name.endswith('_root')}}\n"
+            "print('PROBE ' + json.dumps(info))\n", encoding="utf-8")
+        r2 = subprocess.run([exe, "--background", "--factory-startup", str(out_blend), "--python", str(probe)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        line = next(l for l in (r2.stdout or "").splitlines() if l.startswith("PROBE "))
+        info = json.loads(line[6:])
+        assert info["crate_objects"] == 3 and info["mesh_datablocks_crates"] == 1, info
+        crate_imgs = [fp for n, fp in info["images"] if "crate" in n.lower()]
+        assert len(crate_imgs) == 1 and not crate_imgs[0].startswith("//") \
+            and Path(crate_imgs[0]).is_file(), info["images"]
+        assert sum(1 for m in info["materials"] if m.startswith("Wood")) == 1, info["materials"]
+        assert info["roots"]["b_root"][0] == 3.0 and abs(info["roots"]["c_root"][0] - 6.0) < 0.01, info["roots"]
+        # the clean scene: exit 0, saved under the library's builds folder
+        scene["assets"] = scene["assets"][:3]
+        man.write_text(json.dumps(scene), encoding="utf-8")
+        r3 = subprocess.run([exe, "--background", "--factory-startup", "--python", str(builder), "--", str(man)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=600)
+        expected = lib / "_Agent_Files" / "builds" / "Dedup_check" / "Dedup_check.blend"
+        assert r3.returncode == 0 and expected.is_file(), (r3.returncode, ((r3.stdout or "") + (r3.stderr or ""))[-800:])
 
 
 if __name__ == "__main__":

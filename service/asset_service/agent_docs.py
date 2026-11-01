@@ -289,7 +289,7 @@ tokens, an answer stops at ~20k tokens and lists the rest in
 `recipe` (per-slot material wiring:
 `slots[].maps[]` with `role`/`file`/`channels`) · `hero_textures` (role →
 texture path; `{}` = unknown, NOT untextured) · `materials` (slot names) ·
-`bbox_min`/`bbox_max` (placement corners; where the origin sits) ·
+`bbox_min`/`bbox_max` (the file's own corners) · `placed_bbox` (the corners as the builder places the model: pivot at the position; null when the pivot class is not base-centre or centre) ·
 `vertices` · `format` · `view_url` (3D preview page).
 
 **Axes:** `bbox_m` = [x, y, z] metres, **Z-up** (height = `bbox_m[2]`, largest axis = what `min_dim`/`max_dim` filter); scene-manifest positions are Y-up.
@@ -491,8 +491,16 @@ triangles. Fix every error it prints before building. (PowerShell: put
     "{blender}" --background --factory-startup --python "{repo}/service/asset_service/scene_builder.py" -- scene.json --save scene.blend
 
 `--factory-startup` is required: add-ons can crash a headless Blender.
-The build ends with `BUILD INCOMPLETE` and a non-zero exit code when it
-had to skip an asset; the `ERROR` line above it says why.
+Without `--save` the build goes to `<library>/_Agent_Files/builds/<scene>/`,
+the one folder inside a read-only library an agent may write; put your
+manifests and renders there too. A key used several times is imported
+once (linked duplicates); images and materials are merged after the
+imports. Texture paths are saved absolute, so the `.blend` can move;
+`--pack` packs the textures into it instead. Exit codes: 3 = `BUILD
+INCOMPLETE`, an asset was skipped (the `ERROR` line above says why);
+5 = `BUILD WITH MISSING TEXTURES`, the `.blend` is saved but named
+image files are not on disk. For placement, `placed_bbox` of
+`/api/meshes/item` gives a model's corners in the builder's frame.
 
 ## 5. Verify it
 

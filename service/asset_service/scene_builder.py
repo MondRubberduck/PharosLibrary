@@ -14,7 +14,13 @@ Reads a validated scene manifest (pharos.scene/v1) and:
   3. Rebuilds materials from hero_textures with packed-channel support
      (Separate RGB → AO/Roughness/Metallic for ORM/RMA maps)
   4. Places crowd instances with staggered animation offsets
-  5. Saves the .blend file
+  5. Saves the .blend file (texture paths absolute, or packed with --pack)
+
+A key that appears several times is imported once: the later assets are
+linked duplicates (one mesh, one set of materials). After the imports the
+images that name the same file and the materials that are the same
+material are merged. A texture file that is missing after the build is
+reported loudly: the build still saves, and exits 5.
 
 The builder does NOT:
   - Modify any source files (read-only imports)
@@ -32,7 +38,7 @@ import mathutils
 from mathutils import Vector
 
 
-def build(manifest_path: str, save_path: str = None):
+def build(manifest_path: str, save_path: str = None, pack_textures: bool = False):
     """Main entry point. Call from Blender."""
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     # validate BEFORE building: agents author manifests, and a bad one
@@ -51,6 +57,7 @@ def build(manifest_path: str, save_path: str = None):
     for note in whole_file_notes(manifest):
         print(f"WARNING: {note}")
     _SKIPPED.clear()
+    _IMPORTED.clear()
     scene_name = manifest.get("scene", "Pharos Scene")
     ground_y = manifest.get("ground_y", 0.0)
 
@@ -79,6 +86,10 @@ def build(manifest_path: str, save_path: str = None):
     # kit-folder index (per-asset invocation was O(assets x images x
     # drive) and cost 45+ min on a real build)
     _remap_dead_kb3d_images()
+    # one datablock per image file and per material: every import brought
+    # its own copies (a street of 165 assets held 8,366 images and 2,052
+    # materials; Cycles uploads each datablock on its own)
+    _dedup_datablocks()
 
     # --- texture sets: ground planes AND/OR onto named assets ---
     if manifest.get("textures"):
@@ -107,12 +118,25 @@ def build(manifest_path: str, save_path: str = None):
     except Exception as exc:                              # noqa: BLE001
         print(f"  (orphan purge skipped: {exc})")
 
+    # a texture that is not on disk stays a 0x0 image and renders magenta
+    # or black; said once, loudly, with the files (a whole kit once rendered
+    # untextured without a word)
+    missing = _missing_textures()
+
     # --- save ---
     if not save_path:
-        save_path = Path(manifest_path).with_suffix(".blend")
-    bpy.ops.wm.save_as_mainfile(filepath=str(save_path))
-    print(f"\nSaved: {save_path}")
-    print(f"Objects in scene: {len(bpy.data.objects)}")
+        save_path = default_save_path(manifest_path, scene_name)
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    if pack_textures:
+        bpy.ops.file.pack_all()
+    # absolute texture paths: Blender's default rewrites them relative to
+    # the .blend, and a file moved out of the folder it was built in lost
+    # every texture (236 of 247 images missing on the first copy)
+    bpy.ops.wm.save_as_mainfile(filepath=str(save_path), relative_remap=False)
+    print(f"\nSaved: {save_path}" + (" (textures packed)" if pack_textures else ""))
+    print(f"Objects in scene: {len(bpy.data.objects)}; images: {len(bpy.data.images)}; "
+          f"materials: {len(bpy.data.materials)}; meshes: {len(bpy.data.meshes)}")
     sys.stdout.flush()
     if _SKIPPED:
         # a scene missing an asset must not look like a finished build
@@ -122,10 +146,103 @@ def build(manifest_path: str, save_path: str = None):
               f"{', '.join(skipped)} (see ERROR lines above)")
         sys.stdout.flush()
         sys.exit(3)
+    if missing:
+        print(f"BUILD WITH MISSING TEXTURES: {len(missing)} image file(s) not on disk "
+              f"(the .blend is saved; those surfaces render untextured): "
+              + ", ".join(missing[:8]) + (" ..." if len(missing) > 8 else ""))
+        sys.stdout.flush()
+        sys.exit(5)
     return save_path
 
 
 _SKIPPED = []       # asset ids the build could not place
+_IMPORTED = {}      # (file, object) -> the root of the first import of that key
+
+
+def default_save_path(manifest_path, scene_name: str) -> Path:
+    """Where a build goes when --save is not given: the library's own
+    output folder, <library>/_Agent_Files/builds/<scene>/<scene>.blend (the
+    one place inside a read-only library an agent may write), else next
+    to the manifest."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", scene_name or "scene").strip("._") or "scene"
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from asset_service import config as _cfg
+        root = _cfg.load().get("library_root")
+        if root and Path(root).is_dir():
+            return Path(root) / "_Agent_Files" / "builds" / slug / f"{slug}.blend"
+    except Exception:                                     # noqa: BLE001
+        pass
+    return Path(manifest_path).with_suffix(".blend")
+
+
+def _missing_textures() -> list:
+    """The image files the scene refers to that are not on disk."""
+    out = []
+    for img in bpy.data.images:
+        if not img.users or img.packed_file or img.source != 'FILE':
+            continue
+        src = bpy.path.abspath(img.filepath) if img.filepath else ""
+        if not src or not Path(src).is_file():
+            out.append(src or img.name)
+    if out:
+        print(f"  WARNING: {len(out)} texture file(s) missing (0x0 images): "
+              + ", ".join(Path(x).name for x in out[:6]) + (" ..." if len(out) > 6 else ""))
+    return out
+
+
+def _dedup_datablocks() -> None:
+    """Merge images that name the same file and materials that are the
+    same material (same name before Blender's .001 suffix, and the same
+    image files, or no images and the same base colour). Linked
+    duplicates already share meshes; this covers the copies that
+    separate imports of the same kit bring along."""
+    first: dict = {}
+    merged_img = 0
+    for img in list(bpy.data.images):
+        key = (bpy.path.abspath(img.filepath) if img.filepath else "").lower()
+        if not key or img.packed_file:
+            continue
+        if key in first:
+            img.user_remap(first[key])
+            merged_img += 1
+        else:
+            first[key] = img
+
+    def signature(mat):
+        imgs = set()
+        if mat.use_nodes and mat.node_tree:
+            for n in mat.node_tree.nodes:
+                if n.type == 'TEX_IMAGE' and n.image is not None:
+                    imgs.add((bpy.path.abspath(n.image.filepath) if n.image.filepath
+                              else n.image.name).lower())
+        if imgs:
+            return ("img", tuple(sorted(imgs)))
+        bsdf = next((n for n in (mat.node_tree.nodes if mat.use_nodes and mat.node_tree else [])
+                     if n.type == 'BSDF_PRINCIPLED'), None)
+        col = tuple(round(c, 3) for c in bsdf.inputs["Base Color"].default_value) if bsdf \
+            else tuple(round(c, 3) for c in mat.diffuse_color)
+        return ("col", col)
+
+    keep: dict = {}
+    merged_mat = 0
+    for mat in sorted(bpy.data.materials, key=lambda m: (re.sub(r"\.\d{3}$", "", m.name), m.name)):
+        base = re.sub(r"\.\d{3}$", "", mat.name)
+        key = (base, signature(mat))
+        if key in keep:
+            mat.user_remap(keep[key])
+            merged_mat += 1
+        else:
+            keep[key] = mat
+    if merged_img or merged_mat:
+        try:
+            bpy.data.orphans_purge(do_local_ids=True, do_linked_ids=False, do_recursive=True)
+        except Exception:                                 # noqa: BLE001
+            pass
+        print(f"  merged {merged_img} duplicate image(s) and {merged_mat} duplicate "
+              f"material(s); left: {len(bpy.data.images)} images, "
+              f"{len(bpy.data.materials)} materials")
 
 
 def _scene_objects():
@@ -213,6 +330,35 @@ def _import_asset(asset, ground_y, index, roots_by_id=None):
             if o.name == obj_name:
                 o.name = f"__pharos_parked_{index}_{len(parked)}"
                 parked.append(o)
+    # the same file and object again, with the same material block: a
+    # linked duplicate of the first import (one mesh, one set of materials;
+    # a building used four times was imported four times)
+    key = (str(fbx).replace("\\", "/").lower(), (obj_name or "").lower(),
+           json.dumps(asset.get("materials"), sort_keys=True, default=str))
+    cached = _IMPORTED.get(key)
+    if cached is not None and cached.name in bpy.data.objects:
+        for o in parked:
+            o.name = obj_name
+        bpy.ops.object.select_all(action='DESELECT')
+        for o in [cached] + list(cached.children_recursive):
+            o.select_set(True)
+        bpy.ops.object.duplicate(linked=True)
+        dup = [o for o in bpy.context.selected_objects if o.parent is None]
+        root = dup[0] if dup else None
+        if root is None:
+            print(f"    ERROR: {aid} skipped: could not duplicate {cached.name}")
+            _SKIPPED.append(aid)
+            return
+        root.name = f"{aid}_root"
+        root.location = (0.0, 0.0, 0.0)
+        root.rotation_euler = (0.0, 0.0, 0.0)
+        root.scale = (1.0, 1.0, 1.0)
+        print(f"    linked duplicate of {cached.name[:-5]} (same file, object and materials)")
+        _place_root(root, [root] + list(root.children_recursive), asset, ground_y)
+        if roots_by_id is not None:
+            roots_by_id[aid] = root
+        bpy.ops.object.select_all(action='DESELECT')
+        return
     imported = _import_file(fbx, obj_name)
     target = _pick_object(imported, obj_name) if obj_name else None
     for o in parked:
@@ -261,7 +407,40 @@ def _import_asset(asset, ground_y, index, roots_by_id=None):
         o.parent = root            # root sits at the origin: no jump
     imported.append(root)
     bpy.context.view_layer.update()
+    _IMPORTED[key] = root
+    _place_root(root, imported, asset, ground_y)
 
+    # rebuild material if recipe provided
+    mats = asset.get("materials")
+    if not isinstance(mats, dict):
+        mats = None             # "recipe" is resolved before the build
+    if mats:
+        if mats.get("slots"):
+            # per-slot recipes (API recipe.slots[]): one material per slot
+            # name, assigned in place -- a 33-slot KitBash building keeps
+            # its 33 materials instead of collapsing to one representative
+            # hero pick (V5 D8)
+            _apply_recipe_slots(root, mats["slots"], aid)
+        else:
+            _build_material(root, mats, aid)
+            multi = sum(len(m.data.materials) for m in _all_meshes(root))
+            if multi > 1:
+                print(f"    WARNING: hero recipe is representative "
+                      f"({multi} existing slots kept hero material only; "
+                      f"pass recipe 'slots[]' for per-slot wiring)")
+    else:
+        print(f"    (no material recipe -- placeholder materials remain)")
+
+    if roots_by_id is not None:
+        roots_by_id[aid] = root
+
+    # deselect for next import
+    bpy.ops.object.select_all(action='DESELECT')
+
+
+def _place_root(root, imported, asset, ground_y):
+    """Position, rotation, scale and ground snap of an asset's root empty
+    (the imported objects hang below it)."""
     # position: the manifest is Y-up ([x, y=height, z]); Blender is Z-up.
     # Same frame conversion the rotations get (Rx90 mapping y->z, z->-y):
     # applied VERBATIM, a manifest height of y=2 once floated the asset
@@ -319,33 +498,6 @@ def _import_asset(asset, ground_y, index, roots_by_id=None):
             offset = ground_y - world_min.z
             root.location.z += offset
             print(f"    snapped: +{offset:.3f} to ground (Z axis)")
-
-    # rebuild material if recipe provided
-    mats = asset.get("materials")
-    if not isinstance(mats, dict):
-        mats = None             # "recipe" is resolved before the build
-    if mats:
-        if mats.get("slots"):
-            # per-slot recipes (API recipe.slots[]): one material per slot
-            # name, assigned in place -- a 33-slot KitBash building keeps
-            # its 33 materials instead of collapsing to one representative
-            # hero pick (V5 D8)
-            _apply_recipe_slots(root, mats["slots"], aid)
-        else:
-            _build_material(root, mats, aid)
-            multi = sum(len(m.data.materials) for m in _all_meshes(root))
-            if multi > 1:
-                print(f"    WARNING: hero recipe is representative "
-                      f"({multi} existing slots kept hero material only; "
-                      f"pass recipe 'slots[]' for per-slot wiring)")
-    else:
-        print(f"    (no material recipe — placeholder materials remain)")
-
-    if roots_by_id is not None:
-        roots_by_id[aid] = root
-
-    # deselect for next import
-    bpy.ops.object.select_all(action='DESELECT')
 
 
 def _make_material(name, recipe):
@@ -511,8 +663,8 @@ def _remap_dead_kb3d_images():
     try:
         import sys as _sys
         _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from asset_service.kb3d_paths import (kit_key_from_native_dir,
-                                              kit_key_from_texture_dir)
+        from asset_service.kb3d_paths import (kit_key_from_texture_dir,
+                                              dead_texture_kit)
     except Exception:
         return    # cannot remap without the helpers; imports stay as-is
 
@@ -536,20 +688,18 @@ def _remap_dead_kb3d_images():
         if not src or Path(src).is_file():
             continue
         p = Path(src.replace("\\", "/"))
-        seg = next((i for i, anc in enumerate(p.parents)
-                    if anc.name.lower().startswith("kb3d_")
-                    and ".blender.native" in anc.name.lower()), None)
-        if seg is None:
+        kit_dir, kit = dead_texture_kit(p)
+        if kit_dir is None:
             continue
-        kit_dir = p.parents[seg + 1] if seg + 1 < len(p.parents) else None
-        raw_kit = p.parents[seg].name.split(".blender.native")[0]
-        kit = kit_key_from_native_dir(p.parents[seg].name)
+        kit_dir = Path(kit_dir)
         # the FBX records the library-of-origin path; when the library was
         # copied elsewhere that dir does not exist -> resolve from the cache
         candidates = []
-        if kit_dir is not None:
-            candidates.append(kit_dir / f"{raw_kit}.png.2k" / p.name)
-        for folder in kit_folders.get(kit, []):
+        if kit_dir.is_dir():
+            candidates += [f / p.name for f in sorted(kit_dir.glob("kb3d_*.png.2k"))
+                           if not kit or kit_key_from_texture_dir(f.name) == kit]
+        for folder in (kit_folders.get(kit, []) if kit
+                       else [f for fs in kit_folders.values() for f in fs]):
             candidates.append(folder / p.name)
         hit = next((c for c in candidates if c.is_file()), None)
         if hit is not None:
@@ -764,7 +914,7 @@ if __name__ == "__main__":
         save = None
         if "--save" in args:
             save = args[args.index("--save") + 1]
-        build(manifest, save)
+        build(manifest, save, pack_textures="--pack" in args)
     else:
         print("Usage: blender --background --python scene_builder.py -- "
-              "manifest.json [--save output.blend]")
+              "manifest.json [--save output.blend] [--pack]")

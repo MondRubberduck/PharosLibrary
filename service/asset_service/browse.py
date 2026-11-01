@@ -1529,17 +1529,43 @@ def _mesh_extras(r: dict) -> dict:
         if "packed" in hero and primary.get("packed_channels"):
             hero["packed_channels"] = primary["packed_channels"]
     meta = r.get("meta") or {}
+    try:
+        facts = json.loads(r.get("facts") or "{}") if isinstance(r.get("facts"), str) \
+            else (r.get("facts") or {})
+    except ValueError:
+        facts = {}
     return {
         "dim_suspect": bool((meta.get("facets") or {}).get("dim_suspect")),
         "recipe": recipe, "hero_textures": hero,
         "bbox_min": _bbox_triple(r, "bbox_min"),
-        "bbox_max": _bbox_triple(r, "bbox_max")}
+        "bbox_max": _bbox_triple(r, "bbox_max"),
+        "placed_bbox": _placed_bbox(r, facts.get("pivot"))}
 
 
 def _bbox_triple(r: dict, prefix: str):
     """[x, y, z] for bbox_min/bbox_max, or None if the manifest had no box."""
     vals = [r.get(f"{prefix}_{ax}") for ax in ("x", "y", "z")]
     return None if all(v is None for v in vals) else vals
+
+
+def _placed_bbox(r: dict, pivot) -> Optional[list]:
+    """[[min], [max]] in metres, Z-up, in the frame the scene builder
+    places the model in: its pivot at the asset position (a single-root
+    model is re-pivoted to the origin; a kit part does not keep its place
+    in the kit's layout). Known from the pivot class the measure saw:
+    base-centre (ground contact under the middle) and centre; None
+    otherwise, when `bbox_min`/`bbox_max` (the file's own frame) are all
+    there is."""
+    lo, hi = _bbox_triple(r, "bbox_min"), _bbox_triple(r, "bbox_max")
+    if not lo or not hi or any(v is None for v in lo + hi):
+        return None
+    size = [round(float(h) - float(l), 4) for l, h in zip(lo, hi)]
+    r4 = lambda v: round(v, 4)                                        # noqa: E731
+    if pivot == "base-centre":
+        return [[r4(-size[0] / 2), r4(-size[1] / 2), 0.0], [r4(size[0] / 2), r4(size[1] / 2), size[2]]]
+    if pivot == "centre":
+        return [[r4(-v / 2) for v in size], [r4(v / 2) for v in size]]
+    return None
 
 
 def _spread_packs(entries: list) -> None:
