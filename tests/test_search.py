@@ -2376,6 +2376,11 @@ def test_clips_api_serves_measured_facts_and_filters():
                           skeleton.family(bones) if bones else None, json.dumps(bones)))
         conn.execute("INSERT INTO clips (rel,folder,name,ext,bytes,bone_names,facts,measured_at) "
                      "VALUES ('Old/Stale/x.fbx','Old/Stale','x','.fbx',1,'[]','{}','t')")
+        # a character file the clip measure found in the section: a body,
+        # never a clip, named for the clips its skeleton plays
+        conn.execute("INSERT INTO clips (rel,folder,name,ext,bytes,frames,has_mesh,bones,bone_names,facts,measured_at,is_body) "
+                     "VALUES ('Animation/Actor/dummy.fbx','Animation/Actor','dummy','.fbx',1,1,1,3,?, '{}','t',1)",
+                     (json.dumps(["root", "hips", "spine"]),))
         conn.commit()
         conn.close()
         old_roots = list(browse.CANONICAL_ROOTS)
@@ -2389,7 +2394,8 @@ def test_clips_api_serves_measured_facts_and_filters():
             walks = next(f for f in tree["folders"] if f["folder"] == "Animation/Walks")
             sk = walks["skeletons"][0]
             assert sk["bones"] == 3 and sk["clips"] == 2 and sorted(sk["subfolders"]) == ["", "Sub"] \
-                and sk["bodies"] == ["Chars/body.fbx"], sk
+                and sk["bodies"] == ["Animation/Actor/dummy.fbx", "Chars/body.fbx"], sk
+            assert "Animation/Actor" not in {f["folder"] for f in tree["folders"]}, "a body folder is no clip pack"
             idles = next(f for f in tree["folders"] if f["folder"] == "Animation/Idles")
             assert idles["skeletons"][0]["family"] == "mixamo" and idles["skeletons"][0]["bodies"] == []
             got = browse.api_anim_clips({"q": ["walk"], "size": ["10"]})
@@ -2397,7 +2403,7 @@ def test_clips_api_serves_measured_facts_and_filters():
             fwd = next(c for c in got["clips"] if c["title"] == "walk fwd")
             assert fwd["duration_s"] == 1.2 and fwd["fps"] == 30.0 and fwd["frames"] == 36 \
                 and fwd["root_motion"] is True and fwd["bones"] == 3, fwd
-            assert got["bodies"]["pack::Animation/Walks"][0]["bodies"] == ["Chars/body.fbx"]
+            assert got["bodies"]["pack::Animation/Walks"][0]["bodies"] == ["Animation/Actor/dummy.fbx", "Chars/body.fbx"]
             titles = lambda **kw: sorted(c["title"] for c in browse.api_anim_clips(   # noqa: E731
                 {k: [v] for k, v in kw.items()})["clips"])
             assert titles(min_dur="1", max_dur="5") == ["walk fwd"]

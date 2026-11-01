@@ -2143,7 +2143,13 @@ def test_clips_and_folders_tables_from_measured_records():
         (anim / "Walks" / "body.fbx").write_bytes(F.fbx_bytes([F.global_settings(), F.objects(
             F.box_mesh(), F.model(1, "Body", "Mesh"), F.model(2, "root", "Root"), F.deformer(20))]))
         # a rig under the section that carries a stack: the map calls its
-        # folder 3d-assets, so it is no clip
+        # folder 3d-assets, so it is no clip; a character file (mesh +
+        # rig, one-frame take) anywhere in the section is a BODY row
+        (anim / "Walks" / "hero_body.fbx").write_bytes(F.fbx_bytes([F.global_settings(), F.objects(
+            F.box_mesh(), F.model(1, "Body", "Mesh"), F.model(2, "root", "Root"),
+            F.model(3, "hips", "LimbNode"), F.deformer(20),
+            F.anim_stack(30, "0_T-Pose", 1.0 / 30), F.curve_node(40, "T"), F.curve(41, [0], [0.0])),
+            F.connections([(40, 2, "Lcl Translation"), (41, 40, "d|X")])]))
         (anim / "Rig").mkdir()
         (anim / "Rig" / "dummy.fbx").write_bytes(F.fbx_bytes([F.global_settings(), F.objects(
             F.box_mesh(), F.model(1, "Body", "Mesh"), F.model(2, "root", "Root"),
@@ -2164,12 +2170,17 @@ def test_clips_and_folders_tables_from_measured_records():
         conn = None
         try:
             n, st = clips_import.write_clips(reg, root, anim)
-            assert n == 3 and st["errors"] == 0, (n, st)
+            assert st["errors"] == 0, st
             conn = sqlite3.connect(reg)
             conn.row_factory = sqlite3.Row
-            rows = {r["rel"]: dict(r) for r in conn.execute("SELECT * FROM clips")}
+            rows = {r["rel"]: dict(r) for r in conn.execute("SELECT * FROM clips WHERE COALESCE(is_body,0)=0")}
             assert set(rows) == {"Animation/Walks/walk_01.fbx", "Animation/Walks/Sub/walk_02.fbx",
                                  "Animation/loose.bvh"}, sorted(rows)
+            bodies = {r["rel"]: dict(r) for r in conn.execute("SELECT * FROM clips WHERE is_body=1")}
+            assert set(bodies) == {"Animation/Walks/body.fbx", "Animation/Walks/hero_body.fbx"}, sorted(bodies)
+            assert json.loads(bodies["Animation/Walks/hero_body.fbx"]["bone_names"]) == ["root", "hips"]
+            from asset_service import db as _db
+            assert _db.anim_clip_count(conn, "Animation") == 3, "bodies are not clips"
             w = rows["Animation/Walks/walk_01.fbx"]
             assert w["folder"] == "Animation/Walks" and w["duration_s"] == 1.0 and w["fps"] == 30.0 \
                 and w["root_motion"] == 1 and w["bones"] == 3 and w["family"] == "unknown" \
@@ -2210,7 +2221,7 @@ def test_clips_and_folders_tables_from_measured_records():
                 and one["facts"]["effective_action"] == ""
             # a second write replaces, never duplicates
             n, _ = clips_import.write_clips(reg, root, anim)
-            assert conn.execute("SELECT COUNT(*) FROM clips").fetchone()[0] == 3
+            assert conn.execute("SELECT COUNT(*) FROM clips WHERE COALESCE(is_body,0)=0").fetchone()[0] == 3
         finally:
             if conn is not None:
                 conn.close()
@@ -2559,6 +2570,162 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
                             capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=600)
         expected = lib / "_Agent_Files" / "builds" / "Dedup_check" / "Dedup_check.blend"
         assert r3.returncode == 0 and expected.is_file(), (r3.returncode, ((r3.stdout or "") + (r3.stderr or ""))[-800:])
+
+def test_crowd_takes_the_armature_the_clip_and_the_given_places():
+    """With Blender: a crowd of three from a rigged body (mesh + armature,
+    a one-frame T-pose take, a stray empty) and a 30-frame clip: the
+    armature is the root (not the stray), every instance plays the clip's
+    take, instances stand where `instances` says with their heading, and
+    a mesh whose frame differs from its armature's is re-bound into
+    armature space and stands up. SKIP without Blender unless
+    PHAROS_REQUIRE_BLENDER=1."""
+    import tempfile
+    exe = _blender_for_checks()
+    if not exe:
+        assert os.environ.get("PHAROS_REQUIRE_BLENDER") != "1"
+        print("SKIP: no Blender on this machine -- crowd checks not run")
+        return
+    builder = REPO / "service" / "asset_service" / "scene_builder.py"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        # the body and the clip are made in Blender itself (an armature with
+        # two bones, a skinned column, a T-pose take; a walk take of 30 frames)
+        mk = tmp / "make.py"
+        mk.write_text(
+            "import bpy, sys, math\n"
+            "out = sys.argv[sys.argv.index('--') + 1]\n"
+            "bpy.ops.wm.read_factory_settings(use_empty=True)\n"
+            "arm = bpy.data.armatures.new('Rig'); A = bpy.data.objects.new('Armature', arm)\n"
+            "bpy.context.scene.collection.objects.link(A); bpy.context.view_layer.objects.active = A\n"
+            "bpy.ops.object.mode_set(mode='EDIT')\n"
+            "b1 = arm.edit_bones.new('hips'); b1.head = (0, 0, 0); b1.tail = (0, 0, 0.9)\n"
+            "b2 = arm.edit_bones.new('spine'); b2.head = (0, 0, 0.9); b2.tail = (0, 0, 1.8); b2.parent = b1\n"
+            "bpy.ops.object.mode_set(mode='OBJECT')\n"
+            "bpy.ops.mesh.primitive_cylinder_add(radius=0.2, depth=1.8, location=(0, 0, 0.9))\n"
+            "M = bpy.context.active_object; M.name = 'Body'\n"
+            "M.parent = A; mod = M.modifiers.new('Armature', 'ARMATURE'); mod.object = A\n"
+            "g = M.vertex_groups.new(name='hips'); g.add(range(len(M.data.vertices)), 1.0, 'REPLACE')\n"
+            "E = bpy.data.objects.new('CC_Game_Tongue', None); bpy.context.scene.collection.objects.link(E)\n"
+            "if 'body' in out:\n"
+            "    # the body's take: one frame\n"
+            "    A.animation_data_create(); act = bpy.data.actions.new('0_T-Pose'); A.animation_data.action = act\n"
+            "    A.keyframe_insert('location', frame=1)\n"
+            "else:\n"
+            "    A.animation_data_create(); act = bpy.data.actions.new('walk'); A.animation_data.action = act\n"
+            "    pb = A.pose.bones['spine']\n"
+            "    for f, r in ((1, 0.0), (15, 0.6), (30, 0.0)):\n"
+            "        pb.rotation_quaternion = (math.cos(r/2), math.sin(r/2), 0, 0); pb.keyframe_insert('rotation_quaternion', frame=f)\n"
+            "    bpy.context.scene.frame_end = 30\n"
+            "bpy.ops.object.select_all(action='SELECT')\n"
+            "bpy.context.scene.frame_start = 1; bpy.context.scene.frame_end = 30 if 'walk' in out else 1\n"
+            "# one take per action (the body: its one-frame T-pose; the clip: the walk)\n"
+            "bpy.ops.export_scene.fbx(filepath=out, use_selection=True, add_leaf_bones=False, bake_anim=True,\n"
+            "                          bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False,\n"
+            "                          bake_anim_force_startend_keying=False)\n", encoding="utf-8")
+        for name in ("body.fbx", "walk.fbx"):
+            r = subprocess.run([exe, "--background", "--factory-startup", "--python", str(mk), "--", str(tmp / name)],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+            assert (tmp / name).is_file(), (name, ((r.stdout or "") + (r.stderr or ""))[-600:])
+        scene = {"schema": "pharos.scene/v1", "scene": "Crowd check", "units": "meters", "up_axis": "Y",
+                 "ground_y": 0.0, "assets": [],
+                 "crowd": [{"body_fbx": str(tmp / "body.fbx"), "animation_fbx": str(tmp / "walk.fbx"),
+                            "instances": [{"position": [0, 0, 0], "heading": 0},
+                                          {"position": [2, 0, 1], "heading": 90},
+                                          {"position": [-2, 0, 3], "heading": 180}],
+                            "animation_offset": 0.5}]}
+        man = tmp / "crowd.json"
+        man.write_text(json.dumps(scene), encoding="utf-8")
+        out = tmp / "crowd.blend"
+        r = subprocess.run([exe, "--background", "--factory-startup", "--python", str(builder), "--", str(man),
+                            "--save", str(out)], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=600)
+        log = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode == 0 and out.is_file(), (r.returncode, log[-1200:])
+        probe = tmp / "probe.py"
+        probe.write_text(
+            "import bpy, json, math\n"
+            "arms = [o for o in bpy.data.objects if o.type == 'ARMATURE']\n"
+            "info = {'armatures': len(arms), 'empties_loose': [o.name for o in bpy.data.objects if o.type == 'EMPTY' and o.parent is None],\n"
+            "        'actions': sorted({(a.animation_data.action.name.split('_+')[0], round(a.animation_data.action.frame_range[1] - a.animation_data.action.frame_range[0])) for a in arms if a.animation_data and a.animation_data.action}),\n"
+            "        'places': sorted([round(a.matrix_world.translation.x, 2), round(a.matrix_world.translation.y, 2), round(math.degrees(a.rotation_euler.z)) % 360] for a in arms),\n"
+            "        'meshes_parented': all(o.parent is not None and o.parent.type == 'ARMATURE' for o in bpy.data.objects if o.type == 'MESH')}\n"
+            "print('PROBE ' + json.dumps(info))\n", encoding="utf-8")
+        r2 = subprocess.run([exe, "--background", "--factory-startup", str(out), "--python", str(probe)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        line = next(l for l in (r2.stdout or "").splitlines() if l.startswith("PROBE "))
+        info = json.loads(line[6:])
+        assert info["armatures"] == 3 and info["empties_loose"] == [], info
+        assert info["actions"] and all("walk" in n and "T-Pose" not in n and fr >= 28 for n, fr in info["actions"]), info["actions"]
+        assert info["places"] == [[-2.0, -3.0, 180], [0.0, 0.0, 0], [2.0, -1.0, 90]], info["places"]
+        assert info["meshes_parented"], info
+    # the re-bind itself, on a mesh whose frame differs from its armature's
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        chk = tmp / "rebind.py"
+        chk.write_text(
+            "import bpy, sys, math, json\n"
+            "sys.path.insert(0, r'" + str(REPO / "service" / "asset_service").replace("\\", "/") + "')\n"
+            "import scene_builder as sb\n"
+            "bpy.ops.wm.read_factory_settings(use_empty=True)\n"
+            "arm = bpy.data.armatures.new('Rig'); A = bpy.data.objects.new('Armature', arm)\n"
+            "bpy.context.scene.collection.objects.link(A)\n"
+            "A.rotation_euler = (math.radians(90), 0, 0); A.scale = (0.01, 0.01, 0.01)\n"
+            "bpy.ops.mesh.primitive_cylinder_add(radius=20, depth=180, location=(0, 0, 90))\n"
+            "M = bpy.context.active_object; M.modifiers.new('Armature', 'ARMATURE').object = A\n"
+            "M.rotation_euler = (0, 0, 0); M.scale = (1, 1, 1)   # metres, Z-up: another frame than the armature's\n"
+            "n = sb._rebind_skin(A, [M])\n"
+            "bpy.context.view_layer.update()\n"
+            "vs = [v.co for v in M.data.vertices]\n"
+            "ext = [round(max(v[k] for v in vs) - min(v[k] for v in vs), 1) for k in range(3)]\n"
+            "print('PROBE ' + json.dumps({'n': n, 'parent': M.parent.name if M.parent else None,\n"
+            "    'identity': sb._is_identity(M.matrix_basis), 'ext': ext}))\n", encoding="utf-8")
+        r3 = subprocess.run([exe, "--background", "--factory-startup", "--python", str(chk)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        line = next(l for l in (r3.stdout or "").splitlines() if l.startswith("PROBE "))
+        info = json.loads(line[6:])
+        assert info["n"] == 1 and info["parent"] == "Armature" and info["identity"], info
+        assert info["ext"][2] > info["ext"][0] and info["ext"][2] > info["ext"][1], ("height along Z", info)
+
+def test_verifier_warns_when_the_fbx_holds_more_geometry_than_the_manifest():
+    """A manifest that counts the engine's render mesh while the FBX holds
+    the Nanite source (8,514 vs 4,754,752 once): the verifier compares the
+    largest files' triangle counts and warns, advisory only (PASS stays
+    PASS); the status carries the count as a gap."""
+    F = _fbxfix()
+    with tempfile.TemporaryDirectory() as tmp:
+        exports = Path(tmp) / "NanPack" / "Exports"
+        (exports / "FBX").mkdir(parents=True)
+        cube = F.fbx_bytes([F.global_settings(), F.objects(F.box_mesh(), F.model(1, "Cube", "Mesh")),
+                            F.connections([(1000, 1)]) if hasattr(F, "connections") else F.objects()])
+        (exports / "FBX" / "a.fbx").write_bytes(cube)       # 12 triangles on disk
+        (exports / "FBX" / "b.fbx").write_bytes(cube)
+        man = {"schema": "pharos.pack.export/v2", "pack": "NanPack",
+               "meshes": [{"name": "a", "kind": "StaticMesh", "fbx": "FBX/a.fbx", "dimension_method": "engine",
+                           "triangles": 1, "vertices": 8, "bbox_m": [1.0, 1.0, 1.0], "materials": []},
+                          {"name": "b", "kind": "StaticMesh", "fbx": "FBX/b.fbx", "dimension_method": "engine",
+                           "triangles": 12, "vertices": 8, "bbox_m": [1.0, 1.0, 1.0], "materials": []}],
+               "textures": [], "counts": {"static_mesh": 2, "skeletal_mesh": 0, "fbx_written": 2,
+                                          "texture_files_written": 0, "failures": 0},
+               "wiring": {"method": "ue-param", "slots_total": 0, "slots_resolved": 0, "slots_unresolved": 0}}
+        (exports / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
+        out_json = Path(tmp) / "verify.json"
+        r = subprocess.run([sys.executable, "-B", str(REPO / "pipeline" / "conversion" / "verify_pack_export.py"),
+                            str(exports), "--json", str(out_json)], capture_output=True, text=True,
+                           cwd=str(REPO), timeout=120)
+        v = json.loads(out_json.read_text(encoding="utf-8"))
+        assert r.returncode == 0 and v["result"] == "PASS", (r.returncode, (r.stdout or "")[-400:])
+        gm = v.get("geometry_mismatch") or []
+        assert [g["name"] for g in gm] == ["a"] and gm[0]["fbx_triangles"] == 12 and gm[0]["manifest_triangles"] == 1, gm
+        assert any("GEOMETRY differs" in w for w in v["warnings"]), v["warnings"]
+        # the status folds it into the gaps
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pack_status", str(REPO / "pipeline" / "conversion" / "pack_status.py"))
+        ps = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ps)
+        st_p = Path(tmp) / "status.json"
+        ps.main([str(exports / "manifest.json"), str(out_json), str(st_p), str(Path(tmp) / "log"), "NanPack", "l", "0", "1", "0"])
+        st = json.loads(st_p.read_text(encoding="utf-8"))
+        assert st["status"] == "PASS" and st["gaps"]["geometry_differs"] == 1, st["gaps"]
 
 
 if __name__ == "__main__":

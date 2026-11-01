@@ -59,7 +59,10 @@ def main(argv) -> int:
         # non-mesh steps that failed; the pack is usable without them
         "gaps": {"textures_failed": len(tex_fail), "other_failures": len(other),
                  "meshes_failed": len(mesh_fail),
-                 "textures": [f.get("asset") for f in tex_fail][:100]},
+                 "textures": [f.get("asset") for f in tex_fail][:100],
+                 # meshes whose FBX holds far more geometry than the manifest
+                 # says (Nanite source): the verifier's advisory
+                 "geometry_differs": len(v.get("geometry_mismatch") or [])},
     }
     json.dump(st, open(st_p, "w", encoding="utf-8"), indent=1)
     line = ("%s  %-52s %-4s  sm=%-5s skm=%-3s tex=%-5s cube=%-3s fbx=%-5s tfiles=%-5s "
@@ -72,9 +75,11 @@ def main(argv) -> int:
     with open(log_p, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
     print(line)
-    if status == "PASS" and (tex_fail or other):
+    geo = len(v.get("geometry_mismatch") or [])
+    if status == "PASS" and (tex_fail or other or geo):
         print("PASS with gaps: %d texture(s) the engine could not export, %d other step(s) "
-              "failed -- listed under 'gaps' in %s" % (len(tex_fail), len(other), st_p))
+              "failed, %d mesh(es) whose FBX holds more geometry than the manifest says "
+              "-- listed under 'gaps' in %s" % (len(tex_fail), len(other), geo, st_p))
     return 0
 
 

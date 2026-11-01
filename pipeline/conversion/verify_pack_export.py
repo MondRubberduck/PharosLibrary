@@ -56,6 +56,7 @@ SCHEMAS = ("pharos.pack.export/v1", "pharos.pack.export/v2",
 # shouting about (advisory only -- see the module docstring, point 10).
 SCHEMA_V2 = ("pharos.pack.export/v2", "kiosk.pack.export/v2")
 DEGRADED_RATIO = 0.9
+GEOMETRY_SAMPLE = 40       # the largest FBX files compared with the manifest's counts
 
 # The role vocabulary is a contract with the app (TASKS_autocoder_2026-09-16.md).
 # `packed` was added for multi-channel ORM/RMA-style textures, which carry several
@@ -191,7 +192,9 @@ def main():
     m_stat = {"count": len(meshes), "fbx_missing": 0, "fbx_bad_header": 0,
               "null_metrics": 0, "zero_face": 0, "zero_volume": 0,
               "with_materials": 0, "texture_links": 0, "texture_links_null": 0,
-              "null_reasons": {}, "slots": 0, "roles": {}, "bad_roles": 0}
+              "null_reasons": {}, "slots": 0, "roles": {}, "bad_roles": 0,
+              "geometry_differs": 0}
+    counted = []          # (file size, path, record): the manifest's count vs the FBX
     for rec in meshes:
         rel = rec.get("fbx")
         if not rel:
@@ -229,6 +232,11 @@ def main():
             m_stat["zero_volume"] += 1
         if rec.get("triangles") == 0:
             m_stat["zero_face"] += 1
+        if isinstance(rec.get("triangles"), int) and rec["triangles"] > 0 and os.path.isfile(p):
+            try:
+                counted.append((os.path.getsize(p), p, rec))
+            except OSError:
+                pass
         mats = rec.get("materials") or []
         if mats:
             m_stat["with_materials"] += 1
@@ -353,6 +361,32 @@ def main():
         for k in ("pack", "counts", "meshes", "textures"):
             if k not in m:
                 problems.append("v2 manifest lost the v1 field %r" % k)
+
+    # ---------- geometry the manifest did not count (ADVISORY) ----------
+    # the engine reports the render mesh's triangles; the FBX can hold the
+    # Nanite SOURCE geometry (one manifest said 8,514, the file held
+    # 4,754,752 in 419 MB). The largest files are read and compared; the
+    # registry re-measures every file anyway, so answers are right -- the
+    # manifest's reader is warned here.
+    R["geometry_mismatch"] = []
+    for _size, p, rec in sorted(counted, key=lambda t: -t[0])[:GEOMETRY_SAMPLE]:
+        got = fbx_count(p, "triangles")
+        if not got:
+            continue
+        said = rec["triangles"]
+        if got >= 1.5 * said and got - said >= 10:
+            m_stat["geometry_differs"] += 1
+            R["geometry_mismatch"].append({"name": rec.get("name"), "fbx": rec.get("fbx"),
+                                           "manifest_triangles": said, "fbx_triangles": got})
+    if R["geometry_mismatch"]:
+        worst = max(R["geometry_mismatch"], key=lambda g: g["fbx_triangles"])
+        warnings.append("GEOMETRY differs from the manifest in %d of the %d largest FBX "
+                        "(e.g. %s: manifest %s triangles, file %s; Nanite source geometry "
+                        "was exported) -- PASS/FAIL is unaffected; the registry measures "
+                        "the files themselves"
+                        % (len(R["geometry_mismatch"]), min(len(counted), GEOMETRY_SAMPLE),
+                           worst.get("name"), format(worst["manifest_triangles"], ","),
+                           format(worst["fbx_triangles"], ",")))
 
     # ---------- degraded wiring (ADVISORY, never pass/fail) ----------
     # Several packs sit legitimately below the 0.9 target for reasons that are not

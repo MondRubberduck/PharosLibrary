@@ -318,10 +318,15 @@ def anim_clip_count(conn: sqlite3.Connection, section: Optional[str],
     sql = ("SELECT COUNT(DISTINCT folder) FROM clips" if packs
            else "SELECT COUNT(*) FROM clips")
     try:
-        return conn.execute(sql + " WHERE folder = ? OR substr(folder, 1, ?) = ?",
+        return conn.execute(sql + " WHERE (folder = ? OR substr(folder, 1, ?) = ?) "
+                            "AND COALESCE(is_body, 0) = 0",
                             (sec, len(sec) + 1, sec + "/")).fetchone()[0]
     except sqlite3.OperationalError:
-        return 0
+        try:                                   # a table from before 1.0
+            return conn.execute(sql + " WHERE folder = ? OR substr(folder, 1, ?) = ?",
+                                (sec, len(sec) + 1, sec + "/")).fetchone()[0]
+        except sqlite3.OperationalError:
+            return 0
 
 
 if __name__ == "__main__":

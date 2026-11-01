@@ -289,7 +289,7 @@ def test_library_map_holds_kinds_decisions_and_tags():
                                        "audio": "Audio", "collection": "Purchases"}, cfg["sections"]
             assert set(cfg["scan_folders"]) >= {"Store", "Clothes"} \
                 and "Blend" not in cfg["scan_folders"], cfg["scan_folders"]
-            assert cfg["manifest_roots"] == [str(lib / "UE")], cfg["manifest_roots"]
+            assert str(lib / "UE") in cfg["manifest_roots"] and str(lib / "Kits") in cfg["manifest_roots"], cfg["manifest_roots"]
             assert cfg["kitbash_root"] == str(lib / "Kits"), cfg.get("kitbash_root")
             assert {"Purchases", "Downloads", "Tools"} <= set(cfg["indexer_skip_dirs"]), cfg["indexer_skip_dirs"]
             assert cfg["collection_csv"] == "orders.csv"
@@ -418,6 +418,10 @@ def test_the_review_cases_of_the_map():
                 and row["tags"] == ["crates"], row
             lm.apply_to_config(lm.load(), cfg, lib)
             assert str(lib / "UE") in cfg["manifest_roots"], cfg["manifest_roots"]
+            # the kits' parent is a manifest root too (the importer reads
+            # kit manifests from the same roots), and the kits' texture
+            # folders are scanned as texture sets
+            assert str(lib / "Kits") in cfg["manifest_roots"], cfg["manifest_roots"]
             # the converted pack's Exports folder joins the scan list (its
             # exported FBX get measured; the importer parks those rows)
             assert "UE/RawPack/Exports" in cfg["scan_folders"], cfg["scan_folders"]
@@ -559,6 +563,10 @@ def test_survey_knows_the_kitbash_root_layout_and_show_marks_inherited():
             assert rc == 0 and "inherited" in beta and "PENDING" not in beta, beta
             rc, out = cli("set", "Kits/Beta", "state=kit", "confirmed=yes")
             assert rc == 0 and "state=kit" in out, out
+            cfg = {"library_root": str(lib), "sections": {}}
+            lm.apply_to_config(lm.load(), cfg, lib)
+            assert "Kits/Beta/kb3d_Beta.png.2k" in cfg["scan_folders"], cfg["scan_folders"]
+            assert str(lib / "Kits") in cfg["manifest_roots"], cfg["manifest_roots"]
         finally:
             restore()
 

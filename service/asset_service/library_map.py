@@ -522,10 +522,27 @@ def apply_to_config(rows: dict, cfg: dict, root=None, weights=None) -> dict:
             continue
         if (root / r["folder"] / "Exports").is_dir():
             scan.append(f"{r['folder']}/Exports")
+    # a KitBash3D kit ships its PBR texture sets in kb3d_<kit>.png.<res>
+    # folders beside the .blend: scanned, they are texture sets like any
+    # other (64 sets per kit that the texture search never listed)
+    for r in sorted(rows.values(), key=lambda r: r["folder"].lower()):
+        if r["kind"] == "blender" and r["state"] in ("kit", "kit-exported") and included(r, rows):
+            for d in sorted((root / r["folder"]).glob("kb3d_*.png.*")):
+                rel = f"{r['folder']}/{d.name}"
+                if d.is_dir() and rel not in scan:
+                    scan.append(rel)
     cfg["scan_folders"] = scan
     roots = []
     for r in rows.values():
         if r["kind"] == "unreal" and r["state"] == "converted" and included(r, rows):
+            parent = (root / r["folder"]).parent
+            if str(parent) not in roots:
+                roots.append(str(parent))
+    # the importer reads kit manifests from the same roots: without the
+    # kits' parent here every KitBash assembly came back without a recipe
+    # (wired: false on 1,041 rows of a library whose kits were exported)
+    for r in rows.values():
+        if r["kind"] == "blender" and r["state"] in ("kit", "kit-exported") and included(r, rows):
             parent = (root / r["folder"]).parent
             if str(parent) not in roots:
                 roots.append(str(parent))

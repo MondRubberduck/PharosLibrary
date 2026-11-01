@@ -784,39 +784,93 @@ def _apply_texture_sets(manifest, ground_y, roots_by_id):
                   f"[{sorted(recipe.keys())}] -> {'; '.join(applied)}")
 
 
+def _is_identity(m, tol=1e-4) -> bool:
+    return all(abs(m[r][c] - (1.0 if r == c else 0.0)) <= tol for r in range(4) for c in range(4))
+
+
+def _rebind_skin(arm, meshes) -> int:
+    """A skinned body whose meshes sit in another frame than their armature
+    (Character Creator exports: the skin in a Y-up metre frame, the
+    armature and every clip Z-up in centimetres) tears apart in any pose.
+    Bake each such mesh into armature space, parent it there, and stand it
+    up when its height still runs along Y. Returns how many were re-bound."""
+    from mathutils import Matrix
+    bpy.context.view_layer.update()
+    fixed = 0
+    for me in meshes:
+        if me.type != 'MESH' or not any(m.type == 'ARMATURE' for m in me.modifiers):
+            continue
+        rel = arm.matrix_world.inverted() @ me.matrix_world
+        if _is_identity(rel):
+            continue
+        me.data.transform(rel)
+        me.parent = arm
+        me.matrix_parent_inverse = Matrix.Identity(4)
+        me.matrix_basis = Matrix.Identity(4)
+        vs = [v.co for v in me.data.vertices]
+        if vs:
+            ext = [max(v[k] for v in vs) - min(v[k] for v in vs) for k in range(3)]
+            if ext[1] > 1.5 * ext[2] and ext[1] >= ext[0]:          # height along Y
+                top = max(v.y for v in vs)
+                ang = math.radians(90.0) if abs(top) >= abs(min(v.y for v in vs)) else math.radians(-90.0)
+                me.data.transform(Matrix.Rotation(ang, 4, 'X'))
+        fixed += 1
+    if fixed:
+        print(f"    re-bound {fixed} skinned mesh(es) into armature space")
+    return fixed
+
+
 def _build_crowd(group, ground_y):
-    """Import a body + animation, duplicate with spacing."""
+    """Import a body + animation; place instances (a ring around the
+    position, or the given `instances` with position and heading); every
+    instance plays the clip's own take, staggered per instance."""
     body_fbx = group["body_fbx"]
     anim_fbx = group["animation_fbx"]
-    count = group.get("count", 1)
+    instances = group.get("instances") or []
+    count = len(instances) if instances else group.get("count", 1)
     spacing = group.get("spacing", 2.0)
     base_pos = group.get("position", [0, 0, 0])
     anim_offset = group.get("animation_offset", 0.0)
 
-    print(f"  [crowd] {count} instances, spacing {spacing}m")
+    print(f"  [crowd] {count} instances" + (f", spacing {spacing}m" if not instances else ", placed one by one"))
     sys.stdout.flush()
 
-    # import the body once
+    before_objs = _scene_objects()
+    before_actions = set(bpy.data.actions)
     bpy.ops.import_scene.fbx(filepath=body_fbx, global_scale=1.0)
-    body_objs = bpy.context.selected_objects
+    body_objs = [o for o in bpy.context.scene.objects if o not in before_objs]
     if not body_objs:
         print(f"    WARNING: body import failed: {body_fbx}")
         return
-    # the hierarchy root: instances duplicate everything below it
-    body_root = next((o for o in body_objs if o.parent is None), body_objs[0])
+    # the hierarchy root is the armature (or the parentless object with the
+    # most below it): the first parentless object once was a stray empty,
+    # so no instance was placed and the body lay at the origin
+    arms = [o for o in body_objs if o.type == 'ARMATURE']
+    body_root = arms[0] if arms else max((o for o in body_objs if o.parent is None),
+                                         key=lambda o: len(o.children_recursive), default=body_objs[0])
+    while body_root.parent is not None and body_root.parent in body_objs:
+        body_root = body_root.parent
+    family = [body_root] + list(body_root.children_recursive)
+    for o in body_objs:                 # loose empties of the import: not the body
+        if o.parent is None and o is not body_root and o.type == 'EMPTY' and not o.children:
+            bpy.data.objects.remove(o, do_unlink=True)
+    body_arm = body_root if body_root.type == 'ARMATURE' else next(
+        (o for o in family if o.type == 'ARMATURE'), None)
+    if body_arm is not None:
+        _rebind_skin(body_arm, [o for o in family if o.type == 'MESH'])
 
-    # import the animation, take its action, then DELETE the animation
-    # import's own objects -- otherwise a ghost armature stays parked at
-    # the origin (V5 D6: 5-instance crowd produced 6 armatures)
+    # the animation: the clip's own take, read as the actions this import
+    # added (the body's 1-frame T-pose take is never it); then DELETE the
+    # animation import's own objects -- otherwise a ghost armature stays
+    # parked at the origin (V5 D6: 5-instance crowd produced 6 armatures)
     bpy.ops.import_scene.fbx(filepath=anim_fbx, global_scale=1.0)
-    anim_objs = list(bpy.context.selected_objects)
-    action = None
-    for a in reversed(bpy.data.actions):
-        if a.users > 0:
-            action = a
-            break
+    anim_objs = [o for o in bpy.context.scene.objects
+                 if o not in before_objs and o not in body_objs]
+    new_actions = [a for a in bpy.data.actions if a not in before_actions
+                   and (a.frame_range[1] - a.frame_range[0]) > 1]
+    action = max(new_actions, key=lambda a: a.frame_range[1] - a.frame_range[0], default=None)
     if action is None:
-        print(f"    WARNING: no animation found in {anim_fbx}")
+        print(f"    WARNING: no animation take longer than one frame in {anim_fbx}")
     bpy.ops.object.select_all(action='DESELECT')
     for o in anim_objs:
         if o.name in bpy.data.objects:
@@ -825,7 +879,7 @@ def _build_crowd(group, ground_y):
         bpy.ops.object.delete()
 
     def _offset_action(src, frames):
-        """Copy an action with keyframes shifted — linked duplicates share
+        """Copy an action with keyframes shifted -- linked duplicates share
         one action, so per-instance stagger needs per-instance copies
         (V5 D6: documented stagger resolved to 0 for every instance)."""
         new = src.copy()
@@ -854,11 +908,8 @@ def _build_crowd(group, ground_y):
         new.name = f"{src.name}_+{frames}f"
         return new
 
-    # place instances. The manifest base position is Y-up (y = height):
-    # convert with the same Rx90 mapping assets get, then lay the ring
-    # out over Blender's GROUND PLANE (X/Y) at that height -- the old
-    # code rang over X/Z, which is the vertical axis in Blender, and put
-    # 4 of 6 instances ±1.7 m above and below the ground.
+    # placement. Manifest positions are Y-up (y = height): the same Rx90
+    # mapping assets get; a ring lies on Blender's ground plane (X/Y)
     bx, by, bz = (base_pos[0], -base_pos[2], base_pos[1])
     for i in range(count):
         if i == 0:
@@ -875,14 +926,21 @@ def _build_crowd(group, ground_y):
                      if o.parent is None]
             inst = roots[0] if roots else bpy.context.selected_objects[0]
 
-        # ring layout on the ground plane around the converted base
-        angle = (i / max(count, 1)) * 2 * math.pi
-        radius = spacing * max(1, count // 6)
-        inst.location = Vector((
-            bx + math.cos(angle) * radius,
-            by + math.sin(angle) * radius,
-            bz,
-        ))
+        if instances:
+            spec = instances[i] or {}
+            pos = spec.get("position", base_pos)
+            inst.location = Vector((pos[0], -pos[2], pos[1]))
+            heading = spec.get("heading")
+            if heading is not None:
+                inst.rotation_euler.z += math.radians(float(heading))   # yaw about the vertical
+        else:
+            angle = (i / max(count, 1)) * 2 * math.pi
+            radius = spacing * max(1, count // 6)
+            inst.location = Vector((
+                bx + math.cos(angle) * radius,
+                by + math.sin(angle) * radius,
+                bz,
+            ))
 
         # assign animation to the ARMATURE with a real per-instance offset
         if action:

@@ -2107,7 +2107,8 @@ def _clip_rows() -> list:
             for r in conn.execute(
                     "SELECT rel, folder, name, bytes, frames, fps, duration_s, "
                     "root_motion, has_mesh, bones, skeleton, family, bone_names "
-                    "FROM clips WHERE folder = ? OR substr(folder, 1, ?) = ? ORDER BY rel",
+                    "FROM clips WHERE (folder = ? OR substr(folder, 1, ?) = ?) "
+                    "AND COALESCE(is_body, 0) = 0 ORDER BY rel",
                     (section, len(section) + 1, section + "/")):
                 d = dict(r)
                 d["pack"] = "pack::" + (d["folder"] or "")
@@ -2181,6 +2182,20 @@ def _skeletons() -> dict:
         except ValueError:
             names = None
         bodies[str(r["fbx"])] = names        # None = read the file once
+    # the character files the clip measure found in the section itself
+    # (a rigged mesh without motion): their bone names are stored
+    conn = db.connect(_DB_PATH)
+    try:
+        for r in conn.execute("SELECT rel, bone_names FROM clips WHERE COALESCE(is_body, 0) = 1"):
+            try:
+                names = json.loads(r["bone_names"] or "[]") or None
+            except ValueError:
+                names = None
+            bodies.setdefault(str(root / r["rel"]), names)
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
     rig = _rig_rel()
     if rig:
         bodies.setdefault(str(root / rig), None)

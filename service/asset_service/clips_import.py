@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS clips (
   family TEXT,                   -- cc | mixamo | ue-mannequin | unknown
   bone_names TEXT,               -- JSON list
   facts TEXT,                    -- JSON: everything else measure knows
-  measured_at TEXT
+  measured_at TEXT,
+  is_body INTEGER DEFAULT 0      -- 1: a character file (mesh + rig, no motion): not a clip
 );
 CREATE INDEX IF NOT EXISTS idx_clips_folder ON clips(folder);
 """
@@ -45,6 +46,9 @@ CREATE INDEX IF NOT EXISTS idx_clips_folder ON clips(folder);
 
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.executescript(CLIPS_DDL)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(clips)")}
+    if "is_body" not in cols:             # a table from before 1.0
+        conn.execute("ALTER TABLE clips ADD COLUMN is_body INTEGER DEFAULT 0")
 
 
 def has_rows(conn: sqlite3.Connection) -> bool:
@@ -68,6 +72,15 @@ def _is_clip(rec: dict) -> bool:
     return bool(rec.get("clips")) and rec.get("kind") in ("clip", "mesh+clip", "skeletal")
 
 
+def _is_body(rec: dict) -> bool:
+    """A character file in the section: a rigged mesh whose takes hold no
+    motion (a one-frame T-pose, or none). It was listed as a clip, its
+    preview failed, and the clips that play on it never named it."""
+    if not (rec.get("has_mesh") and rec.get("bones")):
+        return False
+    return all((c.get("frames") or 0) <= 1 for c in rec.get("clips") or [])
+
+
 def rows_from_records(records, root: Path, section) -> list:
     """Registry rows for the records that are clips."""
     sec_rel = Path(section).resolve().relative_to(Path(root).resolve()).as_posix() \
@@ -81,17 +94,19 @@ def rows_from_records(records, root: Path, section) -> list:
         look = None
     out = []
     for rec in records:
-        if not _is_clip(rec):
+        body = _is_body(rec)
+        if not body and not _is_clip(rec):
             continue
         node = look.node(rec["rel"]) if look is not None else None
         if node and node.get("kind") and node["kind"] != "animation" \
-                and node["folder"].lower().startswith(sec_rel.lower().rstrip("/") + "/"):
+                and node["folder"].lower().startswith(sec_rel.lower().rstrip("/") + "/") \
+                and not body:
             continue                 # a folder strictly inside the section
-        clip = rec["clips"][0]
+        clip = (rec.get("clips") or [{}])[0]
         names = rec.get("bone_names") or []
         facts = measure.facts_of(rec)
         facts.pop("bone_names", None)
-        facts["clips"] = rec["clips"]
+        facts["clips"] = rec.get("clips") or []
         out.append((rec["rel"], pack_folder(rec["rel"], sec_rel),
                     Path(rec["rel"]).stem, rec.get("ext"), rec.get("bytes"),
                     rec.get("mtime_ns"), clip.get("frames"), clip.get("fps"),
@@ -102,7 +117,8 @@ def rows_from_records(records, root: Path, section) -> list:
                     skeleton.family(names) if names else None,
                     json.dumps(names, ensure_ascii=False),
                     json.dumps(facts, ensure_ascii=False),
-                    rec.get("measured_at") or time.strftime("%Y-%m-%dT%H:%M:%S")))
+                    rec.get("measured_at") or time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    1 if body else 0))
     return out
 
 
@@ -127,7 +143,7 @@ def write_clips(db_path, root, section, verbose: bool = False) -> tuple:
         conn.executemany(
             "INSERT OR REPLACE INTO clips (rel,folder,name,ext,bytes,mtime_ns,frames,fps,"
             "duration_s,loop,root_motion,has_mesh,bones,skeleton,family,bone_names,"
-            "facts,measured_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            "facts,measured_at,is_body) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
         conn.commit()
     finally:
         conn.close()

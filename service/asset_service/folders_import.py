@@ -160,7 +160,7 @@ def build(db_path, root, rows=None) -> int:
                 for w in f.get("category_hint") or []:
                     b["cats"][w] += 1
         if table_cols("clips"):
-            for r in conn.execute("SELECT rel FROM clips"):
+            for r in conn.execute("SELECT rel FROM clips WHERE COALESCE(is_body, 0) = 0"):
                 node = node_of(r["rel"])
                 if node:
                     bucket(node)["clips"] += 1
