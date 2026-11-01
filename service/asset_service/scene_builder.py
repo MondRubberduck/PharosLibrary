@@ -72,7 +72,8 @@ def build(manifest_path: str, save_path: str = None, pack_textures: bool = False
     print(f"\n{'=' * 60}")
     print(f"Building: {scene_name}")
     print(f"Assets: {len(manifest.get('assets', []))}")
-    print(f"Crowd: {sum(c.get('count', 1) for c in manifest.get('crowd', []))}")
+    from scene_manifest import crowd_count
+    print(f"Crowd: {sum(crowd_count(c) for c in manifest.get('crowd', []))}")
     print(f"{'=' * 60}")
 
     # --- import assets ---
@@ -125,19 +126,33 @@ def build(manifest_path: str, save_path: str = None, pack_textures: bool = False
 
     # --- save ---
     if not save_path:
-        save_path = default_save_path(manifest_path, scene_name)
+        save_path = _writable_or_fallback(
+            default_save_path(manifest_path, manifest.get("scene") or ""), manifest_path)
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
+    packed = ""
     if pack_textures:
-        bpy.ops.file.pack_all()
+        try:
+            bpy.ops.file.pack_all()
+            packed = " (textures packed)"
+        except RuntimeError as exc:
+            # the operator packs what it finds, reports every file it cannot
+            # find and raises at the end: the build went on to exit 0 with
+            # no .blend at all
+            print(f"  WARNING: pack: {str(exc).strip()[:300]}")
+            packed = f" (textures packed except {len(missing)} missing)"
     # absolute texture paths: Blender's default rewrites them relative to
     # the .blend, and a file moved out of the folder it was built in lost
     # every texture (236 of 247 images missing on the first copy)
     bpy.ops.wm.save_as_mainfile(filepath=str(save_path), relative_remap=False)
-    print(f"\nSaved: {save_path}" + (" (textures packed)" if pack_textures else ""))
+    print(f"\nSaved: {save_path}{packed}")
     print(f"Objects in scene: {len(bpy.data.objects)}; images: {len(bpy.data.images)}; "
           f"materials: {len(bpy.data.materials)}; meshes: {len(bpy.data.meshes)}")
     sys.stdout.flush()
+    if missing:
+        print(f"BUILD WITH MISSING TEXTURES: {len(missing)} image file(s) not on disk or empty "
+              f"(the .blend is saved; those surfaces render untextured): "
+              + ", ".join(missing[:8]) + (" ..." if len(missing) > 8 else ""))
     if _SKIPPED:
         # a scene missing an asset must not look like a finished build
         skipped = list(_SKIPPED)
@@ -147,9 +162,6 @@ def build(manifest_path: str, save_path: str = None, pack_textures: bool = False
         sys.stdout.flush()
         sys.exit(3)
     if missing:
-        print(f"BUILD WITH MISSING TEXTURES: {len(missing)} image file(s) not on disk "
-              f"(the .blend is saved; those surfaces render untextured): "
-              + ", ".join(missing[:8]) + (" ..." if len(missing) > 8 else ""))
         sys.stdout.flush()
         sys.exit(5)
     return save_path
@@ -161,75 +173,175 @@ _IMPORTED = {}      # (file, object) -> the root of the first import of that key
 
 def default_save_path(manifest_path, scene_name: str) -> Path:
     """Where a build goes when --save is not given: the library's own
-    output folder, <library>/_Agent_Files/builds/<scene>/<scene>.blend (the
-    one place inside a read-only library an agent may write), else next
-    to the manifest."""
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", scene_name or "scene").strip("._") or "scene"
+    output folder, <library>/<agent_files>/builds/<scene>/<scene>.blend
+    (the one place inside a read-only library an agent may write), else
+    next to the manifest. The folder is named after the scene as written
+    (any script; the ASCII-only slug once sent every non-Latin scene to
+    'scene/scene.blend'), or after the manifest file when the manifest
+    names no scene."""
+    name = (scene_name or "").strip() or Path(manifest_path).stem
+    slug = re.sub(r"[^\w.-]+", "_", name).strip("._") or Path(manifest_path).stem
     try:
         import sys as _sys
         _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from asset_service import config as _cfg
-        root = _cfg.load().get("library_root")
+        cfg = _cfg.load()
+        root = cfg.get("library_root")
         if root and Path(root).is_dir():
-            return Path(root) / "_Agent_Files" / "builds" / slug / f"{slug}.blend"
+            return Path(root) / (cfg.get("agent_files") or "_Agent_Files") / "builds" / slug / f"{slug}.blend"
     except Exception:                                     # noqa: BLE001
         pass
     return Path(manifest_path).with_suffix(".blend")
 
 
+def _writable_or_fallback(save_path, manifest_path) -> Path:
+    """The default folder must take a file: on a read-only share, for a
+    sandboxed agent, or with a file where the folder should be, the
+    build goes next to the manifest instead of being lost after every
+    import ran (it was: an OSError at the save, exit 0, no .blend)."""
+    save_path = Path(save_path)
+    try:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        probe = save_path.parent / ".pharos_write_test"
+        probe.write_bytes(b"")
+        probe.unlink()
+        return save_path
+    except OSError as exc:
+        fallback = Path(manifest_path).resolve().with_suffix(".blend")
+        print(f"  NOTE: {save_path.parent} cannot be written ({type(exc).__name__}): "
+              f"saving next to the manifest, {fallback}")
+        return fallback
+
+
 def _missing_textures() -> list:
-    """The image files the scene refers to that are not on disk."""
+    """The image files the scene refers to that are not on disk, or are
+    empty (0 bytes: an image that loads as 0x0 and renders black); UDIM
+    images are checked tile by tile."""
     out = []
     for img in bpy.data.images:
-        if not img.users or img.packed_file or img.source != 'FILE':
+        if not img.users or img.packed_file or img.source not in ('FILE', 'TILED'):
             continue
         src = bpy.path.abspath(img.filepath) if img.filepath else ""
+        if img.source == 'TILED':
+            for tile in img.tiles:
+                n = int(tile.number)
+                tp = (src.replace("<UDIM>", str(n))
+                      .replace("<UVTILE>", f"u{(n - 1001) % 10 + 1}_v{(n - 1001) // 10 + 1}")) if src else ""
+                if not tp or not Path(tp).is_file():
+                    out.append(tp or img.name)
+                elif Path(tp).stat().st_size == 0:
+                    out.append(tp + " (empty file)")
+            continue
         if not src or not Path(src).is_file():
             out.append(src or img.name)
+        elif Path(src).stat().st_size == 0:
+            out.append(src + " (empty file)")
     if out:
-        print(f"  WARNING: {len(out)} texture file(s) missing (0x0 images): "
+        print(f"  WARNING: {len(out)} texture file(s) missing or empty (0x0 images): "
               + ", ".join(Path(x).name for x in out[:6]) + (" ..." if len(out) > 6 else ""))
     return out
 
 
+def _sock_value(v):
+    """A socket's default value as something repr-stable: strings as they
+    are (a Principled Volume's attribute names once raised ValueError
+    through float()), vectors rounded, scalars rounded."""
+    if isinstance(v, str):
+        return v
+    try:
+        return tuple(round(float(x), 4) for x in v)
+    except (TypeError, ValueError):
+        try:
+            return round(float(v), 4)
+        except (TypeError, ValueError):
+            return str(v)
+
+
+def _tree_fingerprint(tree, depth: int = 0) -> list:
+    """[sorted node signatures, sorted link signatures] of a node tree:
+    each node's type, every unlinked input's value, every output's value
+    (RGB and Value nodes keep theirs there), its image with colour space,
+    its ramp stops and curve points, its settings, and -- for a group node
+    -- the group tree's own fingerprint (two levels)."""
+    by_name, nodes = {}, []
+    for n in tree.nodes:
+        parts = [n.bl_idname]
+        for inp in n.inputs:
+            if inp.is_linked or not hasattr(inp, "default_value"):
+                continue
+            parts.append(("in", inp.identifier, _sock_value(inp.default_value)))
+        for out in n.outputs:
+            if hasattr(out, "default_value"):
+                parts.append(("out", out.identifier, _sock_value(out.default_value)))
+        img = getattr(n, "image", None)
+        if img is not None:
+            parts.append(("image", (bpy.path.abspath(img.filepath) if img.filepath else img.name).lower(),
+                          img.colorspace_settings.name, img.alpha_mode))
+        ramp = getattr(n, "color_ramp", None)
+        if ramp is not None:
+            parts.append(("ramp", ramp.interpolation, ramp.color_mode,
+                          tuple((round(e.position, 4), _sock_value(e.color)) for e in ramp.elements)))
+        mapping = getattr(n, "mapping", None)
+        if mapping is not None and hasattr(mapping, "curves"):
+            parts.append(("curves", tuple(tuple(_sock_value(p.location) for p in c.points)
+                                          for c in mapping.curves)))
+        sub = getattr(n, "node_tree", None)
+        if sub is not None and n.bl_idname == "ShaderNodeGroup":
+            parts.append(("group", sub.name, repr(_tree_fingerprint(sub, depth + 1)) if depth < 2 else ""))
+        for attr in ("blend_type", "operation", "interpolation", "projection", "extension",
+                     "uv_map", "distribution", "subsurface_method", "data_type", "space",
+                     "use_clamp", "vector_type", "attribute_name", "attribute_type"):
+            if hasattr(n, attr):
+                parts.append((attr, str(getattr(n, attr))))
+        by_name[n.name] = repr(tuple(parts))
+        nodes.append(by_name[n.name])
+    links = sorted(repr((by_name[l.from_node.name], l.from_socket.identifier,
+                         by_name[l.to_node.name], l.to_socket.identifier))
+                   for l in tree.links)
+    return [sorted(nodes), links]
+
+
+def _material_fingerprint(mat) -> str:
+    """What a material IS, so that only true copies merge: its node tree
+    (types, values, images with colour space, groups, ramps, links) and
+    blend settings; colour, metallic and roughness for a material without
+    nodes. Two kit files' 'Glass' and 'Metal' that shared a base colour
+    were once merged by name, and one became chrome and see-through."""
+    sig = [str(getattr(mat, "blend_method", "")), round(float(getattr(mat, "alpha_threshold", 0.0)), 4)]
+    if mat.use_nodes and mat.node_tree:
+        sig += _tree_fingerprint(mat.node_tree)
+    else:
+        sig += [tuple(round(c, 4) for c in mat.diffuse_color),
+                round(float(mat.metallic), 4), round(float(mat.roughness), 4)]
+    return repr(sig)
+
+
 def _dedup_datablocks() -> None:
-    """Merge images that name the same file and materials that are the
-    same material (same name before Blender's .001 suffix, and the same
-    image files, or no images and the same base colour). Linked
-    duplicates already share meshes; this covers the copies that
-    separate imports of the same kit bring along."""
+    """Merge images that name the same file in the same colour space and
+    materials that are the same material (same name before Blender's .001
+    suffix and the same fingerprint). Linked duplicates already share
+    meshes; this covers the copies that separate imports of the same kit
+    bring along."""
     first: dict = {}
     merged_img = 0
     for img in list(bpy.data.images):
-        key = (bpy.path.abspath(img.filepath) if img.filepath else "").lower()
-        if not key or img.packed_file:
+        path = (bpy.path.abspath(img.filepath) if img.filepath else "").lower()
+        if not path or img.packed_file:
             continue
+        # a Non-Color copy of a colour image is a different image (a normal
+        # map decoded as sRGB is wrong), so the colour space is part of it
+        key = (path, img.colorspace_settings.name, img.alpha_mode)
         if key in first:
             img.user_remap(first[key])
             merged_img += 1
         else:
             first[key] = img
 
-    def signature(mat):
-        imgs = set()
-        if mat.use_nodes and mat.node_tree:
-            for n in mat.node_tree.nodes:
-                if n.type == 'TEX_IMAGE' and n.image is not None:
-                    imgs.add((bpy.path.abspath(n.image.filepath) if n.image.filepath
-                              else n.image.name).lower())
-        if imgs:
-            return ("img", tuple(sorted(imgs)))
-        bsdf = next((n for n in (mat.node_tree.nodes if mat.use_nodes and mat.node_tree else [])
-                     if n.type == 'BSDF_PRINCIPLED'), None)
-        col = tuple(round(c, 3) for c in bsdf.inputs["Base Color"].default_value) if bsdf \
-            else tuple(round(c, 3) for c in mat.diffuse_color)
-        return ("col", col)
-
     keep: dict = {}
     merged_mat = 0
     for mat in sorted(bpy.data.materials, key=lambda m: (re.sub(r"\.\d{3}$", "", m.name), m.name)):
         base = re.sub(r"\.\d{3}$", "", mat.name)
-        key = (base, signature(mat))
+        key = (base, _material_fingerprint(mat))
         if key in keep:
             mat.user_remap(keep[key])
             merged_mat += 1
@@ -312,6 +424,68 @@ def _pick_object(objects, name):
     return None
 
 
+_MOD_TARGETS = ("object", "object_from", "object_to", "target", "mirror_object", "offset_object",
+                "origin", "start_cap", "end_cap", "curve", "auxiliary_target", "object_center")
+
+
+def _duplicate_hierarchy(root):
+    """A linked duplicate of a hierarchy made with the data API.
+    bpy.ops.object.duplicate copies the SELECTED bases only: a hidden or
+    unselectable part stayed behind (a copied building lost its roof, a
+    chimney stayed at the original), and an object outside the view layer
+    (a light parented under a model) raised and ended the build with exit
+    0 and no file. Every object is copied sharing its data, linked where
+    its original is, re-parented inside the copy; modifier and constraint
+    targets inside the hierarchy point at the copies. Returns the root."""
+    objs = [root] + list(root.children_recursive)
+    mapping = {}
+    for o in objs:
+        n = o.copy()
+        for coll in o.users_collection:
+            coll.objects.link(n)
+        mapping[o] = n
+    for o, n in mapping.items():
+        if o.parent is not None and o.parent in mapping:
+            n.parent = mapping[o.parent]
+            n.matrix_parent_inverse = o.matrix_parent_inverse.copy()
+        for mod in getattr(n, "modifiers", ()):
+            for attr in _MOD_TARGETS:
+                try:
+                    tgt = getattr(mod, attr, None)
+                    if tgt is not None and tgt in mapping:
+                        setattr(mod, attr, mapping[tgt])
+                except (AttributeError, TypeError):
+                    pass
+        cons = list(getattr(n, "constraints", ()))
+        if getattr(n, "pose", None) is not None:
+            for pb in n.pose.bones:             # IK targets, pole targets, Armature constraints
+                cons.extend(pb.constraints)
+        for con in cons:
+            for attr in ("target", "pole_target"):
+                try:
+                    tgt = getattr(con, attr, None)
+                    if tgt is not None and tgt in mapping:
+                        setattr(con, attr, mapping[tgt])
+                except (AttributeError, TypeError):
+                    pass
+            for t in getattr(con, "targets", ()):
+                try:
+                    if t.target is not None and t.target in mapping:
+                        t.target = mapping[t.target]
+                except (AttributeError, TypeError):
+                    pass
+        ad = getattr(n, "animation_data", None)
+        for drv in (ad.drivers if ad else ()):
+            for var in drv.driver.variables:
+                for t in var.targets:
+                    try:
+                        if t.id is not None and t.id in mapping:
+                            t.id = mapping[t.id]
+                    except (AttributeError, TypeError):
+                        pass
+    return mapping[root]
+
+
 def _import_asset(asset, ground_y, index, roots_by_id=None):
     """Import one model file, keep the asset's object of a multi-object
     file, position it, optionally rebuild its material."""
@@ -339,14 +513,10 @@ def _import_asset(asset, ground_y, index, roots_by_id=None):
     if cached is not None and cached.name in bpy.data.objects:
         for o in parked:
             o.name = obj_name
-        bpy.ops.object.select_all(action='DESELECT')
-        for o in [cached] + list(cached.children_recursive):
-            o.select_set(True)
-        bpy.ops.object.duplicate(linked=True)
-        dup = [o for o in bpy.context.selected_objects if o.parent is None]
-        root = dup[0] if dup else None
-        if root is None:
-            print(f"    ERROR: {aid} skipped: could not duplicate {cached.name}")
+        try:
+            root = _duplicate_hierarchy(cached)
+        except Exception as exc:                          # noqa: BLE001
+            print(f"    ERROR: {aid} skipped: could not duplicate {cached.name}: {exc}")
             _SKIPPED.append(aid)
             return
         root.name = f"{aid}_root"
@@ -773,6 +943,11 @@ def _apply_texture_sets(manifest, ground_y, roots_by_id):
             mat = _make_material(f"{aid}_{setname or 'tex'}"[:60], recipe)
             n = 0
             for child in _all_meshes(root):
+                if child.data.users > 1:
+                    # a linked duplicate shares its mesh: this copy gets its
+                    # own before its slots change, or every copy of the key
+                    # took the set (and the last set won)
+                    child.data = child.data.copy()
                 if child.data.materials:
                     child.data.materials.clear()
                 child.data.materials.append(mat)
@@ -788,36 +963,97 @@ def _is_identity(m, tol=1e-4) -> bool:
     return all(abs(m[r][c] - (1.0 if r == c else 0.0)) <= tol for r in range(4) for c in range(4))
 
 
+def _bbox(points):
+    lo = [min(p[k] for p in points) for k in range(3)]
+    hi = [max(p[k] for p in points) for k in range(3)]
+    return lo, hi
+
+
+def _skin_correction(arm, meshes):
+    """The one rotation (or None) that brings the skin of `arm` onto its
+    bones, judged from ALL its skinned vertices at once: the mesh box and
+    the bones' box are compared on every axis and centre for identity,
+    the quarter turns and the half turns, and the closest wins (identity
+    on a tie). A rule per mesh and per longest axis once turned correctly
+    placed eyes and shoes off the body and lay a T-posed body flat because
+    its arm span beat its height."""
+    from mathutils import Matrix, Vector
+    bones = arm.data.bones
+    if not bones:
+        return None
+    b_lo, b_hi = _bbox([b.head_local for b in bones] + [b.tail_local for b in bones])
+    pts = [v.co for me in meshes for v in me.data.vertices]
+    if not pts:
+        return None
+    m_lo, m_hi = _bbox(pts)
+    corners = [Vector((x, y, z)) for x in (m_lo[0], m_hi[0]) for y in (m_lo[1], m_hi[1]) for z in (m_lo[2], m_hi[2])]
+    b_ext = [b_hi[k] - b_lo[k] for k in range(3)]
+    b_mid = [(b_hi[k] + b_lo[k]) / 2 for k in range(3)]
+    cands = [None] + [Matrix.Rotation(math.radians(a), 4, ax) for ax in "XYZ" for a in (90.0, -90.0, 180.0)]
+    best, best_score = None, None
+    for rot in cands:
+        pts_r = [rot @ c for c in corners] if rot is not None else corners
+        lo, hi = _bbox(pts_r)
+        score = sum(abs((hi[k] - lo[k]) - b_ext[k]) for k in range(3)) \
+            + sum(abs((hi[k] + lo[k]) / 2 - b_mid[k]) for k in range(3))
+        if best_score is None or score < best_score - 1e-9:
+            best, best_score = rot, score
+    return best
+
+
 def _rebind_skin(arm, meshes) -> int:
     """A skinned body whose meshes sit in another frame than their armature
     (Character Creator exports: the skin in a Y-up metre frame, the
     armature and every clip Z-up in centimetres) tears apart in any pose.
-    Bake each such mesh into armature space, parent it there, and stand it
-    up when its height still runs along Y. Returns how many were re-bound."""
+    Bake each mesh skinned to `arm` into armature space (shape keys with
+    it: a body with morphs once shrank to a dot) and parent it there; then
+    turn the whole skin onto the bones with one rotation decided for all
+    its meshes (see _skin_correction). Meshes skinned to another armature
+    are left alone. Returns how many were re-bound."""
     from mathutils import Matrix
     bpy.context.view_layer.update()
+    skinned = [me for me in meshes if me.type == 'MESH'
+               and any(m.type == 'ARMATURE' and m.object is arm for m in me.modifiers)]
     fixed = 0
-    for me in meshes:
-        if me.type != 'MESH' or not any(m.type == 'ARMATURE' for m in me.modifiers):
-            continue
+    for me in skinned:
         rel = arm.matrix_world.inverted() @ me.matrix_world
         if _is_identity(rel):
             continue
-        me.data.transform(rel)
+        if me.data.users > 1:
+            me.data = me.data.copy()       # shared data would be baked once per object
+        me.data.transform(rel, shape_keys=True)
         me.parent = arm
         me.matrix_parent_inverse = Matrix.Identity(4)
         me.matrix_basis = Matrix.Identity(4)
-        vs = [v.co for v in me.data.vertices]
-        if vs:
-            ext = [max(v[k] for v in vs) - min(v[k] for v in vs) for k in range(3)]
-            if ext[1] > 1.5 * ext[2] and ext[1] >= ext[0]:          # height along Y
-                top = max(v.y for v in vs)
-                ang = math.radians(90.0) if abs(top) >= abs(min(v.y for v in vs)) else math.radians(-90.0)
-                me.data.transform(Matrix.Rotation(ang, 4, 'X'))
         fixed += 1
     if fixed:
-        print(f"    re-bound {fixed} skinned mesh(es) into armature space")
+        rot = _skin_correction(arm, skinned)
+        if rot is not None:
+            for me in skinned:
+                if me.data.users > 1:
+                    me.data = me.data.copy()
+                me.data.transform(rot, shape_keys=True)
+            print(f"    re-bound {fixed} skinned mesh(es) into armature space and turned the skin onto the bones")
+        else:
+            print(f"    re-bound {fixed} skinned mesh(es) into armature space")
     return fixed
+
+
+def _fcurves_of(act):
+    if hasattr(act, "fcurves"):          # pre-4.4 legacy API
+        return list(act.fcurves)
+    out = []                             # slotted actions (4.4+)
+    for layer in act.layers:
+        for strip in layer.strips:
+            get_bag = (getattr(strip, "channel_bag", None)
+                       or getattr(strip, "channelbag", None))
+            if get_bag is None:
+                continue
+            for slot in act.slots:
+                bag = get_bag(slot)
+                if bag:
+                    out.extend(bag.fcurves)
+    return out
 
 
 def _build_crowd(group, ground_y):
@@ -836,39 +1072,67 @@ def _build_crowd(group, ground_y):
     sys.stdout.flush()
 
     before_objs = _scene_objects()
-    before_actions = set(bpy.data.actions)
     bpy.ops.import_scene.fbx(filepath=body_fbx, global_scale=1.0)
     body_objs = [o for o in bpy.context.scene.objects if o not in before_objs]
     if not body_objs:
         print(f"    WARNING: body import failed: {body_fbx}")
         return
-    # the hierarchy root is the armature (or the parentless object with the
-    # most below it): the first parentless object once was a stray empty,
-    # so no instance was placed and the body lay at the origin
+    # the hierarchy root is the armature that deforms the body (the one
+    # with the most skinned vertices: an accessory rig once became the
+    # root and the body stayed at the origin), else the parentless object
+    # with the most below it (the first parentless object once was a stray
+    # empty, so no instance was placed)
     arms = [o for o in body_objs if o.type == 'ARMATURE']
-    body_root = arms[0] if arms else max((o for o in body_objs if o.parent is None),
-                                         key=lambda o: len(o.children_recursive), default=body_objs[0])
+
+    def _skinned(a):
+        return sum(len(m.data.vertices) for m in body_objs if m.type == 'MESH'
+                   and any(md.type == 'ARMATURE' and md.object is a for md in m.modifiers))
+    body_root = max(arms, key=lambda a: (_skinned(a), len(a.children_recursive))) if arms else \
+        max((o for o in body_objs if o.parent is None),
+            key=lambda o: len(o.children_recursive), default=body_objs[0])
     while body_root.parent is not None and body_root.parent in body_objs:
         body_root = body_root.parent
     family = [body_root] + list(body_root.children_recursive)
-    for o in body_objs:                 # loose empties of the import: not the body
-        if o.parent is None and o is not body_root and o.type == 'EMPTY' and not o.children:
-            bpy.data.objects.remove(o, do_unlink=True)
+    adopted = 0
+    for o in body_objs:
+        if o.parent is None and o is not body_root and o not in family:
+            if o.type == 'EMPTY' and not o.children:
+                bpy.data.objects.remove(o, do_unlink=True)   # a stray empty of the import
+            else:
+                # a second family of the body file (an accessory rig, a loose
+                # prop): it moves, copies and animates with the body
+                o.parent = body_root
+                o.matrix_parent_inverse = body_root.matrix_world.inverted()
+                adopted += 1
+    if adopted:
+        print(f"    {adopted} loose object(s) of the body file parented under the body")
+    family = [body_root] + list(body_root.children_recursive)
     body_arm = body_root if body_root.type == 'ARMATURE' else next(
         (o for o in family if o.type == 'ARMATURE'), None)
     if body_arm is not None:
         _rebind_skin(body_arm, [o for o in family if o.type == 'MESH'])
 
-    # the animation: the clip's own take, read as the actions this import
-    # added (the body's 1-frame T-pose take is never it); then DELETE the
-    # animation import's own objects -- otherwise a ghost armature stays
-    # parked at the origin (V5 D6: 5-instance crowd produced 6 armatures)
+    # the animation: the take the importer gives the clip's own armature
+    # (the body file's takes are never candidates -- a body with a 60-frame
+    # idle once won over the 30-frame clip; nor another object's action --
+    # a keyed CC_Game_Tongue empty of the same length once drove the
+    # armature's location); then DELETE the animation import's own objects
+    # -- otherwise a ghost armature stays parked at the origin (V5 D6:
+    # 5-instance crowd produced 6 armatures)
+    before_actions = set(bpy.data.actions)
     bpy.ops.import_scene.fbx(filepath=anim_fbx, global_scale=1.0)
     anim_objs = [o for o in bpy.context.scene.objects
                  if o not in before_objs and o not in body_objs]
-    new_actions = [a for a in bpy.data.actions if a not in before_actions
-                   and (a.frame_range[1] - a.frame_range[0]) > 1]
-    action = max(new_actions, key=lambda a: a.frame_range[1] - a.frame_range[0], default=None)
+
+    def _frames(a):
+        return a.frame_range[1] - a.frame_range[0]
+    new_actions = [a for a in bpy.data.actions if a not in before_actions]
+    anim_arm = next((o for o in anim_objs if o.type == 'ARMATURE'), None)
+    action = anim_arm.animation_data.action if (anim_arm is not None and anim_arm.animation_data) else None
+    if action is None or _frames(action) <= 1:
+        bone_acts = [a for a in new_actions if _frames(a) > 1
+                     and any(fc.data_path.startswith("pose.bones") for fc in _fcurves_of(a))]
+        action = max(bone_acts or [a for a in new_actions if _frames(a) > 1], key=_frames, default=None)
     if action is None:
         print(f"    WARNING: no animation take longer than one frame in {anim_fbx}")
     bpy.ops.object.select_all(action='DESELECT')
@@ -883,24 +1147,7 @@ def _build_crowd(group, ground_y):
         one action, so per-instance stagger needs per-instance copies
         (V5 D6: documented stagger resolved to 0 for every instance)."""
         new = src.copy()
-
-        def fcurves_of(act):
-            if hasattr(act, "fcurves"):          # pre-4.4 legacy API
-                return list(act.fcurves)
-            out = []                             # slotted actions (4.4+)
-            for layer in act.layers:
-                for strip in layer.strips:
-                    get_bag = (getattr(strip, "channel_bag", None)
-                               or getattr(strip, "channelbag", None))
-                    if get_bag is None:
-                        continue
-                    for slot in act.slots:
-                        bag = get_bag(slot)
-                        if bag:
-                            out.extend(bag.fcurves)
-            return out
-
-        for fc in fcurves_of(new):
+        for fc in _fcurves_of(new):
             for kp in fc.keyframe_points:
                 kp.co.x += frames
                 kp.handle_left.x += frames
@@ -911,6 +1158,7 @@ def _build_crowd(group, ground_y):
     # placement. Manifest positions are Y-up (y = height): the same Rx90
     # mapping assets get; a ring lies on Blender's ground plane (X/Y)
     bx, by, bz = (base_pos[0], -base_pos[2], base_pos[1])
+    base_rot = body_root.rotation_euler.copy()       # the import's own rotation (a Y-up file: X 90)
     for i in range(count):
         if i == 0:
             inst = body_root
@@ -918,18 +1166,15 @@ def _build_crowd(group, ground_y):
             # linked duplicate of the WHOLE hierarchy (shares mesh data):
             # duplicating only the armature root once left every extra
             # instance an invisible empty skeleton
-            bpy.ops.object.select_all(action='DESELECT')
-            for o in [body_root] + body_root.children_recursive:
-                o.select_set(True)
-            bpy.ops.object.duplicate(linked=True)
-            roots = [o for o in bpy.context.selected_objects
-                     if o.parent is None]
-            inst = roots[0] if roots else bpy.context.selected_objects[0]
+            inst = _duplicate_hierarchy(body_root)
 
         if instances:
             spec = instances[i] or {}
             pos = spec.get("position", base_pos)
             inst.location = Vector((pos[0], -pos[2], pos[1]))
+            # from the import's rotation, not from what the copied object
+            # carries: instance 0's heading once added up into every copy
+            inst.rotation_euler = base_rot.copy()
             heading = spec.get("heading")
             if heading is not None:
                 inst.rotation_euler.z += math.radians(float(heading))   # yaw about the vertical
@@ -972,7 +1217,19 @@ if __name__ == "__main__":
         save = None
         if "--save" in args:
             save = args[args.index("--save") + 1]
-        build(manifest, save, pack_textures="--pack" in args)
+        try:
+            build(manifest, save, pack_textures="--pack" in args)
+        except SystemExit:
+            raise
+        except Exception as exc:                          # noqa: BLE001
+            # an importer that refuses a file, a save that cannot write:
+            # Blender exits 0 after a traceback unless told otherwise, and
+            # the agent read 'built' with no .blend anywhere
+            import traceback
+            traceback.print_exc()
+            print(f"BUILD FAILED: {type(exc).__name__}: {exc} -- nothing was saved")
+            sys.stdout.flush()
+            sys.exit(4)
     else:
         print("Usage: blender --background --python scene_builder.py -- "
               "manifest.json [--save output.blend] [--pack]")

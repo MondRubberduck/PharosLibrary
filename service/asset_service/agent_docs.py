@@ -103,7 +103,7 @@ Search answers are SHORT lists, best match first. Two follow-ups:
 
 - **The meshes you have chosen**: `/api/meshes/item?key=<key>` (repeat
   `key=`; 5–10 per call, large buildings one at a time) returns material
-  recipe, material names and placement corners. Percent-encode the WHOLE
+  recipe, material names and corners (`bbox_min`/`bbox_max`, `placed_bbox`). Percent-encode the WHOLE
   key (`#` becomes `%23`, spaces `%20`); remember the `key`, never the
   `id`. Keys an answer had no room for come back in `not_returned`.
 - **What a pack looks like**: `/api/meshes/packs` lists each pack's
@@ -150,7 +150,9 @@ report. Textures: linked → use; fitting set exists → use; nothing →
 generate procedurally and say so.
 
 1. The library on disk is READ-ONLY for you. Locate and read files,
-   never modify/move/delete them.
+   never modify/move/delete them. The one place you may write is
+   `<library>/_Agent_Files/builds/<scene>/` (your manifests, builds and
+   renders go there, or outside the library).
 2. Prefer the API over disk walks — that is the entire point of this
    system: sizes, triangle counts and material recipes are in no text
    file on disk. A mesh in a search answer costs about 90 tokens; its
@@ -289,7 +291,7 @@ tokens, an answer stops at ~20k tokens and lists the rest in
 `recipe` (per-slot material wiring:
 `slots[].maps[]` with `role`/`file`/`channels`) · `hero_textures` (role →
 texture path; `{}` = unknown, NOT untextured) · `materials` (slot names) ·
-`bbox_min`/`bbox_max` (the file's own corners) · `placed_bbox` (the corners as the builder places the model: pivot at the position; null when the pivot class is not base-centre or centre) ·
+`bbox_min`/`bbox_max` (the file's own corners, origin-relative, Z-up) · `placed_bbox` (the corners where the builder puts the model placed at the origin: `[[x, y, z], [x, y, z]]` metres, Z-up like `bbox_m`; an OBJ is re-pivoted to its footprint centre on its base, another file holding one loose object keeps its origin; null for a file of several loose objects (meshes, empties, lights), a mesh under a parent node, or a row not measured from the file) ·
 `vertices` · `format` · `view_url` (3D preview page).
 
 **Axes:** `bbox_m` = [x, y, z] metres, **Z-up** (height = `bbox_m[2]`, largest axis = what `min_dim`/`max_dim` filter); scene-manifest positions are Y-up.
@@ -491,16 +493,26 @@ triangles. Fix every error it prints before building. (PowerShell: put
     "{blender}" --background --factory-startup --python "{repo}/service/asset_service/scene_builder.py" -- scene.json --save scene.blend
 
 `--factory-startup` is required: add-ons can crash a headless Blender.
-Without `--save` the build goes to `<library>/_Agent_Files/builds/<scene>/`,
-the one folder inside a read-only library an agent may write; put your
-manifests and renders there too. A key used several times is imported
-once (linked duplicates); images and materials are merged after the
-imports. Texture paths are saved absolute, so the `.blend` can move;
-`--pack` packs the textures into it instead. Exit codes: 3 = `BUILD
-INCOMPLETE`, an asset was skipped (the `ERROR` line above says why);
-5 = `BUILD WITH MISSING TEXTURES`, the `.blend` is saved but named
-image files are not on disk. For placement, `placed_bbox` of
-`/api/meshes/item` gives a model's corners in the builder's frame.
+Without `--save` the build goes to `<library>/_Agent_Files/builds/<scene>/`
+(the configured `agent_files` folder; when it cannot be written the build
+lands next to the manifest and the log says so), the one folder inside a
+read-only library an agent may write; put your manifests and renders
+there too. A key used several times is imported once (linked duplicates
+made with the data API: hidden parts and parented lights copy too);
+images and materials that are true copies are merged after the imports
+(same file and colour space; same node tree and values). Texture paths
+are saved absolute, so the `.blend` can move; `--pack` packs the textures
+into it instead (a missing texture is skipped, the rest are packed).
+Exit codes: 0 = built; 2 = the manifest is invalid, nothing built;
+3 = `BUILD INCOMPLETE`, an asset was skipped (the `ERROR` line above says
+why); 4 = `BUILD FAILED`, the build raised (traceback above, nothing
+saved); 5 = `BUILD WITH MISSING TEXTURES`, the `.blend` is saved but
+named image files are not on disk (or empty). For placement,
+`placed_bbox` of `/api/meshes/item` gives a model's corners where the
+builder puts it: `[[x, y, z], [x, y, z]]` metres, Z-up like `bbox_m`
+(height = z; the manifest's Y-up position is `[x, z, -y]` of these);
+scale and rotation are not applied; null for a file of several loose
+objects (they keep the file's layout).
 
 ## 5. Verify it
 

@@ -274,7 +274,7 @@ def run_ingest(argv=None) -> int:
                 # purchase CSV is a valid state); anything else (corrupt
                 # file, locked DB) is a failed step
                 if name == "collection" and isinstance(exc, FileNotFoundError):
-                    print("  purchases: no purchase list in this library", flush=True)
+                    print("  " + library_map.purchases_absent(), flush=True)
                 else:
                     failed_steps += 1
                     print(f"  {name} import FAILED: {exc}", flush=True)

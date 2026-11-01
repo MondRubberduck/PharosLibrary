@@ -51,6 +51,28 @@ def ensure_table(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE clips ADD COLUMN is_body INTEGER DEFAULT 0")
 
 
+def migrate(conn: sqlite3.Connection) -> bool:
+    """Give a clips table from before 1.0 its is_body column (the server
+    read 'no such column: is_body' on every animation page of a 0.95
+    registry until the next ingest). True when the column was added."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(clips)")}
+    if cols and "is_body" not in cols:
+        conn.execute("ALTER TABLE clips ADD COLUMN is_body INTEGER DEFAULT 0")
+        conn.commit()
+        return True
+    return False
+
+
+def body_filter(conn: sqlite3.Connection, bodies: bool = False) -> str:
+    """The SQL clause that keeps bodies out of a clip query (or picks
+    them, bodies=True); '' / a clause that matches nothing on a table
+    without the column, so a reader never raises on an old registry."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(clips)")}
+    if "is_body" not in cols:
+        return " AND 0" if bodies else ""
+    return " AND COALESCE(is_body, 0) = " + ("1" if bodies else "0")
+
+
 def has_rows(conn: sqlite3.Connection) -> bool:
     try:
         return conn.execute("SELECT 1 FROM clips LIMIT 1").fetchone() is not None
@@ -100,7 +122,8 @@ def rows_from_records(records, root: Path, section) -> list:
         node = look.node(rec["rel"]) if look is not None else None
         if node and node.get("kind") and node["kind"] != "animation" \
                 and node["folder"].lower().startswith(sec_rel.lower().rstrip("/") + "/") \
-                and not body:
+                and not (body and node["kind"] == "3d-assets"
+                         and library_map.included(node, look.all)):
             continue                 # a folder strictly inside the section
         clip = (rec.get("clips") or [{}])[0]
         names = rec.get("bone_names") or []

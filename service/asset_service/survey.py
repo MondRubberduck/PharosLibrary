@@ -299,9 +299,16 @@ def _marker(node: Node, d: _Dir, root: Path) -> bool:
     # kb3d_metadata.json / KB3DTextures (the exporter reads both layouts;
     # surveyed as loose files, a kit was extracted as records, not FBX)
     files_l = [f.lower() for f in d.files]
-    root_kit = ("kb3d_metadata.json" in files_l
-                or any(f.startswith("kb3d_") and f.endswith(".blend") for f in files_l)
-                or ("kb3dtextures" in dirs_l and any(f.endswith(".blend") for f in files_l)))
+    blends = [f for f in files_l if f.endswith(".blend")]
+    # a .blend in the folder is the kit (the exporter's <kit>/*.blend): a
+    # kb3d_*.png.* texture folder carries its own kb3d_metadata.json and is
+    # textures, not a kit; a *.blender.native folder surveyed on its own
+    # (its parent is a marker) stays loose files, or the exporter would
+    # strip the suffix and write FBX into the parent
+    root_kit = bool(blends) and not d.path.name.lower().endswith(".blender.native") and (
+        "kb3d_metadata.json" in files_l
+        or any(f.startswith("kb3d_") for f in blends)
+        or "kb3dtextures" in dirs_l)
     if kit or root_kit:
         _subtree(d)
         _know(node, "blender", "kit", f"{kit[0]}/: KitBash3D kit layout" if kit else

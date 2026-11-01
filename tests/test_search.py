@@ -2362,8 +2362,11 @@ def test_clips_api_serves_measured_facts_and_filters():
             ("Idle Long", "Animation/Idles", "Animation/Idles/idle_long.fbx", 12.0, 0, ["mixamorig:Hips", "mixamorig:Spine", "mixamorig:Head", "mixamorig:Neck"]),
             ("Hop", "Animation/Idles", "Animation/Idles/hop.bvh", None, None, [])]
     with tempfile.TemporaryDirectory() as tmp:
-        dbp = _search_registry(tmp, [("Body", "Chars", {"kind": "SkeletalMesh", "fbx": str(Path(tmp) / "Chars" / "body.fbx"),
+        # the scanner spells paths with forward slashes (as_posix)
+        dbp = _search_registry(tmp, [("Body", "Chars", {"kind": "SkeletalMesh", "fbx": (Path(tmp) / "Chars" / "body.fbx").as_posix(),
                                                        "facts": {"skin": True, "bone_names": ["root", "hips", "spine"]}})])
+        (Path(tmp) / "Animation" / "Actor").mkdir(parents=True, exist_ok=True)
+        (Path(tmp) / "Animation" / "Actor" / "dummy.fbx").write_bytes(b"Kaydara FBX Binary  \x00")
         conn = sqlite3.connect(dbp)
         clips_import.ensure_table(conn)
         for name, folder, rel, dur, rm, bones in rows:
@@ -2380,6 +2383,18 @@ def test_clips_api_serves_measured_facts_and_filters():
         # never a clip, named for the clips its skeleton plays
         conn.execute("INSERT INTO clips (rel,folder,name,ext,bytes,frames,has_mesh,bones,bone_names,facts,measured_at,is_body) "
                      "VALUES ('Animation/Actor/dummy.fbx','Animation/Actor','dummy','.fbx',1,1,1,3,?, '{}','t',1)",
+                     (json.dumps(["root", "hips", "spine"]),))
+        # the same body twice (the scanner's row spelt with backslashes
+        # once listed every CC dummy twice), a body outside the section and
+        # one whose file is gone: none of them is offered
+        conn.execute("INSERT INTO clips (rel,folder,name,ext,bytes,frames,has_mesh,bones,bone_names,facts,measured_at,is_body) "
+                     "VALUES ('Chars/body.fbx','Chars','body','.fbx',1,1,1,3,?, '{}','t',1)",
+                     (json.dumps(["root", "hips", "spine"]),))
+        conn.execute("INSERT INTO clips (rel,folder,name,ext,bytes,frames,has_mesh,bones,bone_names,facts,measured_at,is_body) "
+                     "VALUES ('Mocap/Actor/gone.fbx','Mocap/Actor','gone','.fbx',1,1,1,3,?, '{}','t',1)",
+                     (json.dumps(["root", "hips", "spine"]),))
+        conn.execute("INSERT INTO clips (rel,folder,name,ext,bytes,frames,has_mesh,bones,bone_names,facts,measured_at,is_body) "
+                     "VALUES ('Animation/Actor/vanished.fbx','Animation/Actor','vanished','.fbx',1,1,1,3,?, '{}','t',1)",
                      (json.dumps(["root", "hips", "spine"]),))
         conn.commit()
         conn.close()

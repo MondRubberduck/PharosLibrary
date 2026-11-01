@@ -17,6 +17,26 @@ import sys
 MESH_STAGES = {"mesh_load", "mesh_export"}
 
 
+TEXTURE_LOSS = 0.5      # more than this share of the textures lost: the pack FAILs
+
+
+def texture_loss(manifest: dict, tex: list) -> str:
+    """'' when the textures that failed are a gap of a usable pack; the
+    reason when the loss is the pack's textures as a whole (every PNG
+    export refused by a wrong engine build, or more than half of them):
+    such a pack imports untextured and must not read as PASS."""
+    if not tex:
+        return ""
+    c = manifest.get("counts") or {}
+    total = c.get("texture2d")
+    written = c.get("texture_files_written")
+    if written == 0:
+        return "no texture was exported (%d failed)" % len(tex)
+    if isinstance(total, int) and total > 0 and len(tex) > TEXTURE_LOSS * total:
+        return "%d of %d textures failed to export" % (len(tex), total)
+    return ""
+
+
 def verdict_of(manifest: dict, verify: dict) -> tuple:
     """(status, mesh failures, texture failures, other failures)."""
     fails = manifest.get("failures") or []
@@ -25,7 +45,8 @@ def verdict_of(manifest: dict, verify: dict) -> tuple:
     mesh = [f for f in fails if (f.get("stage") or "") in MESH_STAGES or not f.get("stage")]
     tex = [f for f in fails if (f.get("stage") or "").startswith("texture")]
     other = [f for f in fails if f not in mesh and f not in tex]
-    status = "PASS" if (verify.get("result") == "PASS" and not mesh) else "FAIL"
+    status = "PASS" if (verify.get("result") == "PASS" and not mesh
+                        and not texture_loss(manifest, tex)) else "FAIL"
     return status, mesh, tex, other
 
 
@@ -76,6 +97,11 @@ def main(argv) -> int:
         fh.write(line + "\n")
     print(line)
     geo = len(v.get("geometry_mismatch") or [])
+    loss = texture_loss(m, tex_fail)
+    if status == "FAIL" and loss and not mesh_fail and v.get("result") == "PASS":
+        print("FAIL: %s -- the models are there, their textures are not; fix the "
+              "engine's texture exporter, move the pack's Exports folder away and "
+              "convert the pack again (a relink cannot bring textures back)" % loss)
     if status == "PASS" and (tex_fail or other or geo):
         print("PASS with gaps: %d texture(s) the engine could not export, %d other step(s) "
               "failed, %d mesh(es) whose FBX holds more geometry than the manifest says "

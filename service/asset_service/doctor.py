@@ -110,7 +110,7 @@ def _find_ue(manifest=None, patterns=None) -> str:
     manifest lists them, on any drive), then the standard folder; the
     newest version wins. Blender was found this way, Unreal only through
     UE_EXE, and a machine with three installs reported 'absent'."""
-    cands = []
+    cands, vers = [], {}
     man = Path(manifest or os.environ.get("PHAROS_EPIC_MANIFEST")
                or Path(os.environ.get("ProgramData", r"C:\ProgramData"))
                / "Epic" / "UnrealEngineLauncher" / "LauncherInstalled.dat")
@@ -121,6 +121,9 @@ def _find_ue(manifest=None, patterns=None) -> str:
                 exe = Path(loc) / _UE_EXE_REL
                 if exe.is_file():
                     cands.append(str(exe))
+                    # the launcher's AppName carries the version; the
+                    # folder need not (a custom install location)
+                    vers[str(exe)] = max(_ue_version(item.get("AppName")), _ue_version(exe))
     except (OSError, ValueError, AttributeError):
         pass
     for pat in patterns or ("C:/Program Files/Epic Games/UE_*/Engine/Binaries/Win64/"
@@ -128,7 +131,8 @@ def _find_ue(manifest=None, patterns=None) -> str:
         cands += glob.glob(pat)
     if not cands:
         return ""
-    return str(Path(max(dict.fromkeys(cands), key=lambda c: (_ue_version(c), c))))
+    return str(Path(max(dict.fromkeys(cands),
+                        key=lambda c: (vers.get(c) or _ue_version(c), c))))
 
 
 def run_doctor(argv=None) -> int:

@@ -66,6 +66,32 @@ def in_map_folders(path: str, allow: set, lib: str = "") -> bool:
     return any(rel == a or rel.startswith(a + "/") for a in allow)
 
 
+def map_folder_list() -> list:
+    """The approved folders as written (library-relative, forward slashes),
+    for building paths on a case-sensitive file system."""
+    raw = os.environ.get("PHAROS_MAP_FOLDERS", "")
+    return [f.replace("\\", "/").strip("/") for f in raw.split(os.pathsep) if f.strip()]
+
+
+def kit_blends(folders: list, lib: str = "") -> tuple:
+    """(blends, empty): the kit .blend files of the approved folders, both
+    KitBash3D layouts (<kit>/*.blend and <kit>/*.blender.native/*.blend),
+    and the approved folders that hold neither. The exporters used to glob
+    one kitbash_root: a root-layout kit under a second parent was approved
+    and never found ('kits found: 1' of 2, exit 0)."""
+    lib = lib or library_root()
+    blends, empty = [], []
+    for folder in sorted(folders, key=str.lower):
+        base = os.path.join(lib, *folder.split("/"))
+        found = sorted(glob.glob(os.path.join(base, "*.blend"))
+                       + glob.glob(os.path.join(base, "*.blender.native", "*.blend")))
+        if found:
+            blends.extend(found)
+        else:
+            empty.append(folder)
+    return blends, empty
+
+
 def library_root() -> str:
     return (os.environ.get("PHAROS_LIBRARY_ROOT")
             or load().get("library_root") or "")

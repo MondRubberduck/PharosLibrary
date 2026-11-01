@@ -61,7 +61,10 @@ Schema (pharos.scene/v1; kiosk.scene/v1 accepted):
       "position": [5.0, 0.0, 3.0],
       "count": 12,
       "spacing": 2.0,                # metres between instances
-      "animation_offset": 0.0        # seconds (stagger start times)
+      "animation_offset": 0.0,       # seconds (stagger start times)
+      "instances": [                 # optional: place each body yourself
+        {"position": [5.0, 0.0, 3.0], "heading": 90}   # Y-up metres; degrees about the vertical
+      ]                              # (replaces the ring; count = len(instances))
     }
   ],
   "audio": [
@@ -173,8 +176,40 @@ def validate_manifest(data: dict) -> list[str]:
             errors.append(f"crowd[{i}]: missing 'animation_fbx'")
         if c.get("count", 1) < 1:
             errors.append(f"crowd[{i}]: count must be >= 1")
+        inst = c.get("instances")
+        if inst is not None:
+            if not isinstance(inst, list) or not inst:
+                errors.append(f"crowd[{i}]: instances must be a non-empty list of "
+                              f"{{position, heading}} objects")
+            else:
+                for j, spec in enumerate(inst):
+                    if not isinstance(spec, dict):
+                        errors.append(f"crowd[{i}].instances[{j}]: must be an object "
+                                      f"{{\"position\": [x, y, z], \"heading\": degrees}}")
+                        continue
+                    pos = spec.get("position")
+                    if pos is not None and not (isinstance(pos, list) and len(pos) == 3
+                                                and all(isinstance(v, (int, float)) for v in pos)):
+                        errors.append(f"crowd[{i}].instances[{j}].position: three numbers (Y-up metres)")
+                    hd = spec.get("heading")
+                    if hd is not None and (isinstance(hd, bool) or not isinstance(hd, (int, float))):
+                        errors.append(f"crowd[{i}].instances[{j}].heading: a number (degrees about the vertical)")
+                if "count" in c and isinstance(inst, list) and c["count"] != len(inst):
+                    errors.append(f"crowd[{i}]: count={c['count']} but instances lists {len(inst)}; "
+                                  f"instances win -- drop count or make them agree")
 
     return errors
+
+
+def crowd_count(c: dict) -> int:
+    """How many bodies a crowd group places: its instances, else count."""
+    inst = c.get("instances")
+    if isinstance(inst, list) and inst:
+        return len(inst)
+    try:
+        return max(int(c.get("count", 1)), 0)
+    except (TypeError, ValueError):
+        return 1
 
 
 def _registry_root() -> tuple:
@@ -570,9 +605,9 @@ def budget_check(data: dict, meshes_db: Optional[str] = None) -> dict:
                           "matched": tri > 0 or not conn})
 
     for c in data.get("crowd", []):
-        count = c.get("count", 1)
+        count = crowd_count(c)
         total_tri += 45000 * count  # CC body ~45k tri each (measured)
-        per_asset.append({"id": f"crowd_{c.get('count', 1)}", "triangles": 45000 * count})
+        per_asset.append({"id": f"crowd_{count}", "triangles": 45000 * count})
 
     if conn:
         conn.close()
@@ -620,7 +655,7 @@ def main(argv=None) -> int:
 
     print("VALID [OK]")
     n_assets = len(data.get("assets", []))
-    n_crowd = sum(c.get("count", 1) for c in data.get("crowd", []))
+    n_crowd = sum(crowd_count(c) for c in data.get("crowd", []))
     print(f"  assets: {n_assets}")
     print(f"  crowd:  {n_crowd} instances")
     for note in whole_file_notes(data, args.db):

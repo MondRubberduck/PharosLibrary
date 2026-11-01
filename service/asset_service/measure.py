@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import kinds, skeleton                        # noqa: E402
 from asset_service.fbx_dims import _walk, fbx_nodes             # noqa: E402
 
-SCHEMA = 2                      # bump to re-measure every cached file
+SCHEMA = 3                      # bump to re-measure every cached file (3: model count, nesting)
 FBX_TIME = 46186158000          # FBX time units per second
 _TIME_MODES = {0: 30.0, 1: 120.0, 2: 100.0, 3: 60.0, 4: 50.0, 5: 48.0, 6: 30.0,
                7: 30.0, 8: 29.97, 9: 29.97, 10: 25.0, 11: 24.0, 12: 1000.0,
@@ -281,6 +281,26 @@ def _measure_fbx(path: Path, rec: dict) -> None:
     rec["geo_up_axis"] = "XYZ"[geo_up] if geo_up is not None else None
     if got and geo_up is not None:
         rec["pivot"] = pivot_class(lo, hi, geo_up)
+    # how many loose objects the file holds, and whether a mesh sits under
+    # a parent node: a file of one loose object is placed by its origin,
+    # the others keep their layout (the API's placed_bbox says so)
+    mesh_ids = [mid for mid, (_n, t) in models.items() if t == "Mesh"]
+    if mesh_ids:
+        parent_of: dict = {}
+        for conns_props, conns_kids in _walk(top, "Connections"):
+            for p, _ in _walk(conns_kids, "C"):
+                if len(p) >= 3 and p[0] == b"OO" and isinstance(p[1], int) and isinstance(p[2], int):
+                    parent_of[p[1]] = p[2]
+            break
+        # the loose objects the importer makes: every parentless model of
+        # any type (a mesh beside an empty or a camera keeps its place in
+        # the builder, like two meshes do) plus the armature of a rig
+        bone_types = ("LimbNode", "Limb", "Root")
+        roots = [mid for mid, (_n, t) in models.items()
+                 if t not in bone_types and parent_of.get(mid, 0) not in models]
+        has_rig = any(t in bone_types for _n, t in models.values())
+        rec["mesh_models"] = (len(roots) + (1 if has_rig else 0)) if parent_of else len(mesh_ids)
+        rec["nested_mesh"] = any(parent_of.get(mid, 0) in models for mid in mesh_ids)
     joints = [n for n, t in models.values() if t in ("LimbNode", "Limb", "Root")]
     if not joints:
         joints = [n for n, t in models.values() if t == "Null"] if not got else []
@@ -394,7 +414,8 @@ def _fbx_root_motion(top, models: dict, up_i: int, usf: float):
 def _measure_obj(path: Path, rec: dict) -> None:
     lo = [float("inf")] * 3
     hi = [float("-inf")] * 3
-    verts = tris = 0
+    verts = tris = objs = 0
+    lead = False            # faces before the first 'o': the importer's object named after the file
     uv = False
     mats: list = []
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -415,12 +436,16 @@ def _measure_obj(path: Path, rec: dict) -> None:
             elif line.startswith("f "):
                 n = len(line.split()) - 1
                 tris += max(0, n - 2)
+                if not objs:
+                    lead = True
             elif line.startswith("vt"):
                 uv = True
             elif line.startswith("usemtl"):
                 m = line[6:].strip()
                 if m and m not in mats:
                     mats.append(m)
+            elif line.startswith("o "):
+                objs += 1                       # the importer splits objects here
     if not verts:
         rec["error"] = "no vertices"
         return
@@ -429,7 +454,7 @@ def _measure_obj(path: Path, rec: dict) -> None:
                units="unknown", up_axis="Y",       # OBJ carries no units: read as metres
                bbox_min_m=[round(x, 5) for x in lo], bbox_max_m=[round(x, 5) for x in hi],
                bbox_m=[round(hi[i] - lo[i], 5) for i in range(3)],
-               pivot=pivot_class(lo, hi, 1))
+               pivot=pivot_class(lo, hi, 1), mesh_models=max(objs + (1 if lead else 0), 1))
 
 
 def _measure_stl(path: Path, rec: dict) -> None:
@@ -514,6 +539,16 @@ def _measure_gltf(path: Path, rec: dict) -> None:
             elif mode in (5, 6):
                 tris += max(0, n - 2)
     rec["has_mesh"] = bool(doc.get("meshes"))
+    nodes = doc.get("nodes") or []
+    mesh_nodes = [i for i, n in enumerate(nodes) if isinstance(n, dict) and "mesh" in n]
+    kids = {c for n in nodes if isinstance(n, dict) for c in (n.get("children") or []) if isinstance(c, int)}
+    # the loose objects the importer makes: the scenes' root nodes of any
+    # type (an empty beside the mesh counts, as in the builder)
+    scene_roots = [r for sc in (doc.get("scenes") or []) if isinstance(sc, dict)
+                   for r in (sc.get("nodes") or []) if isinstance(r, int)]
+    roots = scene_roots or [i for i in range(len(nodes)) if i not in kids]
+    rec["mesh_models"] = len(roots) or len(mesh_nodes) or len(doc.get("meshes") or [])
+    rec["nested_mesh"] = any(i in kids for i in mesh_nodes)
     if got:
         rec.update(triangles=tris, vertices=verts,
                    bbox_min_m=[round(x, 5) for x in lo], bbox_max_m=[round(x, 5) for x in hi],
@@ -652,10 +687,13 @@ def facts_of(rec: dict) -> dict:
     out = {}
     for k in ("units", "up_axis", "geo_up_axis", "pivot", "uv_layers", "skin", "bones",
               "lod_level", "lod_group", "collision", "variant_group",
-              "category_hint", "scale_suspect", "has_mesh", "measured_by"):
+              "category_hint", "scale_suspect", "has_mesh", "measured_by",
+              "mesh_models", "nested_mesh"):
         v = rec.get(k)
         if v not in (None, [], False, "unknown", "stdlib"):
             out[k] = v
+    if out.get("mesh_models") == 1:
+        out.pop("mesh_models")          # the common case is implied
     if rec.get("clips"):
         out["clips"] = len(rec["clips"])
         out["duration_s"] = max((c.get("duration_s") or 0) for c in rec["clips"]) or None

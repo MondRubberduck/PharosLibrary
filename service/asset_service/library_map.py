@@ -532,20 +532,27 @@ def apply_to_config(rows: dict, cfg: dict, root=None, weights=None) -> dict:
                 if d.is_dir() and rel not in scan:
                     scan.append(rel)
     cfg["scan_folders"] = scan
+    # the importer walks every root for manifests (converted packs and,
+    # since the kits' parents are here too, kit manifests: without them
+    # every KitBash assembly came back without a recipe, wired: false on
+    # 1,041 rows). A pack or kit directly in the library root contributes
+    # ITSELF, never the root (that read every manifest in the library,
+    # excluded folders included, and counted each pack twice); a root
+    # inside another root is dropped
+    want = []
+    for r in rows.values():
+        if ((r["kind"] == "unreal" and r["state"] == "converted")
+                or (r["kind"] == "blender" and r["state"] in ("kit", "kit-exported"))) \
+                and included(r, rows):
+            parent = (root / r["folder"]).parent
+            want.append(root / r["folder"] if parent.resolve() == root.resolve() else parent)
     roots = []
-    for r in rows.values():
-        if r["kind"] == "unreal" and r["state"] == "converted" and included(r, rows):
-            parent = (root / r["folder"]).parent
-            if str(parent) not in roots:
-                roots.append(str(parent))
-    # the importer reads kit manifests from the same roots: without the
-    # kits' parent here every KitBash assembly came back without a recipe
-    # (wired: false on 1,041 rows of a library whose kits were exported)
-    for r in rows.values():
-        if r["kind"] == "blender" and r["state"] in ("kit", "kit-exported") and included(r, rows):
-            parent = (root / r["folder"]).parent
-            if str(parent) not in roots:
-                roots.append(str(parent))
+    for p in sorted({str(p) for p in want}, key=lambda s: (len(Path(s).parts), s.lower())):
+        rp = Path(p).resolve()
+        if rp == root.resolve() or any(rp == Path(q).resolve() or
+                                       Path(q).resolve() in rp.parents for q in roots):
+            continue
+        roots.append(p)
     cfg["manifest_roots"] = roots
     kits = sorted({str((root / r["folder"]).parent) for r in rows.values()
                    if r["kind"] == "blender" and r["state"] in ("kit", "kit-exported")
@@ -561,7 +568,9 @@ def apply_to_config(rows: dict, cfg: dict, root=None, weights=None) -> dict:
                         or (r["kind"] == "blender"
                             and effective_action(r, rows) == "leave"))})
     cfg["indexer_skip_dirs"] = skip
-    coll = sec.get("purchases", [None])[0]
+    # the CSV of the folder the config takes (the heaviest), not of the
+    # first by name: two purchases folders once gave <heavy>/<light's csv>
+    coll = cfg["sections"].get("collection") or sec.get("purchases", [None])[0]
     if coll:
         from .survey import _purchase_csv
         csvs = sorted(f.name for f in (root / coll).glob("*.csv")
@@ -569,6 +578,23 @@ def apply_to_config(rows: dict, cfg: dict, root=None, weights=None) -> dict:
         if csvs:
             cfg["collection_csv"] = csvs[0]
     return cfg
+
+
+def purchases_absent(path=None) -> str:
+    """The line for a purchase list that is not there: a library without
+    one is a state, not an error; a map that lists a purchases folder
+    whose CSV is gone names the file it looked for."""
+    try:
+        folders = sections(load(path)).get("purchases") or []
+    except Exception:                                     # noqa: BLE001
+        folders = []
+    if folders:
+        chosen = (config.SECTIONS or {}).get("collection") or ""
+        name = next((f for f in folders if f.lower() == chosen.replace("\\", "/").strip("/").lower()),
+                    folders[0])
+        return (f"purchases: {config.CSV_PATH} not found (the map lists "
+                f"{name} as the purchases folder)")
+    return "purchases: no purchase list in this library"
 
 
 def summary(rows: dict) -> list:

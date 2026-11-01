@@ -168,6 +168,71 @@ def fbx_nodes(path: str | Path):
     return version, top
 
 
+def _index_array_stats(data, pos: int) -> tuple:
+    """(indices, polygons) of an 'i' array property at pos, read as bytes:
+    a polygon ends at a negative index (its high bit set), so the count
+    is the count of high bytes >= 0x80 -- no Python list of 14 million
+    ints for a 4.7-million-triangle file."""
+    t = chr(data[pos])
+    if t != "i":
+        return 0, 0
+    n, enc, clen = struct.unpack_from("<III", data, pos + 1)
+    raw = data[pos + 13:pos + 13 + clen]
+    if enc == 1:
+        raw = zlib.decompress(raw)
+    hi = raw[3::4]
+    neg = sum(hi.count(bytes((b,))) for b in range(128, 256))
+    return len(raw) // 4, neg
+
+
+def fbx_triangles(path: str | Path) -> int | None:
+    """Triangle count of a binary FBX from its PolygonVertexIndex arrays
+    alone. Every other array (vertices, normals, UVs: the bulk of a
+    Nanite-source file) is stepped over by its stored length and nothing
+    is inflated into Python lists; fbx_file_info() built the whole tree
+    (a 1 GB file: 30 GB and 27 s). The file is read through mmap. None
+    when the file is not a binary FBX or holds no polygons."""
+    import mmap
+    try:
+        with open(path, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            if len(data) < 27 or data[:18] != b"Kaydara FBX Binary":
+                return None
+            version = struct.unpack_from("<I", data, 23)[0]
+            fmt, hs = _header(version)
+            idx_count = polys = 0
+            found = False
+            stack = [(27, len(data))]
+            while stack:
+                pos, limit = stack.pop()
+                while pos + hs <= limit:
+                    end_offset, num_props, prop_len = struct.unpack_from(fmt, data, pos)
+                    name_len = data[pos + hs - 1]
+                    if end_offset == 0 and name_len == 0:
+                        pos += hs                      # null record / separator
+                        continue
+                    if end_offset <= pos or end_offset > limit or name_len == 0:
+                        break
+                    name = data[pos + hs:pos + hs + name_len]
+                    prop_start = pos + hs + name_len
+                    prop_end = prop_start + prop_len
+                    if prop_end > end_offset:
+                        break
+                    if name == b"PolygonVertexIndex" and num_props:
+                        n, neg = _index_array_stats(data, prop_start)
+                        if n:
+                            found = True
+                            idx_count += n
+                            polys += neg
+                    elif prop_end < end_offset:
+                        stack.append((prop_end, end_offset))   # children
+                    pos = end_offset
+    except (OSError, ValueError, struct.error, zlib.error, IndexError):
+        return None
+    if not found:
+        return None
+    return idx_count - 2 * polys if idx_count >= 2 * polys else polys
+
+
 def fbx_file_info(path: str | Path) -> dict | None:
     """File-level geometry info from a binary FBX, in FILE UNITS.
 

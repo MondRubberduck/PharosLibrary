@@ -411,10 +411,16 @@ def _iter_manifests():
     say that -- reporting a present v1 manifest as "no-manifest" sends a reader
     hunting for a file that is sitting right there.
     """
+    from asset_service.db import _real_path
+    seen: set = set()          # two overlapping roots must not yield a manifest twice
     for root in MANIFEST_ROOTS:
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("Exports/manifest.json")):
+            key = _real_path(path)
+            if key in seen:
+                continue
+            seen.add(key)
             try:
                 doc = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -423,6 +429,10 @@ def _iter_manifests():
             yield pack, "leartes", path.parent, doc, \
                 doc.get("schema") in (LEARTES_SCHEMA, LEARTES_SCHEMA_LEGACY)
         for path in sorted(root.rglob("Exports/kit_manifest.json")):
+            key = _real_path(path)
+            if key in seen:
+                continue
+            seen.add(key)
             try:
                 doc = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):

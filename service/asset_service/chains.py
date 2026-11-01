@@ -19,6 +19,7 @@ this is the one place that runs them, with the consent check in front.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import socket
@@ -91,6 +92,68 @@ def _ue() -> str:
     return os.environ.get("UE_EXE", "").strip() or _find_ue()
 
 
+def _needs_relink(manifest) -> bool:
+    """A manifest without a wiring block (a v1 manifest, or an export whose
+    relink step failed) needs the relink; one that carries its wiring does
+    not, whatever it resolved (a pack whose masters hardcode their
+    textures resolves 0 of 493 and is right), and the engine is not
+    started for it."""
+    try:
+        m = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    return not isinstance(m.get("wiring"), dict)
+
+
+def _texture_loss(manifest) -> str:
+    """The pack_status texture-loss reason for a manifest, '' when the
+    textures came through (or the manifest cannot be read)."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "pack_status", str(REPO / "pipeline" / "conversion" / "pack_status.py"))
+        ps = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ps)
+        m = json.loads(Path(manifest).read_text(encoding="utf-8"))
+        fails = m.get("failures") or []
+        tex = [f for f in fails if isinstance(f, dict) and (f.get("stage") or "").startswith("texture")]
+        return ps.texture_loss(m, tex)
+    except Exception:                                     # noqa: BLE001
+        return ""
+
+
+def _pack_key(folder: str) -> str:
+    return folder.replace("\\", "/").strip("/").lower()
+
+
+def _explain_pack(pack: str, rows: dict, relink: bool) -> int:
+    """Why --pack names nothing that runs: said about THAT folder (the
+    answer once listed another folder's missing decision, and following
+    it would have approved a full engine conversion the owner never
+    asked about)."""
+    r = rows.get(_pack_key(pack))
+    if r is None:
+        _say(f"nothing runs: {pack!r} is no folder of the library map "
+             f"(pharos.py map show lists them)")
+    elif r["kind"] != "unreal":
+        _say(f"nothing runs: {r['folder']} is a {r['kind'] or 'unclassified'} folder, "
+             f"not an Unreal pack")
+    elif not library_map.included(r, rows):
+        _say(f"nothing runs: {r['folder']} is excluded (include=no on it or on a parent)")
+    elif r["state"] == "converted" and not relink:
+        _say(f"nothing runs: {r['folder']} is converted already; "
+             f"pharos.py convert --relink-only --pack \"{r['folder']}\" rewires its recipes")
+    elif r["state"] not in ("raw", "project", "converted"):
+        _say(f"nothing runs: {r['folder']} is an Unreal folder in state "
+             f"{r['state'] or '(a folder of packs)'}, not a pack")
+    elif library_map.effective_action(r, rows) == "leave":
+        _say(f"nothing runs: the map's decision for {r['folder']} is leave; "
+             f"pharos.py map set \"{r['folder']}\" action=export changes it")
+    else:
+        return _refuse([r], "export", "Unreal")
+    return 2
+
+
 def convert(argv: list) -> int:
     ap = argparse.ArgumentParser(prog="pharos convert",
                                  description="extract FBX + textures + material recipes "
@@ -98,29 +161,51 @@ def convert(argv: list) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--pack", help="one map folder only")
     ap.add_argument("--relink-only", action="store_true",
-                    help="no engine export: rewire and verify the approved packs that "
-                         "already have a manifest (recipes missing after a failed relink)")
+                    help="no engine export: rewire and verify the converted packs that "
+                         "have a manifest (recipes missing after a failed relink)")
     args = ap.parse_args(argv)
     root = config.LIBRARY_ROOT
-    # the decision covers raw packs and, for --relink-only, the converted ones
-    ready, undecided = _rows("unreal", "export",
-                             states=("raw", "project", "converted") if args.relink_only
-                             else ("raw", "project"))
+    rows = library_map.load()
+    ready, undecided = _rows("unreal", "export", states=("raw", "project"))
+    if args.relink_only:
+        # a converted pack was approved when it was exported; the survey
+        # drops that spent decision with the state change, and the pack
+        # stays the owner's to rewire (engine-free: the relink writes the
+        # manifest's recipes and nothing else)
+        seen = {r["folder"].lower() for r in ready}
+        for r in sorted(rows.values(), key=lambda r: r["folder"].lower()):
+            if r["kind"] == "unreal" and r["state"] == "converted" \
+                    and library_map.included(r, rows) and r["folder"].lower() not in seen \
+                    and library_map.effective_action(r, rows) != "leave":
+                ready.append(r)
     if args.pack:
-        ready = [r for r in ready if r["folder"].lower() == args.pack.replace("\\", "/").strip("/").lower()]
+        key = _pack_key(args.pack)
+        ready = [r for r in ready if r["folder"].lower() == key]
+        undecided = [r for r in undecided if r["folder"].lower() == key]
+        if not ready and not undecided:
+            return _explain_pack(args.pack, rows, args.relink_only)
     has_manifest = lambda r: (root / r["folder"] / "Exports" / "manifest.json").is_file()  # noqa: E731
     if args.relink_only:
-        todo = [r for r in ready if has_manifest(r)]
+        # every pack whose manifest lacks recipes; the one --pack names
+        # in any case (the owner asks for it: rewired and verified again)
+        todo = [r for r in ready if has_manifest(r)
+                and (args.pack or _needs_relink(root / r["folder"] / "Exports" / "manifest.json"))]
         if not todo:
-            _say("no approved pack with an Exports/manifest.json to relink"
-                 + (f" (approved: {len(ready)})" if ready else ""))
+            with_man = [r for r in ready if has_manifest(r)]
+            if with_man and not args.pack:
+                _say(f"every converted pack's manifest carries its recipes ({len(with_man)}); "
+                     f"pharos.py convert --relink-only --pack \"<folder>\" rewires one anyway")
+                return 0
+            _say("no converted pack with an Exports/manifest.json to relink"
+                 + (f" (candidates: {len(ready)})" if ready else ""))
             return 0 if ready else _refuse(undecided, "export", "Unreal")
     else:
         todo = [r for r in ready if not has_manifest(r)]
     if not todo:
         if ready:
             _say(f"every approved Unreal pack is converted already ({len(ready)}); "
-                 f"pharos.py convert --relink-only rewires one whose recipes are missing")
+                 f"pharos.py convert --relink-only rewires one whose recipes are missing; "
+                 f"to export one again, move its Exports folder away first")
             return 0
         return _refuse(undecided, "export", "Unreal")
     ue = _ue()
@@ -147,22 +232,37 @@ def convert(argv: list) -> int:
             rc = _run([bash or "bash", conv / "convert_packs.sh", "--pack", pack.name,
                        "--assets-root", str(pack.parent)], conv, args.dry_run, env)
             if rc and not args.dry_run and has_manifest(r):
-                # the engine wrote the pack but the driver's verdict was FAIL:
-                # the manifest is there, the recipes are not
-                _say(f"  the export left a manifest; after the cause is fixed: "
-                     f"pharos.py convert --relink-only --pack \"{r['folder']}\"")
+                loss = _texture_loss(root / r["folder"] / "Exports" / "manifest.json")
+                if loss:
+                    # the models are there, their textures are not: a relink
+                    # cannot bring them; the export has to run again
+                    _say(f"  {loss}: the pack would import untextured. Fix the engine's "
+                         f"texture exporter, move {r['folder']}/Exports away (the conversion's "
+                         f"own output) and run pharos.py convert --pack \"{r['folder']}\" again")
+                else:
+                    # the engine wrote the pack but the driver's verdict was FAIL:
+                    # the manifest is there, the recipes are not
+                    _say(f"  the export left a manifest; after the cause is fixed: "
+                         f"pharos.py convert --relink-only --pack \"{r['folder']}\"")
         else:
-            _say(f"\nrelinking {r['folder']} (manifest present, map decision: export)")
+            _say(f"\nrelinking {r['folder']} (manifest present, "
+                 + ("converted pack" if r["state"] == "converted" else "map decision: export")
+                 + ")")
         if rc == 0:
+            # relink-only: the sandbox copy the manifest was exported from
+            # may be stale or gone (a failed conversion, a cleaned sandbox);
+            # --sync refreshes it from the pack before the engine reads it
             rc = _run([bash or "bash", conv / "relink_pack.sh", "--pack", pack.name,
-                       "--assets-root", str(pack.parent)], conv, args.dry_run, env)
+                       "--assets-root", str(pack.parent)]
+                      + (["--sync"] if args.relink_only else []), conv, args.dry_run, env)
         if rc == 0:
             rc = _run([sys.executable, conv / "verify_pack_export.py",
                        pack / "Exports"], conv, args.dry_run)
         failed += 1 if rc else 0
     what = "relinked" if args.relink_only else "converted"
-    _say(f"\n{what} {len(todo) - failed} of {len(todo)} pack(s)"
-         + ("; run pharos.py ingest to import them" if not args.dry_run else ""))
+    done = len(todo) - failed
+    _say(f"\n{what} {done} of {len(todo)} pack(s)"
+         + ("; run pharos.py ingest to import them" if done and not args.dry_run else ""))
     return 4 if failed else 0
 
 
@@ -192,7 +292,8 @@ def extract(argv: list) -> int:
     # owner leaves alone is never opened
     if kits:
         env = {"PHAROS_MAP_FOLDERS": os.pathsep.join(r["folder"] for r in kits)}
-        _say(f"\nexporting {len(kits)} kit(s) under {cfg.get('kitbash_root')} (map decision: extract)")
+        _say(f"\nexporting {len(kits)} kit(s) (map decision: extract): "
+             f"{', '.join(r['folder'] for r in kits[:6])}{' ...' if len(kits) > 6 else ''}")
         kb = REPO / "pipeline" / "kitbash"
         rc |= _run([sys.executable, kb / "export_all_kb3d.py"], kb, args.dry_run, env)
         rc |= _run([sys.executable, kb / "run_kb3d_metadata.py"], kb, args.dry_run, env)

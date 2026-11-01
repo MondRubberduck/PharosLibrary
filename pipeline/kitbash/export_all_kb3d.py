@@ -7,26 +7,32 @@ from pathlib import Path
 
 T = str(Path(__file__).resolve().parent)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _config import blender_exe, section_root, map_folders, in_map_folders
+from _config import blender_exe, section_root, map_folder_list, kit_blends
 BLENDER = blender_exe()
 if not BLENDER:
     raise SystemExit("FATAL: Blender not found -- set BLENDER_EXE to your "
                      "Blender executable (see pipeline/README.md)")
 SCRIPT = os.path.join(T, "export_kb3d.py")
-ROOT = section_root("kitbash", "PHAROS_KB3D_ROOT")
-if not ROOT or not os.path.isdir(ROOT):
-    raise SystemExit("FATAL: kits root not found: %r -- set `kitbash_root` in "
-                     "pharos_config.json or PHAROS_KB3D_ROOT "
-                     "(see pipeline/README.md)" % ROOT)
-
-kits = sorted(glob.glob(os.path.join(ROOT, "*", "*.blender.native", "*.blend"))
-              + glob.glob(os.path.join(ROOT, "*", "*.blend")))
-ALLOW = map_folders()          # the kits the library map approved, if given
+ALLOW = map_folder_list()      # the kits the library map approved, if given
+empty = []
 if ALLOW:
-    kits = [b for b in kits if in_map_folders(os.path.dirname(b), ALLOW)]
+    # the approved folders themselves, wherever they are in the library
+    # (one kitbash_root missed a kit under a second parent)
+    kits, empty = kit_blends(ALLOW)
+    for f in empty:
+        print("NO .blend in approved kit folder: %s" % f, flush=True)
+else:
+    ROOT = section_root("kitbash", "PHAROS_KB3D_ROOT")
+    if not ROOT or not os.path.isdir(ROOT):
+        raise SystemExit("FATAL: kits root not found: %r -- set `kitbash_root` in "
+                         "pharos_config.json or PHAROS_KB3D_ROOT "
+                         "(see pipeline/README.md)" % ROOT)
+    kits = sorted(glob.glob(os.path.join(ROOT, "*", "*.blender.native", "*.blend"))
+                  + glob.glob(os.path.join(ROOT, "*", "*.blend")))
 print("kits found:", len(kits), flush=True)
 
-ok = skipped = failed = 0
+ok = skipped = 0
+failed = len(empty)            # an approved kit the exporter cannot see is a failure
 for i, blend in enumerate(kits, 1):
     kit_dir = os.path.dirname(blend)                           # <Kit>
     if os.path.basename(kit_dir).endswith(".blender.native"):

@@ -1,5 +1,75 @@
 # Changelog
 
+## 1.0.0 (2026-11-01)
+
+Pharos 1.0. Between 0.95.0 and this release the app was run on a second
+machine by an agent that built a sci-fi night street from a KitBash kit,
+a converted Unreal pack and a Character Creator body; its 26 findings
+(SHORTCOMINGS.md of that run) are what this release answers.
+
+- **Chains that tell the truth.** The survey knows the KitBash3D root
+  layout (`kb3d_*.blend` beside `kb3d_metadata.json` / `KB3DTextures/`)
+  as a kit, so `extract` exports it to FBX instead of listing records. A
+  conversion whose only failures are textures the engine's exporter
+  refused is PASS with gaps: the relink runs, the recipes are there, the
+  status lists the textures (`pipeline/conversion/pack_status.py`);
+  `pharos.py convert --relink-only` rewires the converted packs whose
+  manifest has no recipes (`--pack` names one; a pack that lost all or
+  most of its textures is FAIL, not a gap; `--pack` answers about the
+  named folder only). Kits are exported from the map's approved folders
+  under any parent. `doctor` finds Unreal through the Epic
+  launcher's manifest on any drive, newest version first. `map show`
+  prints inherited decisions, `map set` echoes the state; no error lines
+  for a library without a purchase list or a crawl index; the
+  degraded-wiring message rounds as it compares; the Models page says how
+  many of a folder's models its sheet shows.
+- **The builder builds what the API says.** A key used several times is
+  imported once, the rest are linked duplicates made with the data API
+  (hidden parts and parented lights copy too); images that name the same
+  file in the same colour space, and materials with the same node tree
+  and values, are merged after the imports (the test street held 8,366
+  images and 2,052 materials for 165 assets); `textures[].apply_to` on
+  a copy leaves the other copies alone. A texture file that is missing
+  or empty after the build is named and the build exits 5 (the `.blend`
+  is saved; `--pack` packs the rest); a build that raises exits 4
+  (`BUILD FAILED`). Texture paths are saved absolute so the file can
+  move. Without `--save` a build lands in
+  `<library>/_Agent_Files/builds/<scene>/` (the scene's name in any
+  script; next to the manifest when the library cannot be written), the
+  one folder inside a read-only library an agent may write. Dead KitBash
+  texture paths of both kit layouts are repointed. `/api/meshes/item`
+  carries `placed_bbox`, the corners where the builder puts a file that
+  holds one loose object (null for several or a nested one: the measure
+  now counts a file's loose objects).
+- **Characters and kits.** `crowd[]` takes the armature that deforms the
+  body as its root (loose parts of the body file go with it), the take
+  the clip gives its own armature (never a take of the body file, never
+  a keyed prop's), re-binds a Character Creator skin into armature space
+  so it no longer tears (turned onto the bones only when it disagrees
+  with them), and places `instances` with position and heading, each
+  from the import's own rotation. A rigged mesh without
+  motion in the animation section is a body, not a clip: it gets no
+  preview and `/api/anim/clips` names it under `bodies`. Kit manifests
+  reach the importer, so KitBash assemblies carry their material recipes
+  (all 1,041 of the owner's 1,041 answered `wired: false` before); the kits'
+  `kb3d_*.png.*` folders are texture sets (341 sets on the owner's
+  library that the texture search never listed).
+- **The Unreal exporter, from outside the engine.** The verifier compares
+  the manifest's triangle counts with the exported FBX files whose size
+  says more (read from their index arrays alone, never the whole file)
+  and warns when a file holds the Nanite source geometry (one manifest
+  said 8,514 triangles for a 4,754,752-triangle file); the status carries
+  it as a gap. A 0.95 registry's clips table is migrated at start. Not done, because it runs inside Unreal and was not testable
+  here: a TGA/EXR fallback for textures the PNG exporter refuses -- they
+  are listed in `status.json` under `gaps`.
+- Not built on purpose (wishes, not defects): search priors, companions
+  from Unreal level placements, a camera block in the scene format, a
+  VRAM estimate.
+- Tests for each of these, Blender-gated where Blender is needed (a
+  three-asset build with a dead texture, a crowd of three from a
+  generated body and clip, the skin re-bind); five review rounds, whose
+  59 confirmed findings this release also answers.
+
 ## 0.95.0 (2026-10-18)
 
 The 1.0 restructuring as a release candidate. Setup happens on one page

@@ -59,7 +59,9 @@ def build_library(root: Path) -> None:
     _files(root / "UE" / "Converted" / "Content" / "Meshes", {"SM_C.uasset": b""})
     _files(root / "UE" / "Converted" / "Exports" / "FBX", {"SM_C.fbx": STATIC})
     (root / "UE" / "Converted" / "Exports" / "manifest.json").write_text(
-        json.dumps({"schema": "pharos.pack.export/v2", "meshes": []}), encoding="utf-8")
+        json.dumps({"schema": "pharos.pack.export/v2", "meshes": [],
+                    "wiring": {"method": "ue-param", "slots_total": 4, "slots_resolved": 4}}),
+        encoding="utf-8")
     # a KitBash3D kit (new layout) and an exported one
     _files(root / "Kits" / "Alpha" / "kb3d_Alpha.blender.native", {"kb3d_Alpha.blend": b""})
     _files(root / "Kits" / "Beta" / "Exports", {"kit_manifest.json": b"{}"})
@@ -223,9 +225,13 @@ def _map_env(tmp: Path):
     config._CONFIG_FILE = Path(tmp) / "pharos_config.json"
     config.save({**config._DEFAULTS, "library_root": str(lib),
                  "registry_dir": str(Path(tmp) / "reg")})
+    # the module's loaded config too: run_map asks is_configured() of it
+    # (the tests passed only on a machine with a configured config file)
+    config.reload()
 
     def restore():
         library_map.PATH, config.LIBRARY_ROOT, config._CONFIG_FILE = saved
+        config.reload()
     return lib, restore
 
 
@@ -350,11 +356,46 @@ def test_engine_chains_run_only_on_the_maps_decisions():
             man.write_text('{"schema": "pharos.pack.export/v2", "meshes": []}', encoding="utf-8")
             rc, out = run(chains.convert, "--dry-run")
             assert rc == 0 and "converted already" in out and "--relink-only" in out, out
+            # the survey now sees the manifest: the pack turns converted
+            # and its spent decision drops; the relink still reaches it
+            lm.refresh(lib)
+            assert lm.load()["ue/rawpack"]["state"] == "converted" and not lm.load()["ue/rawpack"]["action"]
             rc, out = run(chains.convert, "--relink-only", "--dry-run")
-            assert rc == 0 and "relink_pack.sh" in out and "convert_packs.sh" not in out                 and "relinked 1 of 1" in out, out
+            assert rc == 0 and "relink_pack.sh" in out and "--sync" in out and "convert_packs.sh" not in out \
+                and "relinked 1 of 1" in out and "converted pack" in out, out
+            rc, out = run(chains.convert, "--relink-only", "--pack", "UE/RawPack", "--dry-run")
+            assert rc == 0 and "relinked 1 of 1" in out, out
+            # a converted pack whose manifest carries its recipes is left
+            # alone -- unless --pack asks for it
+            assert "Converted" not in out.split("relinking", 1)[1].split("\n")[0], out
+            rc, out = run(chains.convert, "--relink-only", "--pack", "UE/Converted", "--dry-run")
+            assert rc == 0 and "relinked 1 of 1" in out and "UE/Converted" in out, out
+            # a converted pack under a 'leave' decision is never relinked
+            lm.update("UE", action="leave")
+            rc, out = run(chains.convert, "--relink-only", "--dry-run")
+            assert rc == 0 and "relink_pack.sh" not in out, out
+            rc, out = run(chains.convert, "--relink-only", "--pack", "UE/RawPack", "--dry-run")
+            assert rc == 2 and "decision for UE/RawPack is leave" in out, out
+            lm.update("UE", action="")
+            # the relink is needed without a wiring block, not for 0 of N resolved
+            assert chains._needs_relink(man) is True
+            man.write_text(json.dumps({"schema": "pharos.pack.export/v2", "meshes": [],
+                                       "wiring": {"method": "ue-param", "slots_total": 493, "slots_resolved": 0}}), encoding="utf-8")
+            assert chains._needs_relink(man) is False and chains._needs_relink(man.parent / "nope.json") is True
+            man.write_text('{"schema": "pharos.pack.export/v2", "meshes": []}', encoding="utf-8")
+            # --pack answers about THAT folder, never about another one
+            rc, out = run(chains.convert, "--pack", "UE/RawPack", "--dry-run")
+            assert rc == 2 and "converted already" in out and "--relink-only --pack" in out \
+                and "no decision yet" not in out, out
+            rc, out = run(chains.convert, "--pack", "Nope/Thing", "--dry-run")
+            assert rc == 2 and "no folder of the library map" in out, out
+            rc, out = run(chains.convert, "--pack", "Kits/Alpha", "--dry-run")
+            assert rc == 2 and "not an Unreal pack" in out, out
             man.unlink()
             rc, out = run(chains.convert, "--relink-only", "--dry-run")
-            assert rc == 0 and "no approved pack with an Exports/manifest.json" in out, out
+            assert rc == 0 and "carries its recipes (1)" in out, out
+            rc, out = run(chains.convert, "--relink-only", "--pack", "UE/RawPack", "--dry-run")
+            assert rc == 0 and "no converted pack with an Exports/manifest.json" in out, out
             rc, out = run(chains.previews, "--dry-run")
             assert rc == 2 and 'map set "Anim" action=previews' in out, out
             lm.update("Anim", action="previews")
@@ -546,10 +587,29 @@ def test_survey_knows_the_kitbash_root_layout_and_show_marks_inherited():
             (meta_only / "gamma_kit.blend").write_bytes(b"BLENDER-stub")
             (lib / "Blend" / "Loose").mkdir(parents=True)
             (lib / "Blend" / "Loose" / "scene.blend").write_bytes(b"BLENDER-stub")
+            # a kit bought in another format: its PNG texture folder carries
+            # a kb3d_metadata.json of its own and holds no .blend -- textures
+            neo = lib / "Kits" / "Neo"
+            (neo / "FBX").mkdir(parents=True)
+            (neo / "FBX" / "wall.fbx").write_bytes(b"Kaydara FBX Binary  \x00")
+            (neo / "kb3d_neo.png.2k").mkdir()
+            (neo / "kb3d_neo.png.2k" / "kb3d_metadata.json").write_text("{}", encoding="utf-8")
+            for m in ("basecolor", "normal", "roughness"):
+                (neo / "kb3d_neo.png.2k" / f"KB3D_NEO_Wall_{m}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            # a .blender.native folder surveyed on its own (its parent is
+            # the root, a marker) is not a kit: the exporter would strip
+            # the suffix and export into the parent
+            own = lib / "kb3d_own.blender.native"
+            (own / "KB3DTextures").mkdir(parents=True)
+            (own / "kb3d_own-native.blend").write_bytes(b"BLENDER-stub")
+            (own / "kb3d_metadata.json").write_text("{}", encoding="utf-8")
             by = {n["folder"]: n for n in survey.survey(lib)["nodes"]}
             assert (by["Kits/Beta"]["kind"], by["Kits/Beta"]["state"]) == ("blender", "kit"), by["Kits/Beta"]
             assert (by["Kits/Gamma"]["kind"], by["Kits/Gamma"]["state"]) == ("blender", "kit"), by["Kits/Gamma"]
             assert by["Blend/Loose"]["state"] != "kit", by["Blend/Loose"]
+            assert by.get("Kits/Neo/kb3d_neo.png.2k", {}).get("state") != "kit" \
+                and by.get("Kits/Neo", {}).get("state") != "kit", {k: v for k, v in by.items() if "Neo" in k}
+            assert by.get("kb3d_own.blender.native", {}).get("state") != "kit", by.get("kb3d_own.blender.native")
             lm.refresh(lib)
             lm.update("Kits", action="extract")
 

@@ -192,12 +192,24 @@ def scan_folder(folder: Path, dry_run: bool = False, verbose: bool = False,
     # recipes' (exported per model), never texture sets: those rows go
     if converted and conn is not None:
         from asset_service.db import path_under
+        # ... except a KitBash3D kit's kb3d_<kit>.png.<res> folders: the
+        # map scans them as texture sets (a rescan of the kit's Exports
+        # once deleted the sets, and nothing brought them back until the
+        # next ingest)
+        def kit_sets(val, c) -> bool:
+            try:
+                first = Path(val).resolve().relative_to(c.resolve()).parts[0].lower()
+            except (ValueError, IndexError, OSError):
+                return False
+            return first.startswith("kb3d_") and ".png." in first
+
         stale = [(tbl, rid) for tbl, col in (("meshes", "fbx"),
                                              ("textures", "folder"))
                  for rid, val in conn.execute(
                      f"SELECT id, {col} FROM {tbl} WHERE source='scan'")
                  if val and any(path_under(val, c) and
-                                (tbl == "textures" or not path_under(val, c / "Exports"))
+                                (tbl == "textures" and not kit_sets(val, c)
+                                 or tbl == "meshes" and not path_under(val, c / "Exports"))
                                 for c in converted)]
         for tbl, rid in stale:
             conn.execute(f"DELETE FROM {tbl} WHERE id=?", (rid,))

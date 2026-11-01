@@ -1511,8 +1511,9 @@ def _mesh_extras(r: dict) -> dict:
     one inspected mansion pack: its first eight meshes all resolved to the
     same debris texture). A mesh
     whose wiring did not resolve gets {} -- an absent recipe, not a wrong one.
-    `recipe` is the full per-slot truth; `bbox_min`/`bbox_max` are world-space
-    placement corners in metres, or None when the manifest carried no box.
+    `recipe` is the full per-slot truth; `bbox_min`/`bbox_max` are the file's
+    own corners in metres (Z-up), `placed_bbox` the corners where the builder
+    puts the model (see _placed_bbox), or None when there is no box.
     """
     recipe = r.get("recipe")
     if not isinstance(recipe, dict):
@@ -1539,7 +1540,7 @@ def _mesh_extras(r: dict) -> dict:
         "recipe": recipe, "hero_textures": hero,
         "bbox_min": _bbox_triple(r, "bbox_min"),
         "bbox_max": _bbox_triple(r, "bbox_max"),
-        "placed_bbox": _placed_bbox(r, facts.get("pivot"))}
+        "placed_bbox": _placed_bbox(r, facts)}
 
 
 def _bbox_triple(r: dict, prefix: str):
@@ -1548,24 +1549,28 @@ def _bbox_triple(r: dict, prefix: str):
     return None if all(v is None for v in vals) else vals
 
 
-def _placed_bbox(r: dict, pivot) -> Optional[list]:
-    """[[min], [max]] in metres, Z-up, in the frame the scene builder
-    places the model in: its pivot at the asset position (a single-root
-    model is re-pivoted to the origin; a kit part does not keep its place
-    in the kit's layout). Known from the pivot class the measure saw:
-    base-centre (ground contact under the middle) and centre; None
-    otherwise, when `bbox_min`/`bbox_max` (the file's own frame) are all
-    there is."""
+def _placed_bbox(r: dict, facts) -> Optional[list]:
+    """[[min], [max]] in metres, Z-up, where the builder puts the model
+    when it is placed at the origin without rotation or scale. An OBJ is
+    re-pivoted to the centre of its footprint on its base (whatever the
+    file's own pivot); any other file that holds one model keeps its
+    origin, so its corners are `bbox_min`/`bbox_max` (the measure's box
+    is origin-relative and already Z-up). None when the file holds
+    several loose objects (a mesh beside an empty or a light counts, as
+    in the builder) or a mesh under a parent node (they keep the file's
+    layout, which the measure's box does not know), and for a row that
+    was not measured from the file (no pivot fact: a manifest row)."""
     lo, hi = _bbox_triple(r, "bbox_min"), _bbox_triple(r, "bbox_max")
     if not lo or not hi or any(v is None for v in lo + hi):
         return None
-    size = [round(float(h) - float(l), 4) for l, h in zip(lo, hi)]
-    r4 = lambda v: round(v, 4)                                        # noqa: E731
-    if pivot == "base-centre":
-        return [[r4(-size[0] / 2), r4(-size[1] / 2), 0.0], [r4(size[0] / 2), r4(size[1] / 2), size[2]]]
-    if pivot == "centre":
-        return [[r4(-v / 2) for v in size], [r4(v / 2) for v in size]]
-    return None
+    facts = facts or {}
+    if not facts.get("pivot") or (facts.get("mesh_models") or 1) > 1 or facts.get("nested_mesh"):
+        return None
+    r4 = lambda v: round(float(v), 4)                                 # noqa: E731
+    if Path(r.get("fbx") or "").suffix.lower() == ".obj":
+        size = [float(h) - float(l) for l, h in zip(lo, hi)]
+        return [[r4(-size[0] / 2), r4(-size[1] / 2), 0.0], [r4(size[0] / 2), r4(size[1] / 2), r4(size[2])]]
+    return [[r4(v) for v in lo], [r4(v) for v in hi]]
 
 
 def _spread_packs(entries: list) -> None:
@@ -1929,7 +1934,7 @@ def _full_items(entries: list, P=None) -> tuple:
 
 
 def api_meshes_item(params: dict) -> dict:
-    """Full items (recipe, material names, placement corners) for the
+    """Full items (recipe, material names, corners) for the
     meshes an agent has CHOSEN: ?key=<key> (repeatable) or ?id=<id>.
     Search results stay short; this is where the recipe lives.
 
@@ -2107,8 +2112,8 @@ def _clip_rows() -> list:
             for r in conn.execute(
                     "SELECT rel, folder, name, bytes, frames, fps, duration_s, "
                     "root_motion, has_mesh, bones, skeleton, family, bone_names "
-                    "FROM clips WHERE (folder = ? OR substr(folder, 1, ?) = ?) "
-                    "AND COALESCE(is_body, 0) = 0 ORDER BY rel",
+                    "FROM clips WHERE (folder = ? OR substr(folder, 1, ?) = ?)"
+                    + clips_import.body_filter(conn) + " ORDER BY rel",
                     (section, len(section) + 1, section + "/")):
                 d = dict(r)
                 d["pack"] = "pack::" + (d["folder"] or "")
@@ -2183,15 +2188,24 @@ def _skeletons() -> dict:
             names = None
         bodies[str(r["fbx"])] = names        # None = read the file once
     # the character files the clip measure found in the section itself
-    # (a rigged mesh without motion): their bone names are stored
+    # (a rigged mesh without motion): their bone names are stored. This
+    # section's rows only (a renamed folder leaves its rows behind), and
+    # only files that are there
+    section = _anim_prefix()[len("pack::"):]
     conn = db.connect(_DB_PATH)
     try:
-        for r in conn.execute("SELECT rel, bone_names FROM clips WHERE COALESCE(is_body, 0) = 1"):
+        known = {os.path.normcase(os.path.normpath(b)) for b in bodies}
+        for r in conn.execute("SELECT rel, bone_names FROM clips WHERE (folder = ? OR substr(folder, 1, ?) = ?)"
+                              + clips_import.body_filter(conn, bodies=True),
+                              (section, len(section) + 1, section + "/")):
+            path = str(root / r["rel"])
+            if os.path.normcase(os.path.normpath(path)) in known or not (root / r["rel"]).is_file():
+                continue                 # the scanner's row names the same file; or gone
             try:
                 names = json.loads(r["bone_names"] or "[]") or None
             except ValueError:
                 names = None
-            bodies.setdefault(str(root / r["rel"]), names)
+            bodies[path] = names
     except sqlite3.OperationalError:
         pass
     finally:
@@ -2214,7 +2228,7 @@ def _skeletons() -> dict:
                       "subfolders": rec["subfolders"][:24],
                       "subfolders_total": len(rec["subfolders"]),
                       "clips": rec["clips"],
-                      "bodies": sorted(_lib_rel(b) for b in rec["bodies"])}
+                      "bodies": sorted({_lib_rel(b) for b in rec["bodies"]})}
                      for rec in records]
     return out
 
@@ -3303,7 +3317,7 @@ def _startup_imports(db_path: str, force: bool = False) -> dict:
             except Exception as exc:  # noqa: BLE001 -- a missing source must not kill the app
                 # an absent purchase CSV is a state, not a failure
                 if name == "collection" and isinstance(exc, FileNotFoundError):
-                    print("purchases: no purchase list in this library", flush=True)
+                    print(library_map.purchases_absent(), flush=True)
                 else:
                     print(f"{name} import skipped: {exc}", flush=True)
                     failed = True

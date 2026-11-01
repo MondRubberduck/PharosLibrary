@@ -82,6 +82,11 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(collection)")}
         if cols and "meta" not in cols:
             conn.execute("ALTER TABLE collection ADD COLUMN meta TEXT")
+    # the clips table is clips_import's; a registry from before 1.0 has it
+    # without the is_body column every clip reader filters on
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(clips)")}
+    if cols and "is_body" not in cols:
+        conn.execute("ALTER TABLE clips ADD COLUMN is_body INTEGER DEFAULT 0")
     conn.executescript(_LEGACY_SQL)
     conn.execute("DROP INDEX IF EXISTS idx_assets_content_hash")
     conn.execute("DROP INDEX IF EXISTS idx_asset_files_sha256")

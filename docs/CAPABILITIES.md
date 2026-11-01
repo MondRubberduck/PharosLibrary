@@ -33,7 +33,7 @@ token cost.** Operating manual (setup + build doctrine):
   Answers are SHORT items (about 90 tokens each): stable `key` (the
   library-relative file path), real bounding box, triangle count, themes,
   whether a material recipe exists (`wired`). The full record of a chosen mesh — material
-  recipe (`recipe`, `hero_textures`), material names, placement corners,
+  recipe (`recipe`, `hero_textures`), material names, the file's corners and `placed_bbox`,
   3D preview URL — comes from `/api/meshes/item?key=` (or `detail=1`).
   `/api/meshes/packs` lists the pack names, their wiring health and the
   linked purchases (whose store images show what the pack looks like).
@@ -161,7 +161,16 @@ guide: scene-file format, how search results go in, the commands.
   buildings keep their slots), **repoints dead KitBash texture
   references** at the shipped `.png.2k` folder, applies
   `manifest.textures[]` as ground planes, places crowd with real
-  per-instance animation stagger. Runs:
+  per-instance animation stagger (the armature is the body's root, the
+  clip's own take plays, a Character Creator skin is re-bound into
+  armature space, `instances[]` gives position and heading per body).
+  A key used several times is imported once (linked duplicates); images
+  and materials are merged after the imports; a missing texture file is
+  named and the build exits 5 (the `.blend` is saved); texture paths are
+  saved absolute (`--pack` packs them); without `--save` the build goes
+  to `<library>/_Agent_Files/builds/<scene>/` (next to the manifest when
+  that folder cannot be written); a build that raises exits 4 with
+  `BUILD FAILED`. Runs:
   `blender --background --factory-startup --python scene_builder.py
   -- manifest.json` (`--factory-startup` is REQUIRED: user Blender
   extensions can segfault headless runs). Manifest `audio[]` entries are
@@ -189,8 +198,9 @@ Program Files or /Applications; Unreal: `UE_EXE`), every one of them
 env-overridable. `python pharos.py
 init` defaults the registry and previews to `~/.pharos/`. Asset files are
 never written: the only writes inside the library root are the generated
-index files and the library map under `<agent_files>/` and the `Exports/`
-folders the conversion pipelines own.
+index files, the library map and the agents' builds (`builds/<scene>/`)
+under `<agent_files>/`, and the `Exports/` folders the conversion
+pipelines own.
 
 ## 7. Limits (honest list)
 

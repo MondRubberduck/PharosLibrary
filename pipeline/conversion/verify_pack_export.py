@@ -127,6 +127,20 @@ def image_dims(path):
     return (None, None)
 
 
+def fbx_triangles_cheap(path):
+    """The FBX's triangle count read from its index arrays alone (see
+    asset_service.fbx_dims.fbx_triangles); None when unreadable."""
+    try:
+        svc = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), "service")
+        if svc not in sys.path:
+            sys.path.insert(0, svc)
+        from asset_service.fbx_dims import fbx_triangles
+        return fbx_triangles(path)
+    except Exception:
+        return None
+
+
 def fbx_count(path, key):
     """"triangles" / "vertices" straight from the exported FBX (engine-free).
 
@@ -369,10 +383,17 @@ def main():
     # registry re-measures every file anyway, so answers are right -- the
     # manifest's reader is warned here.
     R["geometry_mismatch"] = []
+    R["geometry_unread"] = []
+    # the largest files, read with the index-only counter (never the full
+    # tree: 8,096 files, 28.8 GB, took 46 s that way); a byte-per-triangle
+    # screen once hid 1,770 of 2,252 real mismatches
+    compared = 0
     for _size, p, rec in sorted(counted, key=lambda t: -t[0])[:GEOMETRY_SAMPLE]:
-        got = fbx_count(p, "triangles")
+        got = fbx_triangles_cheap(p)
         if not got:
+            R["geometry_unread"].append(rec.get("fbx"))
             continue
+        compared += 1
         said = rec["triangles"]
         if got >= 1.5 * said and got - said >= 10:
             m_stat["geometry_differs"] += 1
@@ -380,13 +401,16 @@ def main():
                                            "manifest_triangles": said, "fbx_triangles": got})
     if R["geometry_mismatch"]:
         worst = max(R["geometry_mismatch"], key=lambda g: g["fbx_triangles"])
-        warnings.append("GEOMETRY differs from the manifest in %d of the %d largest FBX "
+        warnings.append("GEOMETRY differs from the manifest in %d of the %d FBX compared "
                         "(e.g. %s: manifest %s triangles, file %s; Nanite source geometry "
                         "was exported) -- PASS/FAIL is unaffected; the registry measures "
                         "the files themselves"
-                        % (len(R["geometry_mismatch"]), min(len(counted), GEOMETRY_SAMPLE),
+                        % (len(R["geometry_mismatch"]), compared,
                            worst.get("name"), format(worst["manifest_triangles"], ","),
                            format(worst["fbx_triangles"], ",")))
+    if R["geometry_unread"]:
+        warnings.append("GEOMETRY check could not read %d FBX file(s): %s"
+                        % (len(R["geometry_unread"]), ", ".join(str(x) for x in R["geometry_unread"][:5])))
 
     # ---------- degraded wiring (ADVISORY, never pass/fail) ----------
     # Several packs sit legitimately below the 0.9 target for reasons that are not
@@ -405,7 +429,7 @@ def main():
                         reasons[k] = reasons.get(k, 0) + 1
         top = sorted(((k, v) for k, v in reasons.items() if isinstance(v, int)),
                      key=lambda kv: -kv[1])[:5]
-        R["degraded"] = ratio < DEGRADED_RATIO
+        R["degraded"] = round(ratio, 4) < DEGRADED_RATIO     # compared as printed
         R["degraded_detail"] = {"ratio": round(ratio, 4), "threshold": DEGRADED_RATIO,
                                 "slots_resolved": res, "slots_total": total,
                                 "top_unresolved_reasons": dict(top)}

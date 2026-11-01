@@ -7,8 +7,9 @@ build-phase doctrine (scenes) is in `AGENT_PLAYBOOK.md`.
 ## Ground rules
 
 - The library is **read-only** for you. Pharos itself writes only
-  `_Agent_Files/` (its index files and the library map), `Exports/`
-  (conversion output) and preview files. Everything else lives in the
+  `_Agent_Files/` (its index files, the library map, and `builds/<scene>/`,
+  where the scene builder saves and agents keep their manifests and
+  renders), `Exports/` (conversion output) and preview files. Everything else lives in the
   registry, which is derived and rebuildable.
 - **Nothing with an engine runs without the user's decision in the
   library map.** `pharos.py convert`, `extract` and `previews` refuse
