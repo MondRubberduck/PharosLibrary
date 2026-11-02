@@ -40,7 +40,14 @@ from mathutils import Vector
 
 def build(manifest_path: str, save_path: str = None, pack_textures: bool = False):
     """Main entry point. Call from Blender."""
-    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    try:
+        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        print(f"MANIFEST INVALID -- nothing was built: not a JSON file ({exc})")
+        sys.exit(2)
+    if not isinstance(manifest, dict):
+        print("MANIFEST INVALID -- nothing was built: the file does not hold an object")
+        sys.exit(2)
     # validate BEFORE building: agents author manifests, and a bad one
     # used to fail half-way through with objects already in the scene
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -99,8 +106,8 @@ def build(manifest_path: str, save_path: str = None, pack_textures: bool = False
         _apply_texture_sets(manifest, ground_y, roots_by_id)
 
     # --- crowd ---
-    for group in manifest.get("crowd", []):
-        _build_crowd(group, ground_y)
+    for gi, group in enumerate(manifest.get("crowd", [])):
+        _build_crowd(group, ground_y, gi)
         sys.stdout.flush()
     if manifest.get("crowd"):
         _dedup_datablocks()          # the bodies' copies too
@@ -227,11 +234,14 @@ def _missing_textures() -> list:
     for img in bpy.data.images:
         if not img.users or img.packed_file or img.source not in ('FILE', 'TILED'):
             continue
-        src = bpy.path.abspath(img.filepath) if img.filepath else ""
+        raw = img.filepath or ""
+        # a bare name is not a file: Blender stores an engine's sampler
+        # reference ('EnvSamplerTex') as the path, sometimes made absolute
+        # against the drive root; a texture file always has an extension,
+        # a reference has none (30 of 333 clean Unreal builds exited 5)
+        bare = bool(raw) and ("/" not in raw.replace("\\", "/") or not Path(raw).suffix)
+        src = bpy.path.abspath(raw) if raw and not bare else ""
         if not src:
-            # an image with no file at all (an engine's sampler reference
-            # in an FBX): nothing can be missing from disk; 30 of 326 clean
-            # builds once exited 5 over one
             nopath += 1
             continue
         if img.source == 'TILED':
@@ -355,7 +365,9 @@ def _dedup_datablocks() -> None:
     merged_mat = 0
     for mat in sorted(bpy.data.materials, key=lambda m: (re.sub(r"\.\d{3}$", "", m.name), m.name)):
         base = re.sub(r"\.\d{3}$", "", mat.name)
-        key = (base, _material_fingerprint(mat))
+        # a recipe material is named after its asset: two assets with the
+        # same maps make the same material (611 of them once, for 64)
+        key = ("recipe" if mat.get("pharos_recipe") else base, _material_fingerprint(mat))
         if key in keep:
             mat.user_remap(keep[key])
             merged_mat += 1
@@ -564,7 +576,19 @@ def _import_asset(asset, ground_y, index, roots_by_id=None):
             roots_by_id[aid] = root
         bpy.ops.object.select_all(action='DESELECT')
         return
-    imported = _import_file(fbx, obj_name)
+    before = _scene_objects()
+    try:
+        imported = _import_file(fbx, obj_name)
+    except Exception as exc:                              # noqa: BLE001
+        # a file an importer refuses (a broken GLB, a .blend that is none,
+        # an empty OBJ) skips its asset; the rest of the scene still builds
+        print(f"    ERROR: {aid} skipped: the importer refused {Path(fbx).name}: {str(exc).strip()[:200]}")
+        for o in [o for o in bpy.context.scene.objects if o not in before]:
+            bpy.data.objects.remove(o, do_unlink=True)
+        for o in parked:
+            o.name = obj_name
+        _SKIPPED.append(aid)
+        return
     target = _pick_object(imported, obj_name) if obj_name else None
     for o in parked:
         o.name = obj_name       # Blender gives it the next free '.NNN'
@@ -730,6 +754,22 @@ def _make_material(name, recipe):
     alb = load_tex(recipe.get("albedo"))
     if alb:
         links.new(alb.outputs["Color"], bsdf.inputs["Base Color"])
+        if recipe.get("albedo_alpha") and not (recipe.get("opacity") or recipe.get("alpha")):
+            # the colour map carries the cut-out in its alpha (SpeedTree's
+            # ColorOpacity): leaves rendered as white ghosts without it.
+            # Cut at the engine's mask threshold (0.333): a trunk's alpha
+            # sits at 0.5-1.0 and rendered a quarter see-through raw
+            clip = nodes.new("ShaderNodeMath")
+            clip.operation = 'GREATER_THAN'
+            clip.inputs[1].default_value = 0.333
+            links.new(alb.outputs["Alpha"], clip.inputs[0])
+            links.new(clip.outputs["Value"], bsdf.inputs["Alpha"])
+            for mode in ("HASHED", "DITHERED", "CLIP"):
+                try:
+                    mat.blend_method = mode
+                    break
+                except Exception:                         # noqa: BLE001
+                    continue
 
     # normal -> Normal (via Normal Map node)
     nrm = load_tex(recipe.get("normal"), non_color=True)
@@ -799,7 +839,31 @@ def _make_material(name, recipe):
     ref = load_tex(recipe.get("refraction") or recipe.get("transmission"), non_color=True)
     tw = bsdf.inputs.get("Transmission Weight") or bsdf.inputs.get("Transmission")
     if ref and tw is not None:
-        links.new(ref.outputs["Color"], tw)
+        # the map is a MASK of where the glass is (a solar tent's map is 95 %
+        # black: the frame): full transmission where it is lit at all (as
+        # a weight, a dark map once passed 1.8 % of light), and no metal
+        # there (metallic 1 under glass mirrored); the rest of the material
+        # is untouched
+        mask = nodes.new("ShaderNodeMath")
+        mask.operation = 'GREATER_THAN'
+        mask.inputs[1].default_value = 0.01
+        links.new(ref.outputs["Color"], mask.inputs[0])
+        links.new(mask.outputs["Value"], tw)
+        met_in = bsdf.inputs["Metallic"]
+        inv = nodes.new("ShaderNodeMath")
+        inv.operation = 'SUBTRACT'
+        inv.inputs[0].default_value = 1.0
+        links.new(mask.outputs["Value"], inv.inputs[1])
+        mul = nodes.new("ShaderNodeMath")
+        mul.operation = 'MULTIPLY'
+        if met_in.is_linked:
+            src = met_in.links[0].from_socket
+            links.remove(met_in.links[0])
+            links.new(src, mul.inputs[0])
+        else:
+            mul.inputs[0].default_value = float(met_in.default_value)
+        links.new(inv.outputs["Value"], mul.inputs[1])
+        links.new(mul.outputs["Value"], met_in)
         _refractive(mat)
     return mat
 
@@ -822,7 +886,8 @@ def _named_glass(name: str) -> bool:
     """'Window_Glass', 'glass', 'GlassPane' are glass; 'Fiberglass_Hull',
     'Glass_Frame_Metal', 'Sunglasses_Plastic' are not (the word is a part
     of another, or the thing is the frame around the glass)."""
-    words = [w for w in re.split(r"[^a-z0-9]+", re.sub(r"(?<=[a-z])(?=[A-Z])", "_", name).lower()) if w]
+    words = [re.sub(r"\d+", "", w) for w in re.split(r"[^a-z0-9]+", re.sub(r"(?<=[a-z])(?=[A-Z])", "_", name).lower())]
+    words = [w for w in words if w]           # 'MI_Glass01' -> glass
     if not words or any(w in _GLASS_NOT for w in words):
         return False
     return any(w == "glass" or (w.endswith("glass") and w[:-5] in ("window", "pane", "clear", "tinted", "frosted"))
@@ -850,9 +915,15 @@ def _glass_by_name() -> int:
                 or tw.is_linked or tw.default_value > 0.0:
             continue
         tw.default_value = 1.0
+        met = bsdf.inputs.get("Metallic")
+        if met is not None and not met.is_linked:
+            met.default_value = 0.0           # an Unreal glass kept metallic 1 and mirrored
         rough = bsdf.inputs.get("Roughness")
-        if rough is not None and not rough.is_linked:
-            rough.default_value = min(float(rough.default_value), 0.1)
+        if rough is not None and not rough.is_linked and abs(float(rough.default_value) - 0.5528) < 1e-3:
+            # Blender's FBX importer gives every Unreal material roughness
+            # 0.5528 (UE's default Shininess 20): not authored, and milky
+            # on a window. An authored value stays: frosted glass is frosted
+            rough.default_value = 0.1
         _refractive(mat)
         n += 1
     if n:
@@ -880,6 +951,9 @@ def _apply_recipe_slots(root, slots, aid):
         # one map per role, the same pick as the registry's `primary`; a
         # `resolved: false` slot collapses to {} and keeps the FBX material
         maps = collapse_slot_maps(s)
+        if maps and any((m.get("role") == "albedo" and "opacity" in (m.get("param") or "").lower())
+                        for m in s.get("maps") or []):
+            maps["albedo_alpha"] = True
         if not maps:
             continue
         slot_name = s.get("material") or s.get("slot") or ""
@@ -1009,9 +1083,15 @@ def _apply_texture_sets(manifest, ground_y, roots_by_id):
         from scene_manifest import texture_maps
         recipe, source = texture_maps(tex)
         if source == "folder":
-            print(f"    note: set name {setname!r} matches no "
-                  f"filename in {folder} -- using all maps in the "
-                  f"folder")
+            from scene_manifest import texture_set_names
+            names = texture_set_names(folder)
+            if len(names) > 1:
+                print(f"    WARNING: set {setname!r} matches no file in {folder}; the folder "
+                      f"holds {len(names)} sets ({', '.join(names[:6])}{' ...' if len(names) > 6 else ''}) "
+                      f"-- skipped, name one of them")
+                continue
+            print(f"    note: set name {setname!r} matches no filename in {folder} -- "
+                  f"the folder holds one set, using it")
         if not recipe:
             print(f"    WARNING: no map channels recognised in {folder} "
                   f"(set {setname!r})")
@@ -1195,7 +1275,75 @@ def _settle_body(body_objs):
     return body_root
 
 
-def _build_crowd(group, ground_y):
+def _strip_root_travel(action, body) -> float:
+    """A clip whose root travels (a walk) carries a body away from its
+    position and snaps it back at every loop. A trajectory root above the
+    hips (CC_Base_BoneRoot over CC_Base_Hip, Unreal's root over pelvis) is
+    pinned at its first key: a straight ramp cannot take out a path that
+    slows, stops or turns (a chat-while-walking clip still wandered
+    1.15 m). A root that is the hips itself (Mixamo) keeps its vertical
+    motion (a sit-down must sink) and loses the linear travel of its
+    horizontal channels. Returns the travel removed, in armature units."""
+    from mathutils import Vector
+    arm = body if body.type == 'ARMATURE' else next(
+        (o for o in body.children_recursive if o.type == 'ARMATURE'), None)
+    if arm is None:
+        return 0.0
+    hip_words = ("hips", "pelvis", "hip", "cog")
+    roots = [b for b in arm.data.bones if b.parent is None]
+    pinned = {b.name for b in roots if any(c.name.lower().rsplit(":", 1)[-1].rstrip("_01234567890") in hip_words
+                                           or any(w in c.name.lower() for w in hip_words)
+                                           for c in b.children)}
+    ramped = {b.name for b in roots if b.name not in pinned}
+
+    def vertical_channel(bone_name):
+        """The location channel of this bone that points up in the world."""
+        bone = arm.data.bones.get(bone_name)
+        if bone is None:
+            return None
+        m = arm.matrix_world.to_3x3() @ bone.matrix_local.to_3x3()
+        ups = [abs((m @ Vector(axis)).z) for axis in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
+        return max(range(3), key=lambda k: ups[k])
+    removed = 0.0
+    verticals: dict = {}
+    for fc in _fcurves_of(action):
+        m = re.match(r'pose\.bones\["(.+?)"\]\.location$', fc.data_path)
+        if not m or len(fc.keyframe_points) < 2:
+            continue
+        name = m.group(1)
+        kps = sorted(fc.keyframe_points, key=lambda k: k.co.x)
+        if name in pinned:
+            first = kps[0].co.y
+            travel = max(abs(k.co.y - first) for k in kps)
+            if travel < 1e-6:
+                continue
+            for kp in kps:
+                d = kp.co.y - first
+                kp.co.y -= d
+                kp.handle_left.y -= d
+                kp.handle_right.y -= d
+        elif name in ramped:
+            if name not in verticals:
+                verticals[name] = vertical_channel(name)
+            if fc.array_index == verticals[name]:
+                continue                       # the hips' own rise and fall stays
+            f0, f1 = kps[0].co.x, kps[-1].co.x
+            travel = kps[-1].co.y - kps[0].co.y
+            if f1 <= f0 or abs(travel) < 1e-6:
+                continue
+            for kp in kps:
+                d = (kp.co.x - f0) / (f1 - f0) * travel
+                kp.co.y -= d
+                kp.handle_left.y -= d
+                kp.handle_right.y -= d
+        else:
+            continue
+        fc.update()
+        removed = max(removed, abs(travel))
+    return removed
+
+
+def _build_crowd(group, ground_y, index=0):
     """Import a body + animation; place instances (a ring around the
     position, or the given `instances` with position and heading); every
     instance plays the clip's own take, staggered per instance."""
@@ -1214,11 +1362,22 @@ def _build_crowd(group, ground_y):
     before_objs = _scene_objects()
     key = str(body_fbx).replace("\\", "/").lower()
     cached = _BODIES.get(key)
+
+    def _abandon(what, exc):
+        # the group is skipped: nothing of it stays in the scene (a body in
+        # rest pose once stood at the origin for every refused clip)
+        print(f"    ERROR: crowd[{index}] skipped: the importer refused the {what}: {str(exc).strip()[:200]}")
+        for o in [o for o in bpy.context.scene.objects if o not in before_objs]:
+            bpy.data.objects.remove(o, do_unlink=True)
+        if _BODIES.get(key) is not None and _BODIES[key][0].name not in bpy.data.objects:
+            _BODIES.pop(key, None)
+        _SKIPPED.append(f"crowd[{index}]")
     if cached is not None and cached[0].name in bpy.data.objects:
         # the same body in another clip group: a linked duplicate of the
         # imported, re-bound body (six groups once imported it six times,
         # 27 s to 115 s), with the import's own rotation and no clip yet
         # (it once carried the first group's heading and take)
+        from mathutils import Matrix
         body_root = _duplicate_hierarchy(cached[0])
         body_root.rotation_euler = cached[1].copy()
         body_root.location = (0.0, 0.0, 0.0)
@@ -1226,12 +1385,20 @@ def _build_crowd(group, ground_y):
         for o in body_objs:
             if o.animation_data:
                 o.animation_data_clear()
+            if o.type == 'ARMATURE':
+                for pb in o.pose.bones:   # the first group's pose must not stay on bones this clip does not key
+                    pb.matrix_basis = Matrix.Identity(4)
         print("    body: linked duplicate of the earlier import")
     else:
-        bpy.ops.import_scene.fbx(filepath=body_fbx, global_scale=1.0)
+        try:
+            bpy.ops.import_scene.fbx(filepath=body_fbx, global_scale=1.0)
+        except Exception as exc:                          # noqa: BLE001
+            _abandon(f"body {Path(body_fbx).name}", exc)
+            return
         body_objs = [o for o in bpy.context.scene.objects if o not in before_objs]
         if not body_objs:
             print(f"    WARNING: body import failed: {body_fbx}")
+            _SKIPPED.append(f"crowd[{index}]")
             return
         body_root = _settle_body(body_objs)
         _BODIES[key] = (body_root, body_root.rotation_euler.copy())
@@ -1244,7 +1411,11 @@ def _build_crowd(group, ground_y):
     # -- otherwise a ghost armature stays parked at the origin (V5 D6:
     # 5-instance crowd produced 6 armatures)
     before_actions = set(bpy.data.actions)
-    bpy.ops.import_scene.fbx(filepath=anim_fbx, global_scale=1.0)
+    try:
+        bpy.ops.import_scene.fbx(filepath=anim_fbx, global_scale=1.0)
+    except Exception as exc:                              # noqa: BLE001
+        _abandon(f"clip {Path(anim_fbx).name}", exc)
+        return
     anim_objs = [o for o in bpy.context.scene.objects
                  if o not in before_objs and o not in body_objs]
 
@@ -1260,6 +1431,10 @@ def _build_crowd(group, ground_y):
     if action is None:
         print(f"    WARNING: no animation take longer than one frame in {anim_fbx}")
     else:
+        travel = _strip_root_travel(action, body_root)
+        if travel:
+            print(f"    root motion taken out of the clip ({travel:.2f} armature units): "
+                  f"the bodies walk in place at their positions")
         # every body loops its clip, the unshifted ones too (instance 0 once
         # froze on the last key while its neighbours kept walking)
         for fc in _fcurves_of(action):
@@ -1272,11 +1447,18 @@ def _build_crowd(group, ground_y):
     if bpy.context.selected_objects:
         bpy.ops.object.delete()
 
+    offset_cache: dict = {}
+
     def _offset_action(src, frames):
         """Copy an action with keyframes shifted -- linked duplicates share
-        one action, so per-instance stagger needs per-instance copies
-        (V5 D6: documented stagger resolved to 0 for every instance)."""
+        one action, so per-instance stagger needs per-shift copies (one per
+        distinct shift, not per body: 1,000 people once held 446 MB of
+        clips where 22 MB would do)."""
+        key = (src.name, int(frames))
+        if key in offset_cache and offset_cache[key].name in bpy.data.actions:
+            return offset_cache[key]
         new = src.copy()
+        offset_cache[key] = new
         for fc in _fcurves_of(new):
             for kp in fc.keyframe_points:
                 kp.co.x += frames

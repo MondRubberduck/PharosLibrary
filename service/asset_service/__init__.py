@@ -23,7 +23,7 @@ Modules:
 Everything in this package treats the canonical asset roots as read-only.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 import sys as _sys
 

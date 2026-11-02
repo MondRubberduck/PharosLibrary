@@ -21,7 +21,10 @@ import re
 # "Albedo ", "02 - Diffuse Texture", "Base Color TX2", "Normal TX2".
 
 ROLE_RULES = (
-    ("albedo",    ("basecolor", "albedo", "diffuse")),
+    # SpeedTree's ColorOpacity is the colour map with the cut-out in its
+    # alpha: colour first, or the "opacity" rule took it and the leaves
+    # rendered as white ghosts
+    ("albedo",    ("basecolor", "albedo", "diffuse", "coloropacity", "colouropacity")),
     ("normal",    ("normalmap", "normal")),
     ("roughness", ("roughness", "glossiness")),
     ("metallic",  ("metallic", "metalness")),

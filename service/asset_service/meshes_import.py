@@ -381,7 +381,10 @@ def _finish_recipe(recipe: dict) -> dict:
         slots.append(out)
         if not found:
             pick = collapse_slot_maps(out)
-            if any(k not in ("other", "mask", "packed_channels") for k in pick):
+            if pick and any((m.get("role") == "albedo" and "opacity" in (m.get("param") or "").lower())
+                            for m in out.get("maps") or []):
+                pick["albedo_alpha"] = True        # the colour map's alpha is the cut-out
+            if any(k not in ("other", "mask", "packed_channels", "albedo_alpha") for k in pick):
                 found = True
                 primary_slot = sl.get("slot")
                 primary = pick
@@ -396,7 +399,7 @@ def _finish_recipe(recipe: dict) -> dict:
     # recipe, so it must not count as resolved: `resolved:true` always
     # means at least one map has a real role, and never produces an empty
     # primary. A `mask` is not a material map either.
-    named = [k for k in maps if k not in ("other", "mask")]
+    named = [k for k in maps if k not in ("other", "mask", "albedo_alpha")]
     return {"slots": slots, "primary": primary,
             "resolved": bool(named), "primary_slot": primary_slot}
 

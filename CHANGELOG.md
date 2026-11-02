@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.0.2 (2026-11-02)
+
+The 1.0.1 test report: placement held on all 512 models (0.06 mm), the
+upgrade re-imported itself, the budget was exact; two 1.0.1 claims did
+not hold and the crowd default traded a stills problem for a motion one.
+This release answers that list.
+
+- **Crowds stay on their marks and loop without a pop.** A walking
+  clip's root travel is taken out, so every body walks in place where
+  it was put (bodies had drifted up to 1.5 m and fused; 35 of 49 clips
+  snapped back at the loop): a trajectory root above the hips is pinned
+  at its first key (a ramp cannot remove a path that turns or stops), a
+  hips root loses its horizontal travel and keeps its rise and fall (a
+  sit-down still sinks). One shifted copy of the clip per distinct
+  shift, not per body (1,000 people: 446 MB to a few MB). A body reused
+  by a later group starts from the rest pose; a group whose body or clip
+  the importer refuses leaves nothing in the scene.
+- **Exit 5 means a file is missing, this time for real.** Blender stores
+  an engine sampler's bare name as the image path; a name with no folder
+  is not a file (30 of 333 clean Unreal builds exited 5 over one).
+- **SpeedTree vegetation.** `ColorOpacity` is the colour map with the
+  cut-out in its alpha: the parameter classifier says albedo, the recipe
+  carries `albedo_alpha`, the builder cuts the alpha at the engine's
+  mask threshold (0.333; a trunk's alpha of 0.5 to 1 rendered a quarter
+  see-through raw). The 1.0.1 change had gone into the file-name
+  reader, which the recipes never use.
+- **Glass.** Metallic 0 on a glass material (Unreal glass had mirrored),
+  the importer's default roughness (0.5528, not authored) clamped to 0.1
+  while an authored value stays (frosted stays frosted), digits in the
+  name allowed (`MI_Glass01`), the recipe's refraction map read as the
+  mask it is: full transmission where it is lit at all (as a weight a
+  dark map passed 1.8 % of light), no metal there, the rest of the
+  material untouched (a solar tent's frame is 95 % of its map).
+- **Validator and exits.** NaN and Infinity are refused (crowd fields
+  too); a manifest that is not JSON exits 2, one with a UTF-8 BOM
+  (PowerShell) is read; a file any importer refuses (broken GLB, glTF,
+  `.blend`, empty OBJ, a bad crowd body or clip) skips its asset or
+  group with exit 3, the rest builds.
+- **Upgrades.** The server regenerates the agent docs whenever their
+  stamp lags the code; `doctor` reports docs older than the code
+  (`stale`); the docs say which version wrote them.
+- Recipe materials of different assets merge when they are the same
+  material; a mistyped texture set in a folder of several sets is a
+  warning and a skip, not another set; `animation_offset` documented
+  with the right sign; Blender-gated tests report SKIP, not PASS; the
+  viewer test no longer assumes a Windows UNC path on Linux.
+
 ## 1.0.1 (2026-11-02)
 
 The second test report on 1.0.0 (19 of the 26 virgin-run findings

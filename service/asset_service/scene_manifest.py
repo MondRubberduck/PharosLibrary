@@ -76,6 +76,7 @@ Schema (pharos.scene/v1; kiosk.scene/v1 accepted):
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -158,8 +159,10 @@ def validate_manifest(data: dict) -> list[str]:
             errors.append(f"{label}.scale must be a positive number")
         for fld, val in (("position", pos), ("rotation", rot)):
             if isinstance(val, list) and len(val) == 3 and not all(
-                    isinstance(v, (int, float)) and not isinstance(v, bool) for v in val):
-                errors.append(f"{label}.{fld} must hold three numbers")
+                    isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in val):
+                errors.append(f"{label}.{fld} must hold three finite numbers")
+        if isinstance(sc, (int, float)) and not isinstance(sc, bool) and not math.isfinite(sc):
+            errors.append(f"{label}.scale must be a finite number")
 
     textures = data.get("textures", [])
     if not isinstance(textures, list):
@@ -173,7 +176,7 @@ def validate_manifest(data: dict) -> list[str]:
     crowd = data.get("crowd", [])
     if not isinstance(crowd, list):
         crowd = []
-    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)   # noqa: E731
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)   # noqa: E731
     for i, c in enumerate(crowd):
         if not isinstance(c, dict):
             errors.append(f"crowd[{i}]: must be an object")
@@ -192,7 +195,7 @@ def validate_manifest(data: dict) -> list[str]:
             if fld in c and not num(c[fld]):
                 errors.append(f"crowd[{i}].{fld} must be a number")
         sp = c.get("phase_spread")
-        if sp is not None and (isinstance(sp, bool) or not isinstance(sp, (int, float)) or sp < 0):
+        if sp is not None and (not num(sp) or sp < 0):
             errors.append(f"crowd[{i}].phase_spread: seconds, 0 or more")
         inst = c.get("instances")
         if inst is not None:
@@ -210,10 +213,10 @@ def validate_manifest(data: dict) -> list[str]:
                                                 and all(num(v) for v in pos)):
                         errors.append(f"crowd[{i}].instances[{j}].position: three numbers (Y-up metres)")
                     hd = spec.get("heading")
-                    if hd is not None and (isinstance(hd, bool) or not isinstance(hd, (int, float))):
+                    if hd is not None and not num(hd):
                         errors.append(f"crowd[{i}].instances[{j}].heading: a number (degrees about the vertical)")
                     ph = spec.get("phase")
-                    if ph is not None and (isinstance(ph, bool) or not isinstance(ph, (int, float)) or ph < 0):
+                    if ph is not None and (not num(ph) or ph < 0):
                         errors.append(f"crowd[{i}].instances[{j}].phase: seconds into the clip, 0 or more")
                 if "count" in c and isinstance(inst, list) and c["count"] != len(inst):
                     errors.append(f"crowd[{i}]: count={c['count']} but instances lists {len(inst)}; "
@@ -346,6 +349,22 @@ def resolve_keys(data: dict, db_path: Optional[str] = None,
 
 _TEX_EXT = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp")
 _TEX_ROLES = ("albedo", "normal", "roughness", "metallic")
+
+
+def texture_set_names(folder) -> list:
+    """The distinct set names (file-name prefixes before the role word) a
+    texture folder holds, for the builder's warning on a mistyped set."""
+    folder = Path(folder)
+    names: set = set()
+    try:
+        for p in folder.rglob("*"):
+            if p.is_file() and p.suffix.lower() in _TEX_EXT:
+                role, _, prefix = imgmeta.role_parts(p.name)
+                if role in _TEX_ROLES and prefix:
+                    names.add(prefix)
+    except OSError:
+        pass
+    return sorted(names, key=str.lower)
 
 
 def texture_maps(tex: dict, db_path: Optional[str] = None) -> tuple:
@@ -493,8 +512,8 @@ def check_paths(data: dict) -> list[str]:
                             f" ({m.get('role', '?')}): not found: {mp}")
         elif isinstance(mats, dict):
             for role, path in mats.items():
-                if role == "packed_channels":
-                    continue
+                if role in ("packed_channels", "albedo_alpha", "emissive_strength") or not isinstance(path, str):
+                    continue              # flags and numbers, not files
                 if path and not Path(path).is_file():
                     missing.append(
                         f"assets[{i}].materials.{role}: not found: {path}")
@@ -668,7 +687,7 @@ def load_manifest(path: str | Path) -> tuple[Optional[dict], list[str]]:
     suppressed the file-existence pass, so one cosmetic unknown key hid
     every missing asset."""
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except (ValueError, OSError) as exc:
         return None, [f"cannot read manifest: {exc}"]
     errors = validate_manifest(data)

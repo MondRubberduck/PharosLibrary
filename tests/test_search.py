@@ -2935,7 +2935,8 @@ def test_viewer_sources_for_obj_and_gltf():
                       "/res/%2F%2Fevil.example%2Fs/a.png"):
                 assert _drive(u)[0] == 404, u
             assert _drive("/res/Props/%2F%2Fevil.example%2Fs%2Fa.png")[1] == files["Props/tex/a.png"]
-            assert resolved == [], resolved
+            # a UNC path exists on Windows only; POSIX resolves '//x' as a plain path and refuses it anyway
+            assert resolved == [] or os.name != "nt", resolved
             # resources: real segments, the browser-resolved sibling folder, the
             # old one-segment form, a sub-folder, the FBX texture, .avif
             for url, rel in (("/res/Props/Models/crate.mtl", "Props/Models/crate.mtl"),

@@ -28,6 +28,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_fresh_install import _min_fbx  # noqa: E402  (shared FBX fixture)
 
 
+import unittest
+
+
+class Skip(unittest.SkipTest):
+    """A check that cannot run on this machine (no Blender, no bash): the
+    runner prints SKIP, never PASS, for it; pytest skips it too."""
+
+
 def _run(script: str, env_extra: dict) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(env_extra)
@@ -182,9 +190,7 @@ def test_drivers_print_sandbox_remediation():
     # (same backup/restore pattern as the fresh-install suite's config)
     bash = _find_usable_bash()
     if bash is None:
-        print("SKIP: no usable bash on this machine -- the shell drivers "
-              "cannot run here, so their remediation cannot be tested")
-        return
+        raise Skip("SKIP: no usable bash on this machine -- the shell drivers cannot run here, so their remediation cannot be tested")
     # the drivers take the sandbox folder from PHAROS_SANDBOX_DIR: the test
     # points it at an empty temp folder and never touches the live one (it
     # used to rename it, and failed while a conversion was running)
@@ -424,8 +430,7 @@ def test_mcp_db_preflight_and_clip_scope():
         # load failure must FAIL, never print SKIP and count as a pass
         assert os.environ.get("PHAROS_REQUIRE_MCP") != "1", \
             f"PHAROS_REQUIRE_MCP=1 but the MCP server did not load: {exc}"
-        print(f"SKIP (no mcp package on this machine): {exc}")
-        return
+        raise Skip(f"no mcp package on this machine: {exc}")
     import sqlite3
     with tempfile.TemporaryDirectory() as tmp:
         missing = Path(tmp) / "nope" / "assets.sqlite"
@@ -489,9 +494,7 @@ def test_scene_builder_in_blender():
         assert os.environ.get("PHAROS_REQUIRE_BLENDER") != "1", \
             "PHAROS_REQUIRE_BLENDER=1 but no Blender found " \
             "(BLENDER_EXE / PATH / install dirs)"
-        print("SKIP: no Blender on this machine -- scene_builder checks "
-              "not run")
-        return
+        raise Skip("SKIP: no Blender on this machine -- scene_builder checks not run")
     try:
         r = subprocess.run(
             [exe, "--background", "--factory-startup",
@@ -638,8 +641,7 @@ def test_native_driver_fails_loudly():
     exit must surface as driver exit 9."""
     bash = _find_usable_bash()
     if bash is None:
-        print("SKIP: no usable bash")
-        return
+        raise Skip("SKIP: no usable bash")
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         stub = tmp / "stub-blender.sh"
@@ -677,8 +679,7 @@ def test_no_replace_checks_the_real_target():
     vacuous exactly when redirecting output."""
     bash = _find_usable_bash()
     if bash is None:
-        print("SKIP: no usable bash")
-        return
+        raise Skip("SKIP: no usable bash")
     with tempfile.TemporaryDirectory() as tmp:
         out_root = Path(tmp) / "redirected"
         (out_root / "FixturePack").mkdir(parents=True)   # the REAL target
@@ -2334,8 +2335,7 @@ def test_blender_renders_tiles_and_a_sheet():
     if not exe:
         assert os.environ.get("PHAROS_REQUIRE_BLENDER") != "1", \
             "PHAROS_REQUIRE_BLENDER=1 but no Blender found"
-        print("SKIP: no Blender on this machine -- render checks not run")
-        return
+        raise Skip("SKIP: no Blender on this machine -- render checks not run")
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "Lib"
         (root / "Props").mkdir(parents=True)
@@ -2636,8 +2636,7 @@ def test_measured_box_is_where_the_builder_puts_the_file():
     exe = _blender_for_checks()
     if not exe:
         assert os.environ.get("PHAROS_REQUIRE_BLENDER") != "1"
-        print("SKIP: no Blender on this machine -- measure/builder check not run")
-        return
+        raise Skip("SKIP: no Blender on this machine -- measure/builder check not run")
     builder = REPO / "service" / "asset_service" / "scene_builder.py"
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -2814,13 +2813,46 @@ def test_manifest_validator_wants_numbers():
                                           {"body_fbx": "b.fbx", "animation_fbx": "c.fbx", "phase_spread": -1,
                                            "instances": [{"position": [True, 0, 0], "heading": "east", "phase": -0.2}]},
                                           "not an object"]})
+    nan = sm.validate_manifest(json.loads('{"schema": "pharos.scene/v1", "scene": "n", "units": "meters", "up_axis": "Y",'
+                                          ' "assets": [{"id": "a", "fbx": "x.fbx", "position": [NaN, 0, 0], "scale": Infinity}],'
+                                          ' "crowd": [{"body_fbx": "b.fbx", "animation_fbx": "c.fbx", "spacing": NaN}]}'))
+    assert any("finite" in e for e in nan) and any("scale must be a finite" in e for e in nan) \
+        and any("spacing must be a number" in e for e in nan), nan
+    nan2 = sm.validate_manifest(json.loads('{"schema": "pharos.scene/v1", "scene": "n", "units": "meters", "up_axis": "Y", "assets": [],'
+                                           ' "crowd": [{"body_fbx": "b.fbx", "animation_fbx": "c.fbx", "phase_spread": Infinity,'
+                                           ' "instances": [{"position": [0, 0, 0], "heading": NaN, "phase": Infinity}]}]}'))
+    assert any("heading" in e for e in nan2) and any("phase:" in e for e in nan2) and any("phase_spread" in e for e in nan2), nan2
     text = "\n".join(bad)
-    for needle in ("assets[0].position must hold three numbers", "assets[0].rotation must hold three numbers",
+    for needle in ("assets[0].position must hold three finite numbers", "assets[0].rotation must hold three finite numbers",
                    "crowd[0]: count must be a whole number", "crowd[0].spacing must be a number",
                    "crowd[0].animation_offset must be a number", "crowd[0].position must be three numbers",
                    "crowd[1].phase_spread", "crowd[1].instances[0].position", "crowd[1].instances[0].heading",
                    "crowd[1].instances[0].phase", "crowd[2]: must be an object"):
         assert needle in text, (needle, bad)
+
+
+def test_speedtree_colour_with_alpha_and_the_docs_version():
+    """SpeedTree's ColorOpacity is the colour map with the cut-out in its
+    alpha: the Unreal parameter classifier says albedo (the opacity rule
+    took it before) and the recipe's primary carries albedo_alpha; the
+    docs say which Pharos wrote them and doctor reads it."""
+    from asset_service import material_roles as mr, meshes_import, doctor
+    assert mr.classify_param("ColorOpacity")[0] == "albedo" and mr.classify_param("Color_Opacity")[0] == "albedo"
+    assert mr.classify_param("OpacityMask")[0] == "opacity" and mr.classify_param("Opacity")[0] == "opacity"
+    rec = meshes_import._finish_recipe({"slots": [{"slot": "Leaves", "resolved": True, "maps": [
+        {"role": "albedo", "param": "ColorOpacity", "file": "D:/x/T_Leaves_ColorOpacity.png", "source": "param"},
+        {"role": "normal", "param": "Normal", "file": "D:/x/T_Leaves_N.png", "source": "param"}]}]})
+    assert rec["primary"].get("albedo_alpha") is True and rec["primary"]["albedo"].endswith("ColorOpacity.png"), rec["primary"]
+    rec2 = meshes_import._finish_recipe({"slots": [{"slot": "Wall", "resolved": True, "maps": [
+        {"role": "albedo", "param": "BaseColor", "file": "D:/x/T_Wall_BC.png", "source": "param"}]}]})
+    assert "albedo_alpha" not in rec2["primary"], rec2["primary"]
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "AGENT_START_HERE.md"
+        p.write_text("# READ THIS FIRST\n\nGenerated by Pharos 0.9.0 on 2026-10-01 10:00; every count\n", encoding="utf-8")
+        assert doctor.docs_version(p) == "0.9.0"
+        p.write_text("# READ THIS FIRST\n\nGenerated by Pharos 2026-10-01 10:00\n", encoding="utf-8")
+        assert doctor.docs_version(p) == ""
+        assert doctor.docs_version(Path(tmp) / "missing.md") == ""
 
 
 def test_builder_imports_once_merges_and_reports_missing_textures():
@@ -2840,8 +2872,7 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
     exe = _blender_for_checks()
     if not exe:
         assert os.environ.get("PHAROS_REQUIRE_BLENDER") != "1"
-        print("SKIP: no Blender on this machine -- builder checks not run")
-        return
+        raise Skip("SKIP: no Blender on this machine -- builder checks not run")
     builder = REPO / "service" / "asset_service" / "scene_builder.py"
 
     def blender(*args, timeout=600):
@@ -2861,6 +2892,7 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
         faces = ["f 1 2 4 3", "f 5 7 8 6", "f 1 3 7 5", "f 2 6 8 4", "f 1 5 6 2", "f 3 4 8 7"]
         sheets.write_png(lib / "Props" / "crate.png", 2, 2, [b"\x80\x40\x20" * 2] * 2)
         sheets.write_png(lib / "Tex" / "Brick_BaseColor.png", 2, 2, [b"\xa0\x30\x20" * 2] * 2)
+        sheets.write_png(lib / "Tex" / "Stone_BaseColor.png", 2, 2, [b"\x70\x70\x70" * 2] * 2)
         (lib / "Props" / "crate.mtl").write_text("newmtl Wood\nKd 0.8 0.8 0.8\nmap_Kd crate.png\n", encoding="utf-8")
         (lib / "Props" / "crate.obj").write_text("mtllib crate.mtl\nusemtl Wood\n" + "\n".join(verts + faces) + "\n", encoding="utf-8")
         (lib / "Props" / "ghost.mtl").write_text("newmtl Ghost\nmap_Kd not_there.png\n", encoding="utf-8")
@@ -2896,8 +2928,13 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
             "    rgb = t.nodes.new('ShaderNodeRGB'); rgb.outputs[0].default_value = col\n"
             "    t.links.new(rgb.outputs[0], t.nodes['Principled BSDF'].inputs['Base Color']); return m\n"
             "P.data.materials.append(glow((1, 0, 0, 1))); S.data.materials.append(glow((0, 0, 1, 1)))\n"
-            "for nm in ('Window_Glass', 'Glass_Frame_Metal', 'Fiberglass_Hull'):\n"
+            "for nm in ('Window_Glass', 'Glass_Frame_Metal', 'Fiberglass_Hull', 'MI_Glass01'):\n"
             "    m = bpy.data.materials.new(nm); m.use_nodes = True; S.data.materials.append(m)\n"
+            "    if nm == 'MI_Glass01':\n"
+            "        b = m.node_tree.nodes['Principled BSDF']; b.inputs['Metallic'].default_value = 1.0; b.inputs['Roughness'].default_value = 0.5\n"
+            "# an engine's sampler reference: an image whose 'path' is a bare name\n"
+            "smp = bpy.data.images.new('EnvSamplerTex', 4, 4); smp.filepath = 'EnvSamplerTex'; smp.source = 'FILE'\n"
+            "tn = fog.node_tree.nodes.new('ShaderNodeTexImage'); tn.image = smp\n"
             "bpy.ops.wm.save_as_mainfile(filepath=out)\n", encoding="utf-8")
         rc, log = blender("--python", str(mk), "--", str(lib / "Props" / "lamp.blend"), timeout=300)
         assert (lib / "Props" / "lamp.blend").is_file(), log[-600:]
@@ -2913,8 +2950,19 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
                             {"id": "l1", "fbx": P("lamp.blend"), "position": [-5, 0, 0]},
                             {"id": "l2", "fbx": P("lamp.blend"), "position": [-5, 0, 5]},
                             {"id": "glass_cabinet", "fbx": P("crate.obj"), "position": [10, 0, 0],
-                             "materials": {"albedo": str(lib / "Props" / "crate.png")}}],
-                 "textures": [{"folder": str(lib / "Tex"), "set": "Brick", "apply_to": "b"}]}
+                             "materials": {"albedo": str(lib / "Props" / "crate.png")}},
+                            # the same recipe on another asset: one material after the merge
+                            {"id": "cab2", "fbx": P("crate.obj"), "position": [12, 0, 0],
+                             "materials": {"albedo": str(lib / "Props" / "crate.png")}},
+                            # a colour map whose alpha is the cut-out (SpeedTree ColorOpacity)
+                            {"id": "veg", "fbx": P("crate.obj"), "position": [14, 0, 0],
+                             "materials": {"albedo": str(lib / "Props" / "crate.png"), "albedo_alpha": True}},
+                            # a recipe pane: refraction map = the pane's colour, no metal
+                            {"id": "pane", "fbx": P("crate.obj"), "position": [16, 0, 0],
+                             "materials": {"refraction": str(lib / "Props" / "crate.png"), "metallic": str(lib / "Props" / "crate.png")}}],
+                 "textures": [{"folder": str(lib / "Tex"), "set": "Brick", "apply_to": "b"},
+                              # a mistyped set in a folder of two sets: a warning, c keeps its material
+                              {"folder": str(lib / "Tex"), "set": "Brck", "apply_to": "c"}]}
         man = tmp / "scene.json"
         man.write_text(json.dumps(scene), encoding="utf-8")
         out_blend = tmp / "out.blend"
@@ -2938,6 +2986,16 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
             "        'lamps': lamps, 'lights': sorted(o.name for o in bpy.data.objects if o.type == 'LIGHT'),\n"
             "        'transmission': {m.name.split('.')[0]: round((n.inputs.get('Transmission Weight') or n.inputs['Transmission']).default_value, 2)\n"
             "                         for m in bpy.data.materials if m.users and m.use_nodes for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'},\n"
+            "        'metallic': {m.name.split('.')[0]: (n.inputs['Metallic'].is_linked, round(n.inputs['Metallic'].default_value, 2))\n"
+            "                     for m in bpy.data.materials if m.users and m.use_nodes for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'},\n"
+            "        'roughness': {m.name.split('.')[0]: round(n.inputs['Roughness'].default_value, 2)\n"
+            "                      for m in bpy.data.materials if m.users and m.use_nodes for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'},\n"
+            "        'alpha_linked': {m.name.split('.')[0]: n.inputs['Alpha'].is_linked\n"
+            "                         for m in bpy.data.materials if m.users and m.use_nodes for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'},\n"
+            "        'base_linked': {m.name.split('.')[0]: n.inputs['Base Color'].is_linked\n"
+            "                        for m in bpy.data.materials if m.users and m.use_nodes for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'},\n"
+            "        'tw_linked': {m.name.split('.')[0]: (n.inputs.get('Transmission Weight') or n.inputs['Transmission']).is_linked\n"
+            "                      for m in bpy.data.materials if m.users and m.use_nodes for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'},\n"
             "        'roots': {o.name: [round(v, 2) for v in o.location] for o in bpy.data.objects if o.name.endswith('_root')}}\n"
             "print('PROBE ' + json.dumps(info))\n", encoding="utf-8")
         rc, log2 = blender(str(out_blend), "--python", str(probe), timeout=300)
@@ -2945,9 +3003,11 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
         # b took the set on its own copy of the mesh; a and c still share one
         assert info["crate_objects"] == 3 and info["mesh_datablocks_crates"] == 2, info
         assert info["a_mats"] == ["Wood"] and info["c_mats"] == ["Wood"] and info["b_mats"] == ["M_b_Brick"], info
-        crate_imgs = [fp for n, fp in info["images"] if "crate" in n.lower()]
-        assert len(crate_imgs) == 1 and not crate_imgs[0].startswith("//") \
-            and Path(crate_imgs[0]).is_file(), info["images"]
+        # one file behind the crate images (a Non-Color copy of the same
+        # file, the pane's metallic map, is a second datablock on purpose)
+        crate_imgs = {fp for n, fp in info["images"] if "crate" in n.lower()}
+        assert len(crate_imgs) == 1 and not next(iter(crate_imgs)).startswith("//") \
+            and Path(next(iter(crate_imgs))).is_file(), info["images"]
         assert sum(1 for m in info["materials"] if m.startswith("Wood")) == 1, info["materials"]
         # true copies merge (Paint), materials that differ do not (Metal: alpha)
         assert sum(1 for m in info["materials"] if m.startswith("Paint")) == 1 \
@@ -2961,18 +3021,33 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
         tr = info["transmission"]
         assert tr.get("Window_Glass") == 1.0 and tr.get("Glass_Frame_Metal") == 0.0 \
             and tr.get("Fiberglass_Hull") == 0.0 and tr.get("M_glass_cabinet") == 0.0, tr
+        # digits in the name count; metallic drops to 0, roughness stays the file's
+        assert tr.get("MI_Glass01") == 1.0 and info["metallic"]["MI_Glass01"] == [False, 0.0] \
+            and info["roughness"]["MI_Glass01"] == 0.5, (tr.get("MI_Glass01"), info["metallic"].get("MI_Glass01"), info["roughness"].get("MI_Glass01"))
+        # the recipe pane: the refraction map is a mask driving transmission,
+        # and metallic is masked by it (both linked), the colour untouched
+        assert info["tw_linked"]["M_pane"] and info["metallic"]["M_pane"][0] is True and not info["base_linked"]["M_pane"], \
+            (info["tw_linked"].get("M_pane"), info["metallic"].get("M_pane"), info["base_linked"].get("M_pane"))
+        # the colour map's alpha is the cut-out
+        assert info["alpha_linked"]["M_veg"] and not info["alpha_linked"]["M_glass_cabinet"], info["alpha_linked"]
+        # two assets with the same recipe hold one material
+        assert sum(1 for m in info["materials"] if m in ("M_glass_cabinet", "M_cab2")) == 1, info["materials"]
+        # the mistyped set was a warning and a skip: c keeps its material
+        assert info["c_mats"] == ["Wood"] and "WARNING: set 'Brck' matches no file" in log, (info["c_mats"], log[-900:])
         # the lamp's copy holds the hidden shade too; no object was lost
         assert info["lamps"] == {"l1": ["Post", "Shade"], "l2": ["Post", "Shade"]}, info["lamps"]
         assert info["roots"]["b_root"][0] == 3.0 and abs(info["roots"]["c_root"][0] - 6.0) < 0.01, info["roots"]
         assert info["roots"]["l2_root"][1] == -5.0, info["roots"]
         # the clean scene: exit 0, saved under the library's builds folder,
-        # named after the scene in its own script
-        scene["assets"] = scene["assets"][:3]
+        # named after the scene in its own script; the lamp's sampler
+        # reference ('EnvSamplerTex', a bare name) is not a missing file
+        scene["assets"] = scene["assets"][:3] + [a for a in scene["assets"] if a["id"] == "l1"]
+        scene["textures"] = scene["textures"][:1]
         scene["scene"] = "Dedup check 東京"
         man.write_text(json.dumps(scene), encoding="utf-8")
         rc, log3 = blender("--python", str(builder), "--", str(man))
         expected = lib / "_Agent_Files" / "builds" / "Dedup_check_東京" / "Dedup_check_東京.blend"
-        assert rc == 0 and expected.is_file(), (rc, log3[-800:])
+        assert rc == 0 and expected.is_file() and "sampler references" in log3, (rc, log3[-800:])
         # a file the FBX importer refuses skips its asset (exit 3), the
         # rest of the scene still builds; a file that breaks the build
         # elsewhere exits 4 with BUILD FAILED and nothing saved
@@ -2984,11 +3059,27 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
         rc, log4 = blender("--python", str(builder), "--", str(tmp / "bad.json"))
         assert rc == 3 and "importer refused" in log4 and "BUILD INCOMPLETE: 1" in log4 \
             and (lib / "_Agent_Files" / "builds" / "Ascii" / "Ascii.blend").is_file(), (rc, log4[-600:])
+        # a broken .blend and a broken GLB skip their assets too (exit 3);
+        # a manifest that is not JSON exits 2 before anything is built
         (lib / "Props" / "bogus.blend").write_text("not a blend file", encoding="utf-8")
-        bad = {**scene, "scene": "Bogus", "textures": [], "assets": [{"id": "x", "fbx": P("bogus.blend"), "position": [0, 0, 0]}]}
+        (lib / "Props" / "bogus.glb").write_bytes(b"glTF\x02\x00\x00\x00garbage")
+        bad = {**scene, "scene": "Bogus", "textures": [],
+               "assets": [{"id": "x", "fbx": P("bogus.blend"), "position": [0, 0, 0]},
+                          {"id": "y", "fbx": P("bogus.glb"), "position": [2, 0, 0]},
+                          {"id": "ok", "fbx": P("crate.obj"), "position": [4, 0, 0]}]}
         (tmp / "bad.json").write_text(json.dumps(bad), encoding="utf-8")
         rc, log4 = blender("--python", str(builder), "--", str(tmp / "bad.json"))
-        assert rc == 4 and "BUILD FAILED" in log4 and not (lib / "_Agent_Files" / "builds" / "Bogus").is_dir(), (rc, log4[-600:])
+        assert rc == 3 and log4.count("importer refused") == 2 and "BUILD INCOMPLETE: 2" in log4 \
+            and (lib / "_Agent_Files" / "builds" / "Bogus" / "Bogus.blend").is_file(), (rc, log4[-700:])
+        (tmp / "bad.json").write_text("{ this is not json", encoding="utf-8")
+        rc, log5 = blender("--python", str(builder), "--", str(tmp / "bad.json"))
+        assert rc == 2 and "MANIFEST INVALID" in log5 and "not a JSON file" in log5, (rc, log5[-400:])
+        # a manifest PowerShell wrote with a BOM is JSON all the same
+        (tmp / "bom.json").write_text(json.dumps({**scene, "scene": "Bom", "textures": [],
+                                                  "assets": [{"id": "ok", "fbx": P("crate.obj"), "position": [0, 0, 0]}]}),
+                                      encoding="utf-8-sig")
+        rc, log6 = blender("--python", str(builder), "--", str(tmp / "bom.json"))
+        assert rc == 0 and (lib / "_Agent_Files" / "builds" / "Bom" / "Bom.blend").is_file(), (rc, log6[-400:])
         # a library whose agent folder cannot be written: the build goes
         # next to the manifest instead of nowhere
         lib2 = tmp / "Lib2"
@@ -3017,8 +3108,7 @@ def test_crowd_takes_the_armature_the_clip_and_the_given_places():
     exe = _blender_for_checks()
     if not exe:
         assert os.environ.get("PHAROS_REQUIRE_BLENDER") != "1"
-        print("SKIP: no Blender on this machine -- crowd checks not run")
-        return
+        raise Skip("SKIP: no Blender on this machine -- crowd checks not run")
     builder = REPO / "service" / "asset_service" / "scene_builder.py"
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -3046,6 +3136,15 @@ def test_crowd_takes_the_armature_the_clip_and_the_given_places():
             "    act = bpy.data.actions.new('0_T-Pose'); A.animation_data.action = act\n"
             "    A.keyframe_insert('location', frame=1)\n"
             "    end = 1\n"
+            "elif 'walk_rm' in out:\n"
+            "    # a walk WITH root motion: the hips travel 1 m along their local X\n"
+            "    act = bpy.data.actions.new('walk_rm'); A.animation_data.action = act\n"
+            "    pb = A.pose.bones['spine']; ph = A.pose.bones['hips']\n"
+            "    for f, r in ((1, 0.0), (15, 0.6), (30, 0.0)):\n"
+            "        pb.rotation_quaternion = (math.cos(r/2), math.sin(r/2), 0, 0); pb.keyframe_insert('rotation_quaternion', frame=f)\n"
+            "    for f, x in ((1, 0.0), (30, 1.0)):\n"
+            "        ph.location = (x, 0, 0); ph.keyframe_insert('location', frame=f)\n"
+            "    end = 30\n"
             "elif 'idle' in out:\n"
             "    act = bpy.data.actions.new('idle'); A.animation_data.action = act\n"
             "    pb = A.pose.bones['spine']\n"
@@ -3064,7 +3163,7 @@ def test_crowd_takes_the_armature_the_clip_and_the_given_places():
             "bpy.ops.export_scene.fbx(filepath=out, use_selection=True, add_leaf_bones=False, bake_anim=True,\n"
             "                          bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False,\n"
             "                          bake_anim_force_startend_keying=False)\n", encoding="utf-8")
-        for name in ("body.fbx", "body_idle.fbx", "walk.fbx"):
+        for name in ("body.fbx", "body_idle.fbx", "walk.fbx", "walk_rm.fbx"):
             r = subprocess.run([exe, "--background", "--factory-startup", "--python", str(mk), "--", str(tmp / name)],
                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
             assert (tmp / name).is_file(), (name, ((r.stdout or "") + (r.stderr or ""))[-600:])
@@ -3077,9 +3176,17 @@ def test_crowd_takes_the_armature_the_clip_and_the_given_places():
                             "animation_offset": 0.5},
                            {"body_fbx": str(tmp / "body_idle.fbx"), "animation_fbx": str(tmp / "walk.fbx"),
                             "instances": [{"position": [10, 0, 0]}, {"position": [12, 0, 0], "heading": 45}]},
-                           # the first body file again: a linked duplicate of the import, its own heading
+                           # the first body file again: a linked duplicate of the import, its own heading;
+                           # two bodies with the same phase share one shifted copy of the clip
                            {"body_fbx": str(tmp / "body.fbx"), "animation_fbx": str(tmp / "walk.fbx"),
-                            "instances": [{"position": [20, 0, 0]}, {"position": [22, 0, 0], "heading": 30, "phase": 0.5}]}]}
+                            "instances": [{"position": [20, 0, 0], "phase": 0.5}, {"position": [22, 0, 0], "heading": 30, "phase": 0.5}]},
+                           # a walking clip with root motion: played in place, on the marks, looping
+                           {"body_fbx": str(tmp / "body.fbx"), "animation_fbx": str(tmp / "walk_rm.fbx"),
+                            "instances": [{"position": [30, 0, 0]}, {"position": [32, 0, 0]}]},
+                           # a clip the importer refuses: the group is skipped and leaves nothing
+                           {"body_fbx": str(tmp / "body.fbx"), "animation_fbx": str(tmp / "ascii.fbx"),
+                            "instances": [{"position": [40, 0, 0]}]}]}
+        (tmp / "ascii.fbx").write_text("; FBX 7.3.0 project file\nFBXHeaderExtension:  {\n}\n", encoding="utf-8")
         man = tmp / "crowd.json"
         man.write_text(json.dumps(scene), encoding="utf-8")
         out = tmp / "crowd.blend"
@@ -3087,7 +3194,7 @@ def test_crowd_takes_the_armature_the_clip_and_the_given_places():
                             "--save", str(out)], capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=600)
         log = (r.stdout or "") + (r.stderr or "")
-        assert r.returncode == 0 and out.is_file(), (r.returncode, log[-1200:])
+        assert r.returncode == 3 and out.is_file() and "crowd[4]" in log and "importer refused the clip" in log, (r.returncode, log[-1200:])
         probe = tmp / "probe.py"
         probe.write_text(
             "import bpy, json, math\n"
@@ -3098,7 +3205,18 @@ def test_crowd_takes_the_armature_the_clip_and_the_given_places():
             "        'meshes_parented': all(o.parent is not None and o.parent.type == 'ARMATURE' for o in bpy.data.objects if o.type == 'MESH'),\n"
             "        'meshes': len([o for o in bpy.data.objects if o.type == 'MESH']),\n"
             "        'mesh_data': len({o.data.name for o in bpy.data.objects if o.type == 'MESH'}),\n"
-            "        'cycles_all': all(any(m.type == 'CYCLES' for m in fc.modifiers) for a in arms if a.animation_data and a.animation_data.action for fc in sb._fcurves_of(a.animation_data.action))}\n"
+            "        'shared': len({a.animation_data.action.name for a in arms if round(a.matrix_world.translation.x) in (20, 22)}),\n"
+            "        'rm': []}\n"
+            "for a in [a for a in arms if round(a.matrix_world.translation.x) in (30, 32)]:\n"
+            "    row = []\n"
+            "    for f in (1, 15, 31):\n"
+            "        bpy.context.scene.frame_set(f)\n"
+            "        h = a.matrix_world @ a.pose.bones['hips'].head\n"
+            "        row.append([round(h.x, 2), round(h.y, 2)])\n"
+            "    info['rm'].append(row)\n"
+            "bpy.context.scene.frame_set(1)\n"
+            "info.update({\n"
+            "        'cycles_all': all(any(m.type == 'CYCLES' for m in fc.modifiers) for a in arms if a.animation_data and a.animation_data.action for fc in sb._fcurves_of(a.animation_data.action))})\n"
             "print('PROBE ' + json.dumps(info))\n", encoding="utf-8")
         probe.write_text("import sys\nsys.path.insert(0, r'" + str(REPO / "service" / "asset_service").replace("\\", "/")
                          + "')\nimport scene_builder as sb\n" + probe.read_text(encoding="utf-8"), encoding="utf-8")
@@ -3106,13 +3224,19 @@ def test_crowd_takes_the_armature_the_clip_and_the_given_places():
                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
         line = next(l for l in (r2.stdout or "").splitlines() if l.startswith("PROBE "))
         info = json.loads(line[6:])
-        assert info["armatures"] == 7 and info["meshes"] == 7 and info["empties_loose"] == [], info
-        assert info["mesh_data"] == 2, ("the first body's mesh is shared by its five copies", info["mesh_data"])
+        assert info["armatures"] == 9 and info["meshes"] == 9 and info["empties_loose"] == [], info
+        assert info["mesh_data"] == 2, ("the first body's mesh is shared by its seven copies", info["mesh_data"])
+        assert info["shared"] == 1, ("two bodies with the same phase share one clip copy", info["shared"])
+        # root motion taken out: the hips stay on the mark at every frame,
+        # and frame 31 equals frame 1 (the loop closes without a snap)
+        for row, x in zip(sorted(info["rm"]), (30.0, 32.0)):
+            assert all(abs(h[0] - x) < 0.05 and abs(h[1]) < 0.05 for h in row), ("in place", x, row)
+        assert "root motion taken out" in log, log[-600:]
         assert info["actions"] and all("walk" in n and "T-Pose" not in n and "idle" not in n and fr >= 28
                                        for n, fr in info["actions"]), info["actions"]
         assert info["cycles_all"], "every clip loops"
         assert info["places"] == [[-2.0, -3.0, 180], [0.0, 0.0, 90], [2.0, -1.0, 0], [10.0, 0.0, 0], [12.0, 0.0, 45],
-                                  [20.0, 0.0, 0], [22.0, 0.0, 30]], info["places"]
+                                  [20.0, 0.0, 0], [22.0, 0.0, 30], [30.0, 0.0, 0], [32.0, 0.0, 0]], info["places"]
         assert info["meshes_parented"], info
     # the re-bind itself: a skin in another frame than its armature's is
     # baked into armature space and keeps standing (world extents follow
@@ -3235,6 +3359,8 @@ if __name__ == "__main__":
             try:
                 fn()
                 print(f"PASS {name}")
+            except Skip as exc:
+                print(f"SKIP {name}: {exc}")
             except AssertionError as exc:
                 failures += 1
                 print(f"FAIL {name}: {exc}")

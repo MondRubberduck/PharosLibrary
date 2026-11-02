@@ -1523,7 +1523,7 @@ def _mesh_extras(r: dict) -> dict:
     if recipe.get("resolved"):
         primary = recipe.get("primary") or {}
         for role, path in primary.items():
-            if role in ("packed_channels", "other", "mask"):
+            if role in ("packed_channels", "other", "mask", "albedo_alpha"):
                 continue          # not a named material map
             hero[role] = path
         if "opacity" in hero:
@@ -3350,6 +3350,17 @@ def _startup_imports(db_path: str, force: bool = False) -> dict:
         except Exception as exc:  # noqa: BLE001
             print(f"folders skipped: {exc}", flush=True)
             failed = True
+        if not failed:
+            # the agent docs describe the code: whenever their stamp lags the
+            # code they are written again (agents read old docs after an
+            # upgrade; a failed first start must not leave them stale)
+            try:
+                from asset_service import agent_docs, doctor
+                if doctor.docs_version(config.AGENT_FILES / "AGENT_START_HERE.md") != _PHAROS_VERSION:
+                    written = agent_docs.generate(db_path)
+                    print(f"agent docs regenerated for Pharos {_PHAROS_VERSION}: {len(written)} file(s)", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"agent docs not regenerated: {exc}", flush=True)
         try:
             conn = db.connect(db_path)
             # a pass with a failed step is not "served": the next start

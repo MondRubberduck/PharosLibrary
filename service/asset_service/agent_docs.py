@@ -476,14 +476,16 @@ check prints which maps it found.
 
 **crowd[]** — `body_fbx`, `animation_fbx` (FBX only), `position`,
 `count`, `spacing` (metres), `animation_offset` (seconds: body i starts
-i × offset into the looping clip), or `instances`: `[{{"position": [x, y, z], "heading": 90,
+i × offset later), or `instances`: `[{{"position": [x, y, z], "heading": 90,
 "phase": 0.4}}]` places each body yourself (`count` = their number).
 `position` is Y-up metres like an asset's; `heading` is DEGREES about
 the vertical (unlike `rotation`, which is radians), 0 keeps the body's
 own facing from its file; `phase` is seconds into the clip, so the
 bodies do not all stand in one pose at the saved frame -- without
 phases they are spread over the clip (`phase_spread`, seconds, sets the
-spread). The same `body_fbx` in several groups is imported once.
+spread). A walking clip is played in place: its root travel is taken
+out, so every body stays on its mark and the loop closes. The same
+`body_fbx` in several groups is imported once.
 
 **audio[]** — `file`, `loop`: recorded for engines; Blender does not
 play scene audio.
@@ -538,7 +540,8 @@ def generate(db_path: str | None = None, repo_hint: str | None = None) -> list[P
     db = db_path or config.DB_PATH
     c = _counts(db)
     repo = repo_hint or str(Path(__file__).resolve().parents[2])
-    stamp = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M")
+    from . import __version__
+    stamp = f"{__version__} on " + __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M")
     target = config.AGENT_FILES
     target.mkdir(parents=True, exist_ok=True)
 
