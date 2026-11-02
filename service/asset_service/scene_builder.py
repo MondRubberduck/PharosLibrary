@@ -58,6 +58,7 @@ def build(manifest_path: str, save_path: str = None, pack_textures: bool = False
         print(f"WARNING: {note}")
     _SKIPPED.clear()
     _IMPORTED.clear()
+    _BODIES.clear()
     scene_name = manifest.get("scene", "Pharos Scene")
     ground_y = manifest.get("ground_y", 0.0)
 
@@ -87,6 +88,7 @@ def build(manifest_path: str, save_path: str = None, pack_textures: bool = False
     # kit-folder index (per-asset invocation was O(assets x images x
     # drive) and cost 45+ min on a real build)
     _remap_dead_kb3d_images()
+    _glass_by_name()
     # one datablock per image file and per material: every import brought
     # its own copies (a street of 165 assets held 8,366 images and 2,052
     # materials; Cycles uploads each datablock on its own)
@@ -100,6 +102,8 @@ def build(manifest_path: str, save_path: str = None, pack_textures: bool = False
     for group in manifest.get("crowd", []):
         _build_crowd(group, ground_y)
         sys.stdout.flush()
+    if manifest.get("crowd"):
+        _dedup_datablocks()          # the bodies' copies too
 
     # --- audio: recorded for downstream engines only. Blender does not
     # import audio into scenes by design (nobody does this in 15 years
@@ -169,6 +173,7 @@ def build(manifest_path: str, save_path: str = None, pack_textures: bool = False
 
 _SKIPPED = []       # asset ids the build could not place
 _IMPORTED = {}      # (file, object) -> the root of the first import of that key
+_BODIES = {}        # body file -> the root of its imported, re-bound body
 
 
 def default_save_path(manifest_path, scene_name: str) -> Path:
@@ -218,10 +223,17 @@ def _missing_textures() -> list:
     empty (0 bytes: an image that loads as 0x0 and renders black); UDIM
     images are checked tile by tile."""
     out = []
+    nopath = 0
     for img in bpy.data.images:
         if not img.users or img.packed_file or img.source not in ('FILE', 'TILED'):
             continue
         src = bpy.path.abspath(img.filepath) if img.filepath else ""
+        if not src:
+            # an image with no file at all (an engine's sampler reference
+            # in an FBX): nothing can be missing from disk; 30 of 326 clean
+            # builds once exited 5 over one
+            nopath += 1
+            continue
         if img.source == 'TILED':
             for tile in img.tiles:
                 n = int(tile.number)
@@ -232,13 +244,15 @@ def _missing_textures() -> list:
                 elif Path(tp).stat().st_size == 0:
                     out.append(tp + " (empty file)")
             continue
-        if not src or not Path(src).is_file():
-            out.append(src or img.name)
+        if not Path(src).is_file():
+            out.append(src)
         elif Path(src).stat().st_size == 0:
             out.append(src + " (empty file)")
     if out:
         print(f"  WARNING: {len(out)} texture file(s) missing or empty (0x0 images): "
               + ", ".join(Path(x).name for x in out[:6]) + (" ..." if len(out) > 6 else ""))
+    if nopath:
+        print(f"  note: {nopath} image(s) without a file path (sampler references), not counted as missing")
     return out
 
 
@@ -367,11 +381,19 @@ def _import_file(path, obj_name=None):
     suffix = Path(path).suffix.lower()
     before = _scene_objects()
     if suffix == ".fbx":
-        bpy.ops.import_scene.fbx(
-            filepath=path,
-            global_scale=1.0,
-            use_manual_orientation=False,  # FBX already Y-up from exports
-        )
+        try:
+            bpy.ops.import_scene.fbx(
+                filepath=path,
+                global_scale=1.0,
+                use_manual_orientation=False,  # FBX already Y-up from exports
+            )
+        except Exception as exc:                          # noqa: BLE001
+            # Blender 5.1's importer raises on a light inside the file;
+            # the asset is skipped, the rest of the scene still builds
+            print(f"    ERROR: the FBX importer refused {path}: {str(exc).strip()[:200]}")
+            for o in [o for o in bpy.context.scene.objects if o not in before]:
+                bpy.data.objects.remove(o, do_unlink=True)
+            return []
     elif suffix == ".obj":
         bpy.ops.wm.obj_import(filepath=path)
         # this importer turns Y-up into Z-up with an object ROTATION, and
@@ -394,6 +416,19 @@ def _import_file(path, obj_name=None):
                     o.location = o.location + c
     elif suffix in (".glb", ".gltf"):
         bpy.ops.import_scene.gltf(filepath=path)
+        # the importer's bone-shape sphere and whatever it put in excluded
+        # collections (other scenes, orphan nodes) are not the asset: they
+        # counted as loose objects and lifted a snapped body by 1 m
+        shown = set(bpy.context.view_layer.objects)
+        for o in [o for o in bpy.context.scene.objects if o not in before]:
+            shape = o.type == 'MESH' and any(
+                pb.custom_shape is o for a in bpy.context.scene.objects if a.type == 'ARMATURE'
+                for pb in a.pose.bones)
+            if shape or o not in shown:
+                for coll in list(o.users_collection):
+                    coll.objects.unlink(o)
+                if not shape:
+                    bpy.data.objects.remove(o, do_unlink=True)
     elif suffix == ".blend":
         # load only the named object (a kit file holds hundreds: one
         # barrel must not pull in 700 objects), or every object
@@ -675,6 +710,7 @@ def _make_material(name, recipe):
     (hero_textures shape or a per-slot maps dict). Returns the material."""
     mat = bpy.data.materials.new(f"M_{name}")
     mat.use_nodes = True
+    mat["pharos_recipe"] = True      # built from a recipe: never re-read by name
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
     bsdf = nodes.get("Principled BSDF")
@@ -740,8 +776,9 @@ def _make_material(name, recipe):
     emi = load_tex(recipe.get("emissive"))
     if emi:
         emish = nodes.new("ShaderNodeEmission")
+        # the map's own strength (3x once clipped half of a hologram's pixels)
         emish.inputs["Strength"].default_value = float(
-            recipe.get("emissive_strength", 3.0))
+            recipe.get("emissive_strength", 1.0))
         links.new(emi.outputs["Color"], emish.inputs["Color"])
         mix = nodes.new("ShaderNodeAddShader")
         links.new(bsdf.outputs["BSDF"], mix.inputs[0])
@@ -757,7 +794,70 @@ def _make_material(name, recipe):
             mat.blend_method = 'BLEND'
         except Exception:
             pass                      # API renamed in newer Blender
+    # refraction / transmission map -> Principled Transmission (the role
+    # was in the recipes and never read: a pack's glass rendered opaque)
+    ref = load_tex(recipe.get("refraction") or recipe.get("transmission"), non_color=True)
+    tw = bsdf.inputs.get("Transmission Weight") or bsdf.inputs.get("Transmission")
+    if ref and tw is not None:
+        links.new(ref.outputs["Color"], tw)
+        _refractive(mat)
     return mat
+
+
+def _refractive(mat) -> None:
+    """Let EEVEE refract through the material (attribute names moved
+    between Blender versions; whichever exists is set)."""
+    for attr in ("use_screen_refraction", "use_raytrace_refraction"):
+        try:
+            setattr(mat, attr, True)
+        except Exception:                                 # noqa: BLE001
+            pass
+
+
+_GLASS_NOT = {"frame", "frames", "trim", "metal", "plastic", "wood", "holder", "rack", "fiberglass",
+              "fibreglass", "glassfiber", "glassfibre", "sunglasses", "glasses", "hourglass"}
+
+
+def _named_glass(name: str) -> bool:
+    """'Window_Glass', 'glass', 'GlassPane' are glass; 'Fiberglass_Hull',
+    'Glass_Frame_Metal', 'Sunglasses_Plastic' are not (the word is a part
+    of another, or the thing is the frame around the glass)."""
+    words = [w for w in re.split(r"[^a-z0-9]+", re.sub(r"(?<=[a-z])(?=[A-Z])", "_", name).lower()) if w]
+    if not words or any(w in _GLASS_NOT for w in words):
+        return False
+    return any(w == "glass" or (w.endswith("glass") and w[:-5] in ("window", "pane", "clear", "tinted", "frosted"))
+               or w.startswith("glass") and w[5:] in ("", "pane", "panel", "window", "clear", "tinted", "frosted")
+               for w in words)
+
+
+def _glass_by_name() -> int:
+    """Materials the file names glass but that carry no transparency after
+    the import (FBX has none to carry; KitBash kits, most vendors): they
+    get a Principled transmission, so windows and a vending machine's
+    front stop rendering opaque. Only a material with alpha 1 and no
+    transmission yet is touched, and the log says how many."""
+    n = 0
+    for mat in bpy.data.materials:
+        if not mat.users or not _named_glass(mat.name) or mat.get("pharos_recipe") \
+                or not mat.use_nodes or not mat.node_tree:
+            continue
+        bsdf = next((x for x in mat.node_tree.nodes if x.type == 'BSDF_PRINCIPLED'), None)
+        if bsdf is None:
+            continue
+        alpha = bsdf.inputs.get("Alpha")
+        tw = bsdf.inputs.get("Transmission Weight") or bsdf.inputs.get("Transmission")
+        if alpha is None or tw is None or alpha.is_linked or alpha.default_value < 0.999 \
+                or tw.is_linked or tw.default_value > 0.0:
+            continue
+        tw.default_value = 1.0
+        rough = bsdf.inputs.get("Roughness")
+        if rough is not None and not rough.is_linked:
+            rough.default_value = min(float(rough.default_value), 0.1)
+        _refractive(mat)
+        n += 1
+    if n:
+        print(f"  {n} material(s) named glass made transmissive (the file carried no transparency)")
+    return n
 
 
 def _build_material(obj, recipe, name):
@@ -1056,32 +1156,13 @@ def _fcurves_of(act):
     return out
 
 
-def _build_crowd(group, ground_y):
-    """Import a body + animation; place instances (a ring around the
-    position, or the given `instances` with position and heading); every
-    instance plays the clip's own take, staggered per instance."""
-    body_fbx = group["body_fbx"]
-    anim_fbx = group["animation_fbx"]
-    instances = group.get("instances") or []
-    count = len(instances) if instances else group.get("count", 1)
-    spacing = group.get("spacing", 2.0)
-    base_pos = group.get("position", [0, 0, 0])
-    anim_offset = group.get("animation_offset", 0.0)
-
-    print(f"  [crowd] {count} instances" + (f", spacing {spacing}m" if not instances else ", placed one by one"))
-    sys.stdout.flush()
-
-    before_objs = _scene_objects()
-    bpy.ops.import_scene.fbx(filepath=body_fbx, global_scale=1.0)
-    body_objs = [o for o in bpy.context.scene.objects if o not in before_objs]
-    if not body_objs:
-        print(f"    WARNING: body import failed: {body_fbx}")
-        return
-    # the hierarchy root is the armature that deforms the body (the one
-    # with the most skinned vertices: an accessory rig once became the
-    # root and the body stayed at the origin), else the parentless object
-    # with the most below it (the first parentless object once was a stray
-    # empty, so no instance was placed)
+def _settle_body(body_objs):
+    """One imported body: its root, its loose parts under it, its skin
+    re-bound. The hierarchy root is the armature that deforms the body
+    (the one with the most skinned vertices: an accessory rig once became
+    the root and the body stayed at the origin), else the parentless object
+    with the most below it (the first parentless object once was a stray
+    empty, so no instance was placed)."""
     arms = [o for o in body_objs if o.type == 'ARMATURE']
 
     def _skinned(a):
@@ -1111,6 +1192,49 @@ def _build_crowd(group, ground_y):
         (o for o in family if o.type == 'ARMATURE'), None)
     if body_arm is not None:
         _rebind_skin(body_arm, [o for o in family if o.type == 'MESH'])
+    return body_root
+
+
+def _build_crowd(group, ground_y):
+    """Import a body + animation; place instances (a ring around the
+    position, or the given `instances` with position and heading); every
+    instance plays the clip's own take, staggered per instance."""
+    body_fbx = group["body_fbx"]
+    anim_fbx = group["animation_fbx"]
+    instances = group.get("instances") or []
+    count = len(instances) if instances else group.get("count", 1)
+    spacing = group.get("spacing", 2.0)
+    base_pos = group.get("position", [0, 0, 0])
+    anim_offset = group.get("animation_offset", 0.0)
+    phase_spread = group.get("phase_spread")
+
+    print(f"  [crowd] {count} instances" + (f", spacing {spacing}m" if not instances else ", placed one by one"))
+    sys.stdout.flush()
+
+    before_objs = _scene_objects()
+    key = str(body_fbx).replace("\\", "/").lower()
+    cached = _BODIES.get(key)
+    if cached is not None and cached[0].name in bpy.data.objects:
+        # the same body in another clip group: a linked duplicate of the
+        # imported, re-bound body (six groups once imported it six times,
+        # 27 s to 115 s), with the import's own rotation and no clip yet
+        # (it once carried the first group's heading and take)
+        body_root = _duplicate_hierarchy(cached[0])
+        body_root.rotation_euler = cached[1].copy()
+        body_root.location = (0.0, 0.0, 0.0)
+        body_objs = [body_root] + list(body_root.children_recursive)
+        for o in body_objs:
+            if o.animation_data:
+                o.animation_data_clear()
+        print("    body: linked duplicate of the earlier import")
+    else:
+        bpy.ops.import_scene.fbx(filepath=body_fbx, global_scale=1.0)
+        body_objs = [o for o in bpy.context.scene.objects if o not in before_objs]
+        if not body_objs:
+            print(f"    WARNING: body import failed: {body_fbx}")
+            return
+        body_root = _settle_body(body_objs)
+        _BODIES[key] = (body_root, body_root.rotation_euler.copy())
 
     # the animation: the take the importer gives the clip's own armature
     # (the body file's takes are never candidates -- a body with a 60-frame
@@ -1135,6 +1259,12 @@ def _build_crowd(group, ground_y):
         action = max(bone_acts or [a for a in new_actions if _frames(a) > 1], key=_frames, default=None)
     if action is None:
         print(f"    WARNING: no animation take longer than one frame in {anim_fbx}")
+    else:
+        # every body loops its clip, the unshifted ones too (instance 0 once
+        # froze on the last key while its neighbours kept walking)
+        for fc in _fcurves_of(action):
+            if not any(m.type == 'CYCLES' for m in fc.modifiers):
+                fc.modifiers.new('CYCLES')
     bpy.ops.object.select_all(action='DESELECT')
     for o in anim_objs:
         if o.name in bpy.data.objects:
@@ -1152,7 +1282,11 @@ def _build_crowd(group, ground_y):
                 kp.co.x += frames
                 kp.handle_left.x += frames
                 kp.handle_right.x += frames
-        new.name = f"{src.name}_+{frames}f"
+        new.name = f"{src.name}_{frames:+d}f"
+        # the clip loops, so any phase into it is a pose of the cycle
+        for fc in _fcurves_of(new):
+            if not any(m.type == 'CYCLES' for m in fc.modifiers):
+                fc.modifiers.new('CYCLES')
         return new
 
     # placement. Manifest positions are Y-up (y = height): the same Rx90
@@ -1196,9 +1330,21 @@ def _build_crowd(group, ground_y):
                 if not arm.animation_data:
                     arm.animation_data_create()
                 ad = arm.animation_data
-                ad.action = (
-                    action if anim_offset == 0
-                    else _offset_action(action, int(anim_offset * i * 24)))
+                # where in the clip this body stands: its own `phase`
+                # (seconds), the group's `phase_spread`, the start delay
+                # `animation_offset`, else spread over the cycle -- a
+                # saved frame once showed one pose on 72 people
+                fps = float(bpy.context.scene.render.fps or 24)
+                spec = (instances[i] or {}) if instances else {}
+                if spec.get("phase") is not None:
+                    shift = -int(round(float(spec["phase"]) * fps))
+                elif phase_spread is not None:
+                    shift = -int(round(float(phase_spread) * fps * i / max(count, 1)))
+                elif anim_offset:
+                    shift = int(round(anim_offset * i * fps))
+                else:
+                    shift = -int(round(max(_frames(action), 1.0) * i / max(count, 1)))
+                ad.action = action if shift == 0 else _offset_action(action, shift)
                 # Blender 4.4+: an action only plays through a slot. With
                 # none assigned the clip was attached and the body stood
                 # still in every frame.

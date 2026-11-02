@@ -2227,6 +2227,7 @@ def test_tag_page_writes_the_tag_file_not_the_registry():
         config._CONFIG_FILE = Path(tmp) / "pharos_config.json"
         config.save({**config._DEFAULTS, "library_root": str(lib),
                      "registry_dir": str(Path(tmp) / "reg")})
+        config.reload()          # the page asks is_configured() of the loaded config
         browse.CANONICAL_ROOTS[:] = [lib]
         try:
             _with_registry([], run)
@@ -2234,6 +2235,7 @@ def test_tag_page_writes_the_tag_file_not_the_registry():
             library_map.PATH, config.LIBRARY_ROOT = old_path, old_root
             browse.CANONICAL_ROOTS[:] = old_canon
             config._CONFIG_FILE = old_cf
+            config.reload()
 
 def test_setup_flow_guards_folders_and_jobs():
     """Behind /setup: the folder browser lists folders only and refuses

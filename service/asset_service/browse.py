@@ -39,6 +39,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from asset_service import config  # noqa: E402
+from asset_service import __version__ as _PHAROS_VERSION  # noqa: E402
 from asset_service import db  # noqa: E402
 from asset_service import collection_import  # noqa: E402
 from asset_service import textures_import  # noqa: E402
@@ -1551,23 +1552,22 @@ def _bbox_triple(r: dict, prefix: str):
 
 def _placed_bbox(r: dict, facts) -> Optional[list]:
     """[[min], [max]] in metres, Z-up, where the builder puts the model
-    when it is placed at the origin without rotation or scale. An OBJ is
-    re-pivoted to the centre of its footprint on its base (whatever the
-    file's own pivot); any other file that holds one model keeps its
-    origin, so its corners are `bbox_min`/`bbox_max` (the measure's box
-    is origin-relative and already Z-up). None when the file holds
-    several loose objects (a mesh beside an empty or a light counts, as
-    in the builder) or a mesh under a parent node (they keep the file's
-    layout, which the measure's box does not know), and for a row that
-    was not measured from the file (no pivot fact: a manifest row)."""
+    when it is placed at the origin without rotation or scale. The
+    measure takes every mesh through its node transforms and drops the
+    one loose root's translation, as the builder does, so the measured
+    corners ARE the placed corners for FBX and glTF (one loose object: its
+    origin at the position; several: their layout kept). An OBJ holding
+    one object is re-pivoted to the centre of its footprint on its base.
+    None for a row that was not measured from the file (no pivot fact: a
+    manifest row whose exported file was never scanned)."""
     lo, hi = _bbox_triple(r, "bbox_min"), _bbox_triple(r, "bbox_max")
     if not lo or not hi or any(v is None for v in lo + hi):
         return None
     facts = facts or {}
-    if not facts.get("pivot") or (facts.get("mesh_models") or 1) > 1 or facts.get("nested_mesh"):
+    if not facts.get("pivot"):
         return None
     r4 = lambda v: round(float(v), 4)                                 # noqa: E731
-    if Path(r.get("fbx") or "").suffix.lower() == ".obj":
+    if Path(r.get("fbx") or "").suffix.lower() == ".obj" and (facts.get("mesh_models") or 1) == 1:
         size = [float(h) - float(l) for l, h in zip(lo, hi)]
         return [[r4(-size[0] / 2), r4(-size[1] / 2), 0.0], [r4(size[0] / 2), r4(size[1] / 2), r4(size[2])]]
     return [[r4(v) for v in lo], [r4(v) for v in hi]]
@@ -3284,11 +3284,34 @@ def _startup_imports(db_path: str, force: bool = False) -> dict:
     and the importers)."""
     db.init_db(db_path)   # applies schema migrations
     counts = {"collection": 0, "textures": 0, "audio": 0, "meshes": 0}
+    # a new Pharos on an old registry: the warm start would skip everything
+    # (textures stayed 0 and bodies empty after an upgrade while doctor
+    # said READY). One full pass, then the stamp
     try:
-        scanned = _rescan_changed(db_path, force)
+        conn = db.connect(db_path)
+        stamped = db.get_meta(conn, "scanned_version")
+        conn.close()
+    except Exception:                                     # noqa: BLE001
+        stamped = None
+    new_version = stamped != _PHAROS_VERSION
+    if new_version:
+        print(f"Pharos {_PHAROS_VERSION} is new to this registry (was "
+              f"{stamped or 'unstamped'}): scanning the folders and running the importers once",
+              flush=True)
+    try:
+        scanned = _rescan_changed(db_path, force or new_version)
+        if new_version:
+            # once per version (a scan that failed is unsigned and runs
+            # again at the next start anyway); a failing importer must not
+            # bring the whole scan back every start
+            conn = db.connect(db_path)
+            db.set_meta(conn, "scanned_version", _PHAROS_VERSION)
+            conn.close()
     except Exception as exc:                                 # noqa: BLE001
         print(f"folder scan skipped: {exc}", flush=True)
         scanned = 0
+    if new_version:
+        force = True
     sig = db.sources_signature(db_path, _source_files())
     conn = db.connect(db_path)
     served = db.get_meta(conn, "served_signature")
@@ -3332,6 +3355,8 @@ def _startup_imports(db_path: str, force: bool = False) -> dict:
             # a pass with a failed step is not "served": the next start
             # runs the importers again (an empty signature matches nothing)
             db.set_meta(conn, "served_signature", "" if failed else sig)
+            if not failed:
+                db.set_meta(conn, "served_version", _PHAROS_VERSION)
             if not db.get_meta(conn, "sources_stamp_at"):
                 import time as _time
                 db.set_meta(conn, "sources_stamp_at",

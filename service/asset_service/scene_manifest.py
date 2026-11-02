@@ -156,6 +156,10 @@ def validate_manifest(data: dict) -> list[str]:
         sc = a.get("scale", 1.0)
         if not isinstance(sc, (int, float)) or sc <= 0:
             errors.append(f"{label}.scale must be a positive number")
+        for fld, val in (("position", pos), ("rotation", rot)):
+            if isinstance(val, list) and len(val) == 3 and not all(
+                    isinstance(v, (int, float)) and not isinstance(v, bool) for v in val):
+                errors.append(f"{label}.{fld} must hold three numbers")
 
     textures = data.get("textures", [])
     if not isinstance(textures, list):
@@ -169,13 +173,27 @@ def validate_manifest(data: dict) -> list[str]:
     crowd = data.get("crowd", [])
     if not isinstance(crowd, list):
         crowd = []
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)   # noqa: E731
     for i, c in enumerate(crowd):
+        if not isinstance(c, dict):
+            errors.append(f"crowd[{i}]: must be an object")
+            continue
         if not c.get("body_fbx"):
             errors.append(f"crowd[{i}]: missing 'body_fbx'")
         if not c.get("animation_fbx"):
             errors.append(f"crowd[{i}]: missing 'animation_fbx'")
-        if c.get("count", 1) < 1:
-            errors.append(f"crowd[{i}]: count must be >= 1")
+        cnt = c.get("count", 1)
+        if not isinstance(cnt, int) or isinstance(cnt, bool) or cnt < 1:
+            errors.append(f"crowd[{i}]: count must be a whole number >= 1")
+        cpos = c.get("position", [0, 0, 0])
+        if not (isinstance(cpos, list) and len(cpos) == 3 and all(num(v) for v in cpos)):
+            errors.append(f"crowd[{i}].position must be three numbers")
+        for fld in ("spacing", "animation_offset"):
+            if fld in c and not num(c[fld]):
+                errors.append(f"crowd[{i}].{fld} must be a number")
+        sp = c.get("phase_spread")
+        if sp is not None and (isinstance(sp, bool) or not isinstance(sp, (int, float)) or sp < 0):
+            errors.append(f"crowd[{i}].phase_spread: seconds, 0 or more")
         inst = c.get("instances")
         if inst is not None:
             if not isinstance(inst, list) or not inst:
@@ -189,11 +207,14 @@ def validate_manifest(data: dict) -> list[str]:
                         continue
                     pos = spec.get("position")
                     if pos is not None and not (isinstance(pos, list) and len(pos) == 3
-                                                and all(isinstance(v, (int, float)) for v in pos)):
+                                                and all(num(v) for v in pos)):
                         errors.append(f"crowd[{i}].instances[{j}].position: three numbers (Y-up metres)")
                     hd = spec.get("heading")
                     if hd is not None and (isinstance(hd, bool) or not isinstance(hd, (int, float))):
                         errors.append(f"crowd[{i}].instances[{j}].heading: a number (degrees about the vertical)")
+                    ph = spec.get("phase")
+                    if ph is not None and (isinstance(ph, bool) or not isinstance(ph, (int, float)) or ph < 0):
+                        errors.append(f"crowd[{i}].instances[{j}].phase: seconds into the clip, 0 or more")
                 if "count" in c and isinstance(inst, list) and c["count"] != len(inst):
                     errors.append(f"crowd[{i}]: count={c['count']} but instances lists {len(inst)}; "
                                   f"instances win -- drop count or make them agree")
@@ -599,21 +620,45 @@ def budget_check(data: dict, meshes_db: Optional[str] = None) -> dict:
                 print(f"  WARNING: budget lookup missed '{fbx}' -- not in "
                       "the registry; its triangles are NOT counted",
                       file=sys.stderr)
-        scale = a.get("scale", 1.0)
-        total_tri += int(tri * scale * scale)  # approximate scaled cost
+        # a scaled model keeps its triangle count (scale squared once made a
+        # 221,402-triangle cafe at 0.01 count as 22)
+        total_tri += tri
         per_asset.append({"id": a.get("id", "?"), "triangles": tri,
-                          "matched": tri > 0 or not conn})
+                          "matched": tri > 0 or not conn,
+                          # the builder's import-once key: file, object, materials
+                          "key": f"{fbx.replace(chr(92), '/').lower()}|{a.get('object') or ''}|"
+                                 f"{json.dumps(a.get('materials'), sort_keys=True, default=str)}"})
 
-    for c in data.get("crowd", []):
+    try:
+        from .fbx_dims import fbx_triangles
+    except ImportError:                                   # run as a script
+        from fbx_dims import fbx_triangles
+    for i, c in enumerate(data.get("crowd", [])):
         count = crowd_count(c)
-        total_tri += 45000 * count  # CC body ~45k tri each (measured)
-        per_asset.append({"id": f"crowd_{count}", "triangles": 45000 * count})
+        body = c.get("body_fbx") or ""
+        body_tri = (fbx_triangles(body) if body and Path(body).is_file() else None) or 45000
+        total_tri += body_tri * count
+        # every deformed body is its own evaluated mesh: nothing is shared
+        per_asset.append({"id": f"crowd_{count}", "triangles": body_tri * count,
+                          "key": f"{body.replace(chr(92), '/').lower()}|crowd|{i}",
+                          "unique_triangles": body_tri * count})
 
+    # the builder imports a repeated key once (linked duplicates): what the
+    # GPU holds is the unique share, what it draws the total
+    seen: set = set()
+    unique_tri = 0
+    for e in per_asset:
+        k = e.get("key")
+        if k and k not in seen:
+            seen.add(k)
+            unique_tri += e.get("unique_triangles", e["triangles"])
     if conn:
         conn.close()
-    return {"total_triangles": total_tri, "per_asset": per_asset,
+    return {"total_triangles": total_tri, "unique_triangles": unique_tri,
+            "instanced_triangles": total_tri - unique_tri, "per_asset": per_asset,
             "budget_note": "UE5 Nanite handles 10M+; Blender Eevee ~5M; "
-                           "Cycles ~2M for interactive"}
+                           "Cycles ~2M for interactive; unique_triangles is what "
+                           "memory holds, total what is drawn"}
 
 
 def load_manifest(path: str | Path) -> tuple[Optional[dict], list[str]]:
@@ -685,7 +730,8 @@ def main(argv=None) -> int:
                 print("  WARNING: no --db and no default found; "
                       "triangles will be 0 (crowd only)")
         budget = budget_check(data, args.db)
-        print(f"  triangles: {budget['total_triangles']:,}")
+        print(f"  triangles: {budget['total_triangles']:,} drawn, "
+              f"{budget['unique_triangles']:,} unique (the rest are linked duplicates)")
         print(f"  note: {budget['budget_note']}")
     return 0
 

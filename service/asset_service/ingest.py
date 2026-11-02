@@ -41,7 +41,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config, library_map
+from . import __version__, config, library_map
 
 REPO = str(Path(__file__).resolve().parents[2])
 
@@ -392,6 +392,11 @@ def run_ingest(argv=None) -> int:
     try:
         db.stamp_registry(config.DB_PATH, root)    # this library's registry
         db.touch_sources(config.DB_PATH)           # the server imports again
+        # this version scanned and imported: the server need not do it
+        # again at its first start (it did, after every ingest)
+        conn = db.connect(config.DB_PATH)
+        db.set_meta(conn, "scanned_version", __version__)
+        conn.close()
     except Exception as exc:                              # noqa: BLE001
         print(f"  registry stamp skipped: {exc}", flush=True)
     try:

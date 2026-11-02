@@ -319,8 +319,18 @@ def import_textures(db_path: str | Path, root=None) -> int:
         if not root.is_dir():
             kept = conn.execute("SELECT COUNT(*) FROM textures"
                                 ).fetchone()[0]
-            print(f"textures import: root absent ({root}) -- keeping "
-                  f"{kept} scanner-indexed row(s)")
+            # said only when the map lists a textures folder (a library
+            # without one is a state, not a message)
+            try:
+                from asset_service import library_map
+                listed = library_map.sections(library_map.load()).get("textures")
+            except Exception:                             # noqa: BLE001
+                listed = None
+            if listed:
+                chosen = ((config.SECTIONS or {}).get("textures") or "").replace("\\", "/").strip("/").lower()
+                name = next((f for f in listed if f.lower() == chosen), listed[0])
+                print(f"textures import: {root} not found (the map lists {name} "
+                      f"as the textures folder) -- keeping {kept} scanner-indexed row(s)")
             return kept
         # scanner rows (source='scan') survive the rebuild; only this
         # importer's own rows (source NULL / 'crawl') are replaced

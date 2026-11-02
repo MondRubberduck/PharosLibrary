@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.0.1 (2026-11-02)
+
+The second test report on 1.0.0 (19 of the 26 virgin-run findings
+confirmed fixed, the Unreal and KitBash chains hands-off, the street built
+identically in 27 s) left a short list, answered here.
+
+- **Placement is exact for every measured file.** The measure takes each
+  mesh through its FBX / glTF node transforms and drops the one loose
+  root's translation, as the builder does: a KitBash assembly's box was
+  100 times too small and in the mesh's own frame; a nested vendor file
+  kept its group offset. Converted packs and kits take the measured
+  corners, sizes and pivot of their exported FBX at import (the engine's
+  corners were mirrored in Y, a kit's were in kit-layout coordinates:
+  centring by them missed by 20 m), so `placed_bbox` is there for 512 of
+  512 models, not 65. Checked against the builder on real files (8 of 8
+  within 0.1 mm) and on Blender-made fixtures (test).
+- **An upgraded server imports once.** The registry carries the Pharos
+  version; a new version scans the folders and runs the importers at
+  the first start instead of serving stale counts behind a READY doctor.
+- **Exit 5 means a file is missing.** An image without a file path (an
+  engine's sampler reference) is noted, not counted; 30 of 326 clean
+  builds once exited 5 over one.
+- **Glass.** A recipe's `refraction` map drives Principled transmission;
+  a material the file names glass that carries no transparency after
+  the import gets it (the log says how many). Emission at the map's own
+  strength (3x once clipped half a hologram's pixels).
+- **Crowds move at the saved frame.** `instances[].phase` (seconds into
+  the clip) or `phase_spread` per group; without them the bodies are
+  spread over the clip; every clip loops. The same body file in several
+  groups is imported once (27 s to 115 s before), each group from the
+  import's own rotation and with its own clip.
+- `--budget` counts triangles without the scale-squared error, reads the
+  body's own count, and tells unique from instanced triangles (a crowd's
+  bodies are each their own evaluated mesh). An FBX Blender 5.1's
+  importer refuses (one with a light) skips its asset instead of ending
+  the build; a glTF's bone-shape sphere and excluded collections are not
+  the asset. The
+  validator wants numbers in `position` / `rotation` and in the crowd
+  fields. SpeedTree `ColorOpacity` maps are colour (with alpha), not
+  opacity alone. `convert --dry-run` says "would convert". The textures
+  line is silent for a library without a textures folder. `instances`,
+  `heading` (degrees) and `phase` are in the scene docs.
+
 ## 1.0.0 (2026-11-01)
 
 Pharos 1.0. Between 0.95.0 and this release the app was run on a second
@@ -38,9 +81,14 @@ a converted Unreal pack and a Character Creator body; its 26 findings
   script; next to the manifest when the library cannot be written), the
   one folder inside a read-only library an agent may write. Dead KitBash
   texture paths of both kit layouts are repointed. `/api/meshes/item`
-  carries `placed_bbox`, the corners where the builder puts a file that
-  holds one loose object (null for several or a nested one: the measure
-  now counts a file's loose objects).
+  carries `placed_bbox`, the corners where the builder puts the file: the
+  measure takes every mesh through its FBX / glTF node transforms and
+  drops the one loose root's translation as the builder does (a KitBash
+  assembly's box was 100 times too small and in the wrong place), and the
+  recipe rows of converted packs and kits take the measured corners and
+  pivot of their exported FBX (the engine's corners were mirrored in Y,
+  a kit's were in kit-layout coordinates: centring by them missed by
+  20 m).
 - **Characters and kits.** `crowd[]` takes the armature that deforms the
   body as its root (loose parts of the body file go with it), the take
   the clip gives its own armature (never a take of the body file, never

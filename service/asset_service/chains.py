@@ -259,7 +259,8 @@ def convert(argv: list) -> int:
             rc = _run([sys.executable, conv / "verify_pack_export.py",
                        pack / "Exports"], conv, args.dry_run)
         failed += 1 if rc else 0
-    what = "relinked" if args.relink_only else "converted"
+    what = ("would relink" if args.dry_run else "relinked") if args.relink_only \
+        else ("would convert" if args.dry_run else "converted")
     done = len(todo) - failed
     _say(f"\n{what} {done} of {len(todo)} pack(s)"
          + ("; run pharos.py ingest to import them" if done and not args.dry_run else ""))

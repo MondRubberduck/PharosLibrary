@@ -884,18 +884,23 @@ def import_meshes(db_path: str | Path) -> int:
                 f"INSERT OR IGNORE INTO meshes_parked ({','.join(scan_cols)}) "
                 f"VALUES ({marks})", parked)
             n += len(unique_rows)
-            # the parked row's measured FILE facts (units, up axis, LOD
-            # group, skin, bones, category words) still hold for the
-            # richer rows of that file, which measured geometry only: they
-            # take them where they have none (not the pivot: that is per
-            # object, and the richer row has its own corners)
+            # the parked row's measured FILE facts (units, up axis, pivot,
+            # LOD group, skin, bones, category words) and its corners hold
+            # for the richer rows of that file, which know only what the
+            # engine or the kit said: the engine's corners are mirrored in
+            # Y against the imported FBX, a kit's are in kit-layout
+            # coordinates (an agent centring by them missed by 20 m); the
+            # measured box is where the builder puts the file
             if parked and "facts" in scan_cols:
                 xi = scan_cols.index("facts")
+                bi = {c: scan_cols.index(c) for c in ("bbox_min_x", "bbox_min_y", "bbox_min_z",
+                                                      "bbox_max_x", "bbox_max_y", "bbox_max_z")
+                      if c in scan_cols}
                 by_file: dict = {}
                 for rid, fbx in conn.execute(
                         "SELECT id, fbx FROM meshes WHERE facts IS NULL AND fbx != ''"):
                     by_file.setdefault(_real_path(fbx), []).append(rid)
-                merged = 0
+                merged = cornered = 0
                 for r in parked:
                     if not r[xi]:
                         continue
@@ -903,16 +908,32 @@ def import_meshes(db_path: str | Path) -> int:
                         f = json.loads(r[xi]) or {}
                     except ValueError:
                         continue
-                    f.pop("pivot", None)
-                    if not f:
+                    box = [r[bi[c]] for c in ("bbox_min_x", "bbox_min_y", "bbox_min_z",
+                                              "bbox_max_x", "bbox_max_y", "bbox_max_z")] if len(bi) == 6 else []
+                    has_box = bool(box) and all(isinstance(v, (int, float)) for v in box)
+                    if not f and not has_box:
                         continue
-                    for rid in by_file.get(_real_path(r[fi]), ()):
-                        conn.execute("UPDATE meshes SET facts=? WHERE id=? AND facts IS NULL",
-                                     (json.dumps(f, ensure_ascii=False), rid))
-                        merged += 1
-                if merged:
+                    rids = by_file.get(_real_path(r[fi]), ())
+                    # the file's box and pivot belong to a row that IS the
+                    # file (a converted pack's mesh, a kit assembly); the
+                    # object rows of a container file keep their own
+                    one = len(rids) == 1
+                    f_rows = dict(f) if one else {k: v for k, v in f.items() if k != "pivot"}
+                    for rid in rids:
+                        if f_rows:
+                            conn.execute("UPDATE meshes SET facts=? WHERE id=? AND facts IS NULL",
+                                         (json.dumps(f_rows, ensure_ascii=False), rid))
+                            merged += 1
+                        if has_box and one:
+                            sizes = [round(box[3] - box[0], 5), round(box[4] - box[1], 5), round(box[5] - box[2], 5)]
+                            conn.execute("UPDATE meshes SET bbox_min_x=?, bbox_min_y=?, bbox_min_z=?, "
+                                         "bbox_max_x=?, bbox_max_y=?, bbox_max_z=?, "
+                                         "bbox_x=?, bbox_y=?, bbox_z=?, max_dim=? WHERE id=?",
+                                         (*box, *sizes, max(sizes), rid))
+                            cornered += 1
+                if merged or cornered:
                     print(f"meshes import: {merged} richer row(s) took the file facts "
-                          f"of their parked scan row", flush=True)
+                          f"of their parked scan row, {cornered} its measured corners", flush=True)
             if parked:
                 print(f"meshes import: {len(parked)} scan row(s) parked: a "
                       f"richer row covers the same file (served again when "

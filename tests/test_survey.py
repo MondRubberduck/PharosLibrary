@@ -362,14 +362,14 @@ def test_engine_chains_run_only_on_the_maps_decisions():
             assert lm.load()["ue/rawpack"]["state"] == "converted" and not lm.load()["ue/rawpack"]["action"]
             rc, out = run(chains.convert, "--relink-only", "--dry-run")
             assert rc == 0 and "relink_pack.sh" in out and "--sync" in out and "convert_packs.sh" not in out \
-                and "relinked 1 of 1" in out and "converted pack" in out, out
+                and "would relink 1 of 1" in out and "converted pack" in out, out
             rc, out = run(chains.convert, "--relink-only", "--pack", "UE/RawPack", "--dry-run")
-            assert rc == 0 and "relinked 1 of 1" in out, out
+            assert rc == 0 and "would relink 1 of 1" in out, out
             # a converted pack whose manifest carries its recipes is left
             # alone -- unless --pack asks for it
             assert "Converted" not in out.split("relinking", 1)[1].split("\n")[0], out
             rc, out = run(chains.convert, "--relink-only", "--pack", "UE/Converted", "--dry-run")
-            assert rc == 0 and "relinked 1 of 1" in out and "UE/Converted" in out, out
+            assert rc == 0 and "would relink 1 of 1" in out and "UE/Converted" in out, out
             # a converted pack under a 'leave' decision is never relinked
             lm.update("UE", action="leave")
             rc, out = run(chains.convert, "--relink-only", "--dry-run")

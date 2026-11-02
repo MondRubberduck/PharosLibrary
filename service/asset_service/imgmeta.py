@@ -156,7 +156,8 @@ def _tiff(fh, head: bytes):
 # "preview" is not a map: it marks the render/thumbnail image of a set.
 _ROLE_TOKENS = {
     "albedo": "albedo alb albido basecolor basecolour basemap basec mainbc "
-              "bc diffuse diff dif color colour col colortexture d",
+              "bc diffuse diff dif color colour col colortexture d "
+              "coloropacity colouropacity basecoloropacity",   # SpeedTree: colour with alpha
     "normal": "normal normalmap normaldx normalgl norm nrm nor nml basen "
               "mainn n",
     "roughness": "roughness rough rgh r",

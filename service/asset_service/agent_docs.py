@@ -291,7 +291,7 @@ tokens, an answer stops at ~20k tokens and lists the rest in
 `recipe` (per-slot material wiring:
 `slots[].maps[]` with `role`/`file`/`channels`) · `hero_textures` (role →
 texture path; `{}` = unknown, NOT untextured) · `materials` (slot names) ·
-`bbox_min`/`bbox_max` (the file's own corners, origin-relative, Z-up) · `placed_bbox` (the corners where the builder puts the model placed at the origin: `[[x, y, z], [x, y, z]]` metres, Z-up like `bbox_m`; an OBJ is re-pivoted to its footprint centre on its base, another file holding one loose object keeps its origin; null for a file of several loose objects (meshes, empties, lights), a mesh under a parent node, or a row not measured from the file) ·
+`bbox_min`/`bbox_max` (the corners of the measured file, Z-up metres, in the frame a build at the origin puts it: node transforms applied, one loose object's origin at the position, several keep their layout) · `placed_bbox` (the same corners as the builder places them: an OBJ holding one object is re-pivoted to its footprint centre on its base, everything else equals `bbox_min`/`bbox_max`; null only for a row whose file was never measured) ·
 `vertices` · `format` · `view_url` (3D preview page).
 
 **Axes:** `bbox_m` = [x, y, z] metres, **Z-up** (height = `bbox_m[2]`, largest axis = what `min_dim`/`max_dim` filter); scene-manifest positions are Y-up.
@@ -475,7 +475,15 @@ maps the search lists (colour, OpenGL normal, roughness, metallic); the
 check prints which maps it found.
 
 **crowd[]** — `body_fbx`, `animation_fbx` (FBX only), `position`,
-`count`, `spacing` (metres), `animation_offset` (seconds).
+`count`, `spacing` (metres), `animation_offset` (seconds: body i starts
+i × offset into the looping clip), or `instances`: `[{{"position": [x, y, z], "heading": 90,
+"phase": 0.4}}]` places each body yourself (`count` = their number).
+`position` is Y-up metres like an asset's; `heading` is DEGREES about
+the vertical (unlike `rotation`, which is radians), 0 keeps the body's
+own facing from its file; `phase` is seconds into the clip, so the
+bodies do not all stand in one pose at the saved frame -- without
+phases they are spread over the clip (`phase_spread`, seconds, sets the
+spread). The same `body_fbx` in several groups is imported once.
 
 **audio[]** — `file`, `loop`: recorded for engines; Blender does not
 play scene audio.
@@ -511,8 +519,9 @@ named image files are not on disk (or empty). For placement,
 `placed_bbox` of `/api/meshes/item` gives a model's corners where the
 builder puts it: `[[x, y, z], [x, y, z]]` metres, Z-up like `bbox_m`
 (height = z; the manifest's Y-up position is `[x, z, -y]` of these);
-scale and rotation are not applied; null for a file of several loose
-objects (they keep the file's layout).
+scale and rotation are not applied. It is exact for every measured file,
+kits and converted packs included (their exported FBX is measured);
+null only when the file was never measured.
 
 ## 5. Verify it
 

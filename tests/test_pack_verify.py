@@ -2536,27 +2536,31 @@ def test_kit_exporters_find_every_approved_kit_folder():
 
 def test_placed_bbox_follows_the_builder():
     """`placed_bbox` is where the builder puts a model placed at the
-    origin: an OBJ is re-pivoted to its footprint centre on its base
-    whatever its pivot; another one-model file keeps its origin, so the
-    corners are bbox_min/max; null for several models, a nested model,
-    or a row not measured from the file (a manifest row)."""
+    origin. The measure already applied the file's node transforms and
+    dropped the one loose root's translation, so for FBX and glTF the
+    corners ARE the measured corners (one or several loose objects, nested
+    or not); an OBJ holding one object is re-pivoted to its footprint
+    centre on its base; null only for a row not measured from the file
+    (a manifest row whose exported file was never scanned)."""
     from asset_service import browse
     row = {"bbox_min_x": 4.92, "bbox_min_y": -1.0, "bbox_min_z": 0.0,
            "bbox_max_x": 11.30, "bbox_max_y": 1.0, "bbox_max_z": 3.0, "fbx": "D:/Lib/Props/a.fbx"}
-    assert browse._placed_bbox(row, {"pivot": "corner"}) == [[4.92, -1.0, 0.0], [11.3, 1.0, 3.0]]
-    assert browse._placed_bbox(row, {"pivot": "base-centre", "mesh_models": 1}) == [[4.92, -1.0, 0.0], [11.3, 1.0, 3.0]]
+    corners = [[4.92, -1.0, 0.0], [11.3, 1.0, 3.0]]
+    assert browse._placed_bbox(row, {"pivot": "corner"}) == corners
+    assert browse._placed_bbox(row, {"pivot": "base-centre", "mesh_models": 1}) == corners
+    assert browse._placed_bbox(row, {"pivot": "centre", "mesh_models": 2}) == corners
+    assert browse._placed_bbox(row, {"pivot": "centre", "nested_mesh": True}) == corners
     obj = {**row, "fbx": "D:/Lib/Props/a.obj"}
-    assert browse._placed_bbox(obj, {"pivot": "corner"}) == [[-3.19, -1.0, 0.0], [3.19, 1.0, 3.0]]
-    assert browse._placed_bbox(obj, {"pivot": "centre"}) == [[-3.19, -1.0, 0.0], [3.19, 1.0, 3.0]]
-    assert browse._placed_bbox(row, {"pivot": "centre", "mesh_models": 2}) is None
-    assert browse._placed_bbox(obj, {"pivot": "centre", "mesh_models": 3}) is None
-    assert browse._placed_bbox(row, {"pivot": "centre", "nested_mesh": True}) is None
+    base_centre = [[-3.19, -1.0, 0.0], [3.19, 1.0, 3.0]]
+    assert browse._placed_bbox(obj, {"pivot": "corner"}) == base_centre
+    assert browse._placed_bbox(obj, {"pivot": "centre"}) == base_centre
+    assert browse._placed_bbox(obj, {"pivot": "centre", "mesh_models": 3}) == corners   # several keep their layout
     assert browse._placed_bbox(row, {}) is None and browse._placed_bbox(row, None) is None
     assert browse._placed_bbox({"bbox_min_x": None, "fbx": "x.obj"}, {"pivot": "centre"}) is None
     item = browse._mesh_extras({**obj, "facts": json.dumps({"pivot": "base-centre"}), "recipe": {}, "meta": {}})
     assert item["placed_bbox"][1] == [3.19, 1.0, 3.0] and item["bbox_min"] == [4.92, -1.0, 0.0]
     item = browse._mesh_extras({**row, "facts": json.dumps({"pivot": "centre", "mesh_models": 2}), "recipe": {}, "meta": {}})
-    assert item["placed_bbox"] is None and item["bbox_max"] == [11.3, 1.0, 3.0]
+    assert item["placed_bbox"] == corners and item["bbox_max"] == [11.3, 1.0, 3.0]
 
 
 def test_measure_counts_a_files_models_and_their_nesting():
@@ -2618,6 +2622,205 @@ def test_measure_counts_a_files_models_and_their_nesting():
         assert fbx_dims.fbx_triangles(tmp / "two.obj") is None
         (tmp / "clip.fbx").write_bytes(F.fbx_bytes([F.global_settings(), F.objects(F.model(1, "Rig", "Null"))]))
         assert fbx_dims.fbx_triangles(tmp / "clip.fbx") is None
+
+
+def test_measured_box_is_where_the_builder_puts_the_file():
+    """With Blender: files made by Blender's own exporters -- a cube under
+    a group that is offset, turned and scaled, two loose cubes, one cube
+    off the origin and turned -- as FBX and glTF. The measure's box (node
+    transforms applied, the one loose root's translation dropped) must be
+    where the builder puts each file at the origin, within 2 mm. SKIP
+    without Blender unless PHAROS_REQUIRE_BLENDER=1."""
+    import tempfile
+    from asset_service import measure
+    exe = _blender_for_checks()
+    if not exe:
+        assert os.environ.get("PHAROS_REQUIRE_BLENDER") != "1"
+        print("SKIP: no Blender on this machine -- measure/builder check not run")
+        return
+    builder = REPO / "service" / "asset_service" / "scene_builder.py"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        mk = tmp / "make.py"
+        mk.write_text(
+            "import bpy, sys, math\n"
+            "out = sys.argv[sys.argv.index('--') + 1]\n"
+            "def fresh():\n"
+            "    bpy.ops.wm.read_factory_settings(use_empty=True)\n"
+            "def cube(name, loc, rot=(0, 0, 0), scale=(1, 1, 1), parent=None):\n"
+            "    bpy.ops.mesh.primitive_cube_add(size=1, location=loc)\n"
+            "    o = bpy.context.active_object; o.name = name; o.rotation_euler = rot; o.scale = scale\n"
+            "    if parent is not None:\n"
+            "        o.parent = parent\n"
+            "    return o\n"
+            "def export(stem):\n"
+            "    bpy.ops.object.select_all(action='SELECT')\n"
+            "    bpy.ops.export_scene.fbx(filepath=out + '/' + stem + '.fbx', use_selection=True, add_leaf_bones=False, bake_anim=False)\n"
+            "    bpy.ops.export_scene.gltf(filepath=out + '/' + stem + '.glb', use_selection=True, export_format='GLB')\n"
+            "fresh()\n"
+            "g = bpy.data.objects.new('Grp', None); bpy.context.scene.collection.objects.link(g)\n"
+            "g.location = (3, 0, 0); g.rotation_euler = (0, 0, math.radians(90)); g.scale = (2, 2, 2)\n"
+            "cube('Part', (0, 0, 1), parent=g)\n"
+            "export('nested')\n"
+            "fresh()\n"
+            "cube('A', (-5, 0, 0.5)); cube('B', (5, 0, 0.5))\n"
+            "export('two')\n"
+            "fresh()\n"
+            "cube('Solo', (3, 1, 0.5), rot=(0, 0, math.radians(45)))\n"
+            "export('single')\n"
+            "fresh()\n"
+            "a = cube('L1', (-5, 0, 0.5)); b = bpy.data.objects.new('L2', a.data); bpy.context.scene.collection.objects.link(b); b.location = (5, 0, 0.5)\n"
+            "export('linked')\n"
+            "fresh()\n"
+            "def rigged(name, loc, rot, scale):\n"
+            "    arm = bpy.data.armatures.new(name); A = bpy.data.objects.new(name, arm); bpy.context.scene.collection.objects.link(A)\n"
+            "    bpy.context.view_layer.objects.active = A; bpy.ops.object.mode_set(mode='EDIT')\n"
+            "    bb = arm.edit_bones.new('spine'); bb.head = (0, 0, 0); bb.tail = (0, 0, 1)\n"
+            "    bpy.ops.object.mode_set(mode='OBJECT')\n"
+            "    bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 0.5)); M = bpy.context.active_object; M.name = name + '_Body'\n"
+            "    M.parent = A; M.modifiers.new('Armature', 'ARMATURE').object = A\n"
+            "    g = M.vertex_groups.new(name='spine'); g.add(range(len(M.data.vertices)), 1.0, 'REPLACE')\n"
+            "    A.location = loc; A.rotation_euler = rot; A.scale = scale\n"
+            "rigged('Rig', (2, 0, 0), (0, 0, 0), (1, 1, 1))\n"
+            "export('rig')\n", encoding="utf-8")
+        r = subprocess.run([exe, "--background", "--factory-startup", "--python", str(mk), "--", tmp.as_posix()],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        files = sorted(p for p in tmp.iterdir() if p.suffix in (".fbx", ".glb"))
+        assert len(files) == 10, (files, ((r.stdout or "") + (r.stderr or ""))[-800:])
+        scene = {"schema": "pharos.scene/v1", "scene": "Measure truth", "units": "meters", "up_axis": "Y", "ground_y": 0.0,
+                 "assets": [{"id": p.stem + p.suffix[1:], "fbx": str(p), "position": [0, 0, 0]} for p in files]}
+        (tmp / "scene.json").write_text(json.dumps(scene), encoding="utf-8")
+        out = tmp / "truth.blend"
+        r = subprocess.run([exe, "--background", "--factory-startup", "--python", str(builder), "--", str(tmp / "scene.json"),
+                            "--save", str(out)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+        assert r.returncode == 0 and out.is_file(), (r.returncode, ((r.stdout or "") + (r.stderr or ""))[-800:])
+        probe = tmp / "probe.py"
+        probe.write_text(
+            "import bpy, json\n"
+            "out = {}\n"
+            "for root in [o for o in bpy.data.objects if o.name.endswith('_root')]:\n"
+            "    pts = [o.matrix_world @ v.co for o in root.children_recursive if o.type == 'MESH' for v in o.data.vertices]\n"
+            "    out[root.name[:-5]] = [[round(min(p[k] for p in pts), 4) for k in range(3)], [round(max(p[k] for p in pts), 4) for k in range(3)]]\n"
+            "print('PROBE ' + json.dumps(out))\n", encoding="utf-8")
+        r2 = subprocess.run([exe, "--background", "--factory-startup", str(out), "--python", str(probe)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        truth = json.loads(next(l for l in (r2.stdout or "").splitlines() if l.startswith("PROBE "))[6:])
+        worst = 0.0
+        for p in files:
+            rec = measure.measure_file(p, p.name)
+            size, lo, hi = measure.registry_bbox(rec)
+            t = truth[p.stem + p.suffix[1:]]
+            assert lo is not None, (p.name, rec.get("error"))
+            err = max(abs(a - b) for a, b in zip(lo + hi, t[0] + t[1]))
+            worst = max(worst, err)
+            assert err < 0.002, (p.name, "measured", lo, hi, "builder", t, rec.get("mesh_models"), rec.get("nested_mesh"))
+        # the group: one loose root (its offset dropped), turned and scaled
+        rec = measure.measure_file(tmp / "nested.fbx", "nested.fbx")
+        assert rec["nested_mesh"] is True and rec["mesh_models"] == 1 and abs(rec["bbox_m"][2] - 2.0) < 0.002, rec["bbox_m"]
+        rec = measure.measure_file(tmp / "two.fbx", "two.fbx")
+        assert rec["mesh_models"] == 2 and abs(rec["bbox_m"][0] - 11.0) < 0.002, rec["bbox_m"]
+        rec = measure.measure_file(tmp / "linked.fbx", "linked.fbx")        # one geometry, two models
+        assert rec["mesh_models"] == 2 and abs(rec["bbox_m"][0] - 11.0) < 0.002, rec["bbox_m"]
+        rec = measure.measure_file(tmp / "rig.fbx", "rig.fbx")              # the armature is one loose object
+        assert rec["mesh_models"] == 1 and rec["bones"] >= 1, (rec["mesh_models"], rec["bones"])
+        print(f"  measure vs builder: worst error {worst * 1000:.2f} mm over {len(files)} files")
+
+
+def test_recipe_rows_take_the_measured_corners_of_their_exported_file():
+    """A converted pack's recipe row carries the engine's corners (mirrored
+    in Y against the imported FBX; a kit's are in kit-layout coordinates).
+    After the scan of its Exports the import gives the row the parked scan
+    row's measured corners, sizes and pivot, so placed_bbox is exact."""
+    import sqlite3
+    F = _fbxfix()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        lib = tmp / "Lib"
+        ex = lib / "Packs" / "FX_Pack" / "Exports"
+        (ex / "FBX").mkdir(parents=True)
+        (ex / "FBX" / "SM_Box.fbx").write_bytes(F.fbx_bytes([F.global_settings(), F.objects(F.box_mesh(), F.model(1, "SM_Box", "Mesh")),
+                                                             F.connections([(1000, 1)])]))
+        (ex / "FBX" / "SM_Parts.fbx").write_bytes(F.fbx_bytes([F.global_settings(), F.objects(F.box_mesh(), F.model(1, "A", "Mesh"), F.model(2, "B", "Mesh")),
+                                                               F.connections([(1000, 1), (1000, 2)])]))
+        (ex / "manifest.json").write_text(json.dumps({
+            "schema": "pharos.pack.export/v2", "pack": "FX_Pack", "game_root": "/Game/FX",
+            "meshes": [{"name": "SM_Box", "asset_path": "/Game/FX/SM_Box", "kind": "StaticMesh", "fbx": "FBX/SM_Box.fbx",
+                        "triangles": 12, "vertices": 8, "bbox_m": [1.0, 0.5, 1.0], "dimension_method": "engine",
+                        "bbox_min_m": [-0.5, 0.2, 0.0], "bbox_max_m": [0.5, 0.7, 1.0], "materials": []},
+                       # two rows of one file (a container's objects): each keeps its own corners
+                       {"name": "SM_PartA", "asset_path": "/Game/FX/SM_PartA", "kind": "StaticMesh", "fbx": "FBX/SM_Parts.fbx",
+                        "triangles": 12, "vertices": 8, "bbox_m": [1.0, 1.0, 1.0], "dimension_method": "engine",
+                        "bbox_min_m": [-0.5, -0.5, 0.0], "bbox_max_m": [0.5, 0.5, 1.0], "materials": []},
+                       {"name": "SM_PartB", "asset_path": "/Game/FX/SM_PartB", "kind": "StaticMesh", "fbx": "FBX/SM_Parts.fbx",
+                        "triangles": 12, "vertices": 8, "bbox_m": [1.0, 1.0, 1.0], "dimension_method": "engine",
+                        "bbox_min_m": [9.5, -0.5, 0.0], "bbox_max_m": [10.5, 0.5, 1.0], "materials": []}],
+            "textures": [], "counts": {"static_mesh": 1}, "wiring": {"method": "ue-param", "slots_total": 0, "slots_resolved": 0}}),
+            encoding="utf-8")
+        db = tmp / "reg.sqlite"
+        cfg = tmp / "pharos_config.json"
+        cfg.write_text(json.dumps({"library_root": str(lib), "registry_dir": str(tmp), "sections": {},
+                                   "scan_folders": ["Packs/FX_Pack/Exports"], "manifest_roots": [str(lib / "Packs")]}),
+                       encoding="utf-8")
+        env = {**os.environ, "PHAROS_CONFIG": str(cfg)}
+        r = subprocess.run([sys.executable, "-B", str(REPO / "service" / "asset_service" / "scanner.py"), str(ex), "--db", str(db)],
+                           capture_output=True, text=True, cwd=str(REPO), timeout=120, env=env)
+        assert r.returncode == 0, (r.stdout or "")[-500:] + (r.stderr or "")[-500:]
+        # the model index ingest builds from the manifests, then the import
+        r = subprocess.run([sys.executable, "-B", str(REPO / "pipeline" / "agent_index" / "build_agent_index.py")],
+                           capture_output=True, text=True, cwd=str(REPO), timeout=300,
+                           env={**env, "PHAROS_LIBRARY_ROOT": str(lib)})
+        assert r.returncode == 0, (r.stdout or "")[-500:] + (r.stderr or "")[-500:]
+        r = subprocess.run([sys.executable, "-B", "-c",
+                            "import sys; sys.path.insert(0, 'service'); from asset_service import meshes_import; "
+                            "print('imported', meshes_import.import_meshes(sys.argv[1]))", str(db)],
+                           capture_output=True, text=True, cwd=str(REPO), timeout=120, env=env)
+        assert r.returncode == 0 and "took the file facts" in r.stdout and "its measured corners" in r.stdout, \
+            (r.stdout or "")[-600:] + (r.stderr or "")[-600:]
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM meshes WHERE source != 'scan' AND name LIKE '%Box%'").fetchone()
+        parked = conn.execute("SELECT * FROM meshes_parked").fetchone()
+        parts = {r["name"]: dict(r) for r in conn.execute("SELECT * FROM meshes WHERE source != 'scan' AND name LIKE '%Part%'")}
+        conn.close()
+        assert len(parts) == 2, sorted(parts)
+        for nm, pr in parts.items():
+            assert [pr["bbox_min_x"], pr["bbox_max_x"]] == ([-0.5, 0.5] if "A" in nm else [9.5, 10.5]), (nm, pr["bbox_min_x"], pr["bbox_max_x"])
+            assert "pivot" not in json.loads(pr["facts"] or "{}"), (nm, pr["facts"])
+        assert row is not None and parked is not None, (row, parked)
+        corners = [[row["bbox_min_x"], row["bbox_min_y"], row["bbox_min_z"]], [row["bbox_max_x"], row["bbox_max_y"], row["bbox_max_z"]]]
+        assert corners == [[-0.5, -0.5, 0.0], [0.5, 0.5, 1.0]], corners          # the FBX's, not the engine's
+        assert [row["bbox_x"], row["bbox_y"], row["bbox_z"]] == [1.0, 1.0, 1.0], [row["bbox_x"], row["bbox_y"], row["bbox_z"]]
+        facts = json.loads(row["facts"] or "{}")
+        assert facts.get("pivot") == "base-centre", facts
+        from asset_service import browse
+        assert browse._placed_bbox(dict(row), facts) == [[-0.5, -0.5, 0.0], [0.5, 0.5, 1.0]]
+
+
+def test_manifest_validator_wants_numbers():
+    """The scene validator refuses what the builder would crash on after
+    every import: text in positions, a count that is text, a bool in an
+    instance position, a negative phase."""
+    from asset_service import scene_manifest as sm
+    base = {"schema": "pharos.scene/v1", "scene": "v", "units": "meters", "up_axis": "Y", "assets": []}
+    ok = sm.validate_manifest({**base, "assets": [{"id": "a", "fbx": "x.fbx", "position": [1, 2, 3], "rotation": [0, 0.5, 0]}],
+                               "crowd": [{"body_fbx": "b.fbx", "animation_fbx": "c.fbx", "count": 3, "spacing": 2,
+                                          "animation_offset": 0.5, "position": [0, 0, 0]},
+                                         {"body_fbx": "b.fbx", "animation_fbx": "c.fbx", "phase_spread": 1.0,
+                                          "instances": [{"position": [1, 0, 2], "heading": 90, "phase": 0.3}]}]})
+    assert ok == [], ok
+    bad = sm.validate_manifest({**base, "assets": [{"id": "a", "fbx": "x.fbx", "position": ["a", "b", "c"], "rotation": [True, 0, 0]}],
+                                "crowd": [{"body_fbx": "b.fbx", "animation_fbx": "c.fbx", "count": "3", "spacing": "2",
+                                           "animation_offset": "0.5", "position": ["0", 0, 0]},
+                                          {"body_fbx": "b.fbx", "animation_fbx": "c.fbx", "phase_spread": -1,
+                                           "instances": [{"position": [True, 0, 0], "heading": "east", "phase": -0.2}]},
+                                          "not an object"]})
+    text = "\n".join(bad)
+    for needle in ("assets[0].position must hold three numbers", "assets[0].rotation must hold three numbers",
+                   "crowd[0]: count must be a whole number", "crowd[0].spacing must be a number",
+                   "crowd[0].animation_offset must be a number", "crowd[0].position must be three numbers",
+                   "crowd[1].phase_spread", "crowd[1].instances[0].position", "crowd[1].instances[0].heading",
+                   "crowd[1].instances[0].phase", "crowd[2]: must be an object"):
+        assert needle in text, (needle, bad)
 
 
 def test_builder_imports_once_merges_and_reports_missing_textures():
@@ -2693,6 +2896,8 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
             "    rgb = t.nodes.new('ShaderNodeRGB'); rgb.outputs[0].default_value = col\n"
             "    t.links.new(rgb.outputs[0], t.nodes['Principled BSDF'].inputs['Base Color']); return m\n"
             "P.data.materials.append(glow((1, 0, 0, 1))); S.data.materials.append(glow((0, 0, 1, 1)))\n"
+            "for nm in ('Window_Glass', 'Glass_Frame_Metal', 'Fiberglass_Hull'):\n"
+            "    m = bpy.data.materials.new(nm); m.use_nodes = True; S.data.materials.append(m)\n"
             "bpy.ops.wm.save_as_mainfile(filepath=out)\n", encoding="utf-8")
         rc, log = blender("--python", str(mk), "--", str(lib / "Props" / "lamp.blend"), timeout=300)
         assert (lib / "Props" / "lamp.blend").is_file(), log[-600:]
@@ -2706,7 +2911,9 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
                             {"id": "m1", "fbx": P("metal_a.obj"), "position": [0, 0, 8]},
                             {"id": "m2", "fbx": P("metal_b.obj"), "position": [8, 0, 8]},
                             {"id": "l1", "fbx": P("lamp.blend"), "position": [-5, 0, 0]},
-                            {"id": "l2", "fbx": P("lamp.blend"), "position": [-5, 0, 5]}],
+                            {"id": "l2", "fbx": P("lamp.blend"), "position": [-5, 0, 5]},
+                            {"id": "glass_cabinet", "fbx": P("crate.obj"), "position": [10, 0, 0],
+                             "materials": {"albedo": str(lib / "Props" / "crate.png")}}],
                  "textures": [{"folder": str(lib / "Tex"), "set": "Brick", "apply_to": "b"}]}
         man = tmp / "scene.json"
         man.write_text(json.dumps(scene), encoding="utf-8")
@@ -2729,6 +2936,8 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
             "        'materials': sorted(m.name for m in bpy.data.materials if m.users),\n"
             "        'a_mats': mats(under('a_root')), 'b_mats': mats(under('b_root')), 'c_mats': mats(under('c_root')),\n"
             "        'lamps': lamps, 'lights': sorted(o.name for o in bpy.data.objects if o.type == 'LIGHT'),\n"
+            "        'transmission': {m.name.split('.')[0]: round((n.inputs.get('Transmission Weight') or n.inputs['Transmission']).default_value, 2)\n"
+            "                         for m in bpy.data.materials if m.users and m.use_nodes for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'},\n"
             "        'roots': {o.name: [round(v, 2) for v in o.location] for o in bpy.data.objects if o.name.endswith('_root')}}\n"
             "print('PROBE ' + json.dumps(info))\n", encoding="utf-8")
         rc, log2 = blender(str(out_blend), "--python", str(probe), timeout=300)
@@ -2747,6 +2956,11 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
         # only by an RGB node's colour are both still there
         assert sum(1 for m in info["materials"] if m.startswith("Fog")) == 1 \
             and sum(1 for m in info["materials"] if m.startswith("Glow")) == 2, info["materials"]
+        # glass by name: the pane yes, the frame and the fiberglass no, a recipe
+        # material of an asset called glass no (it comes from a recipe)
+        tr = info["transmission"]
+        assert tr.get("Window_Glass") == 1.0 and tr.get("Glass_Frame_Metal") == 0.0 \
+            and tr.get("Fiberglass_Hull") == 0.0 and tr.get("M_glass_cabinet") == 0.0, tr
         # the lamp's copy holds the hidden shade too; no object was lost
         assert info["lamps"] == {"l1": ["Post", "Shade"], "l2": ["Post", "Shade"]}, info["lamps"]
         assert info["roots"]["b_root"][0] == 3.0 and abs(info["roots"]["c_root"][0] - 6.0) < 0.01, info["roots"]
@@ -2759,12 +2973,22 @@ def test_builder_imports_once_merges_and_reports_missing_textures():
         rc, log3 = blender("--python", str(builder), "--", str(man))
         expected = lib / "_Agent_Files" / "builds" / "Dedup_check_東京" / "Dedup_check_東京.blend"
         assert rc == 0 and expected.is_file(), (rc, log3[-800:])
-        # a file the importer refuses: exit 4, said so, nothing saved
+        # a file the FBX importer refuses skips its asset (exit 3), the
+        # rest of the scene still builds; a file that breaks the build
+        # elsewhere exits 4 with BUILD FAILED and nothing saved
         (lib / "Props" / "ascii.fbx").write_text("; FBX 7.3.0 project file\nFBXHeaderExtension:  {\n}\n", encoding="utf-8")
-        bad = {**scene, "scene": "Ascii", "assets": [{"id": "x", "fbx": P("ascii.fbx"), "position": [0, 0, 0]}]}
+        bad = {**scene, "scene": "Ascii", "textures": [],
+               "assets": [{"id": "x", "fbx": P("ascii.fbx"), "position": [0, 0, 0]},
+                          {"id": "ok", "fbx": P("crate.obj"), "position": [2, 0, 0]}]}
         (tmp / "bad.json").write_text(json.dumps(bad), encoding="utf-8")
         rc, log4 = blender("--python", str(builder), "--", str(tmp / "bad.json"))
-        assert rc == 4 and "BUILD FAILED" in log4 and not (lib / "_Agent_Files" / "builds" / "Ascii").is_dir(), (rc, log4[-600:])
+        assert rc == 3 and "importer refused" in log4 and "BUILD INCOMPLETE: 1" in log4 \
+            and (lib / "_Agent_Files" / "builds" / "Ascii" / "Ascii.blend").is_file(), (rc, log4[-600:])
+        (lib / "Props" / "bogus.blend").write_text("not a blend file", encoding="utf-8")
+        bad = {**scene, "scene": "Bogus", "textures": [], "assets": [{"id": "x", "fbx": P("bogus.blend"), "position": [0, 0, 0]}]}
+        (tmp / "bad.json").write_text(json.dumps(bad), encoding="utf-8")
+        rc, log4 = blender("--python", str(builder), "--", str(tmp / "bad.json"))
+        assert rc == 4 and "BUILD FAILED" in log4 and not (lib / "_Agent_Files" / "builds" / "Bogus").is_dir(), (rc, log4[-600:])
         # a library whose agent folder cannot be written: the build goes
         # next to the manifest instead of nowhere
         lib2 = tmp / "Lib2"
@@ -2852,7 +3076,10 @@ def test_crowd_takes_the_armature_the_clip_and_the_given_places():
                                           {"position": [-2, 0, 3], "heading": 180}],
                             "animation_offset": 0.5},
                            {"body_fbx": str(tmp / "body_idle.fbx"), "animation_fbx": str(tmp / "walk.fbx"),
-                            "instances": [{"position": [10, 0, 0]}, {"position": [12, 0, 0], "heading": 45}]}]}
+                            "instances": [{"position": [10, 0, 0]}, {"position": [12, 0, 0], "heading": 45}]},
+                           # the first body file again: a linked duplicate of the import, its own heading
+                           {"body_fbx": str(tmp / "body.fbx"), "animation_fbx": str(tmp / "walk.fbx"),
+                            "instances": [{"position": [20, 0, 0]}, {"position": [22, 0, 0], "heading": 30, "phase": 0.5}]}]}
         man = tmp / "crowd.json"
         man.write_text(json.dumps(scene), encoding="utf-8")
         out = tmp / "crowd.blend"
@@ -2869,16 +3096,23 @@ def test_crowd_takes_the_armature_the_clip_and_the_given_places():
             "        'actions': sorted({(a.animation_data.action.name.split('_+')[0], round(a.animation_data.action.frame_range[1] - a.animation_data.action.frame_range[0])) for a in arms if a.animation_data and a.animation_data.action}),\n"
             "        'places': sorted([round(a.matrix_world.translation.x, 2), round(a.matrix_world.translation.y, 2), round(math.degrees(a.rotation_euler.z)) % 360] for a in arms),\n"
             "        'meshes_parented': all(o.parent is not None and o.parent.type == 'ARMATURE' for o in bpy.data.objects if o.type == 'MESH'),\n"
-            "        'meshes': len([o for o in bpy.data.objects if o.type == 'MESH'])}\n"
+            "        'meshes': len([o for o in bpy.data.objects if o.type == 'MESH']),\n"
+            "        'mesh_data': len({o.data.name for o in bpy.data.objects if o.type == 'MESH'}),\n"
+            "        'cycles_all': all(any(m.type == 'CYCLES' for m in fc.modifiers) for a in arms if a.animation_data and a.animation_data.action for fc in sb._fcurves_of(a.animation_data.action))}\n"
             "print('PROBE ' + json.dumps(info))\n", encoding="utf-8")
+        probe.write_text("import sys\nsys.path.insert(0, r'" + str(REPO / "service" / "asset_service").replace("\\", "/")
+                         + "')\nimport scene_builder as sb\n" + probe.read_text(encoding="utf-8"), encoding="utf-8")
         r2 = subprocess.run([exe, "--background", "--factory-startup", str(out), "--python", str(probe)],
                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
         line = next(l for l in (r2.stdout or "").splitlines() if l.startswith("PROBE "))
         info = json.loads(line[6:])
-        assert info["armatures"] == 5 and info["meshes"] == 5 and info["empties_loose"] == [], info
+        assert info["armatures"] == 7 and info["meshes"] == 7 and info["empties_loose"] == [], info
+        assert info["mesh_data"] == 2, ("the first body's mesh is shared by its five copies", info["mesh_data"])
         assert info["actions"] and all("walk" in n and "T-Pose" not in n and "idle" not in n and fr >= 28
                                        for n, fr in info["actions"]), info["actions"]
-        assert info["places"] == [[-2.0, -3.0, 180], [0.0, 0.0, 90], [2.0, -1.0, 0], [10.0, 0.0, 0], [12.0, 0.0, 45]], info["places"]
+        assert info["cycles_all"], "every clip loops"
+        assert info["places"] == [[-2.0, -3.0, 180], [0.0, 0.0, 90], [2.0, -1.0, 0], [10.0, 0.0, 0], [12.0, 0.0, 45],
+                                  [20.0, 0.0, 0], [22.0, 0.0, 30]], info["places"]
         assert info["meshes_parented"], info
     # the re-bind itself: a skin in another frame than its armature's is
     # baked into armature space and keeps standing (world extents follow

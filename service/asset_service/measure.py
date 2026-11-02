@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from asset_service import kinds, skeleton                        # noqa: E402
 from asset_service.fbx_dims import _walk, fbx_nodes             # noqa: E402
 
-SCHEMA = 3                      # bump to re-measure every cached file (3: model count, nesting)
+SCHEMA = 5                      # bump to re-measure every cached file (5: skins, instancing, scene roots)
 FBX_TIME = 46186158000          # FBX time units per second
 _TIME_MODES = {0: 30.0, 1: 120.0, 2: 100.0, 3: 60.0, 4: 50.0, 5: 48.0, 6: 30.0,
                7: 30.0, 8: 29.97, 9: 29.97, 10: 25.0, 11: 24.0, 12: 1000.0,
@@ -167,6 +167,161 @@ def _blank(rel: str, ext: str) -> dict:
 
 
 # --------------------------------------------------------------------- FBX
+# ------------------------------------------------- node transforms (4x4)
+def _mat_identity() -> list:
+    return [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+
+
+def _mat_mul(a: list, b: list) -> list:
+    return [[sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+
+def _mat_apply(m: list, p) -> list:
+    return [m[i][0] * p[0] + m[i][1] * p[1] + m[i][2] * p[2] + m[i][3] for i in range(3)]
+
+
+def _mat_t(t) -> list:
+    m = _mat_identity()
+    m[0][3], m[1][3], m[2][3] = float(t[0]), float(t[1]), float(t[2])
+    return m
+
+
+def _mat_s(s) -> list:
+    m = _mat_identity()
+    m[0][0], m[1][1], m[2][2] = float(s[0]), float(s[1]), float(s[2])
+    return m
+
+
+def _mat_rot_axis(axis: str, deg: float) -> list:
+    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    m = _mat_identity()
+    if axis == "X":
+        m[1][1], m[1][2], m[2][1], m[2][2] = c, -s, s, c
+    elif axis == "Y":
+        m[0][0], m[0][2], m[2][0], m[2][2] = c, s, -s, c
+    else:
+        m[0][0], m[0][1], m[1][0], m[1][1] = c, -s, s, c
+    return m
+
+
+_FBX_ORDERS = {0: "XYZ", 1: "XZY", 2: "YZX", 3: "YXZ", 4: "ZXY", 5: "ZYX"}
+
+
+def _mat_euler(deg, order: int = 0) -> list:
+    """FBX Euler angles (degrees): the first axis of the order turns first."""
+    m = _mat_identity()
+    for axis in _FBX_ORDERS.get(order, "XYZ"):
+        m = _mat_mul(_mat_rot_axis(axis, float(deg["XYZ".index(axis)])), m)
+    return m
+
+
+def _mat_transpose3(m: list) -> list:
+    """The inverse of a pure rotation."""
+    out = _mat_identity()
+    for i in range(3):
+        for j in range(3):
+            out[i][j] = m[j][i]
+    return out
+
+
+def _mat_quat(q) -> list:
+    """glTF quaternion [x, y, z, w] to a rotation matrix."""
+    x, y, z, w = (float(v) for v in q)
+    n = math.sqrt(x * x + y * y + z * z + w * w) or 1.0
+    x, y, z, w = x / n, y / n, z / n, w / n
+    m = _mat_identity()
+    m[0][0], m[0][1], m[0][2] = 1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)
+    m[1][0], m[1][1], m[1][2] = 2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)
+    m[2][0], m[2][1], m[2][2] = 2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)
+    return m
+
+
+_FBX_XFORM_KEYS = (b"Lcl Translation", b"Lcl Rotation", b"Lcl Scaling", b"PreRotation", b"PostRotation",
+                   b"RotationOrder", b"RotationActive", b"RotationOffset", b"RotationPivot", b"ScalingOffset",
+                   b"ScalingPivot", b"GeometricTranslation", b"GeometricRotation", b"GeometricScaling")
+
+
+def _fbx_xform_props(kids) -> dict:
+    """The properties that place a Model node, name -> numbers."""
+    out: dict = {}
+    for pr, _ in _walk(kids, "P"):
+        if pr and pr[0] in _FBX_XFORM_KEYS:
+            nums = [float(v) for v in pr[1:] if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            if nums:
+                out[pr[0].decode("latin-1")] = nums
+    return out
+
+
+def _fbx_node_matrix(x: dict, rotation_active: bool = False) -> list:
+    """A Model node's local transform: T Roff Rp Rpre R Rpost^-1 Rp^-1 Soff Sp S Sp^-1
+    (the FBX formula; pivots and offsets are zero in most exports). Like
+    Blender's importer, Pre/PostRotation and the rotation order count
+    only when RotationActive is set (on the node or its template)."""
+    three = lambda k, d: (x.get(k) or [d, d, d])[:3]                     # noqa: E731
+    active = bool((x.get("RotationActive") or [1 if rotation_active else 0])[0])
+    order = int((x.get("RotationOrder") or [0])[0]) if active else 0
+    m = _mat_t(three("Lcl Translation", 0.0))
+    m = _mat_mul(m, _mat_t(three("RotationOffset", 0.0)))
+    rp = three("RotationPivot", 0.0)
+    m = _mat_mul(m, _mat_t(rp))
+    if active and "PreRotation" in x:
+        m = _mat_mul(m, _mat_euler(three("PreRotation", 0.0), 0))
+    m = _mat_mul(m, _mat_euler(three("Lcl Rotation", 0.0), order))
+    if active and "PostRotation" in x:
+        m = _mat_mul(m, _mat_transpose3(_mat_euler(three("PostRotation", 0.0), 0)))
+    m = _mat_mul(m, _mat_t([-v for v in rp]))
+    m = _mat_mul(m, _mat_t(three("ScalingOffset", 0.0)))
+    sp = three("ScalingPivot", 0.0)
+    m = _mat_mul(m, _mat_t(sp))
+    m = _mat_mul(m, _mat_s(three("Lcl Scaling", 1.0)))
+    m = _mat_mul(m, _mat_t([-v for v in sp]))
+    return m
+
+
+def _fbx_geometric(x: dict) -> list:
+    """The geometric offset a node applies to its own geometry only."""
+    three = lambda k, d: (x.get(k) or [d, d, d])[:3]                     # noqa: E731
+    m = _mat_t(three("GeometricTranslation", 0.0))
+    if "GeometricRotation" in x:
+        m = _mat_mul(m, _mat_euler(three("GeometricRotation", 0.0), 0))
+    return _mat_mul(m, _mat_s(three("GeometricScaling", 1.0)))
+
+
+def _axis_aligned(m: list) -> bool:
+    """True when the 3x3 part only permutes, flips and scales the axes (a
+    box stays a box through it); a turn by another angle needs the points."""
+    for i in range(3):
+        if sum(1 for j in range(3) if abs(m[i][j]) > 1e-6) > 1:
+            return False
+    return True
+
+
+def _box_through(m: list, lo, hi, plo, phi, verts=None) -> None:
+    """Widen (plo, phi) by the box (lo, hi) taken through m: its 8 corners
+    when m keeps boxes boxes, else every vertex (a sphere turned 40 degrees
+    once grew to 1.69 m through its corners)."""
+    if verts is not None and not _axis_aligned(m):
+        for i in range(0, len(verts) - 2, 3):
+            p = _mat_apply(m, (verts[i], verts[i + 1], verts[i + 2]))
+            for a in range(3):
+                plo[a] = min(plo[a], p[a])
+                phi[a] = max(phi[a], p[a])
+        return
+    for cx in (lo[0], hi[0]):
+        for cy in (lo[1], hi[1]):
+            for cz in (lo[2], hi[2]):
+                p = _mat_apply(m, (cx, cy, cz))
+                for a in range(3):
+                    plo[a] = min(plo[a], p[a])
+                    phi[a] = max(phi[a], p[a])
+
+
+def _zero_translation(m: list) -> list:
+    out = [row[:] for row in m]
+    out[0][3] = out[1][3] = out[2][3] = 0.0
+    return out
+
+
 def _measure_fbx(path: Path, rec: dict) -> None:
     parsed = fbx_nodes(path)
     if parsed is None:
@@ -202,7 +357,9 @@ def _measure_fbx(path: Path, rec: dict) -> None:
         fps = float(cfr) if isinstance(cfr, (int, float)) and cfr > 0 else None
     if fps is None:
         fps = 30.0
-    # ---- geometry
+    # ---- geometry: one box per Geometry node, in its own frame
+    geoms: dict = {}             # geometry id -> (lo, hi) raw
+    gverts: dict = {}            # geometry id -> its flat vertex list
     lo = [float("inf")] * 3
     hi = [float("-inf")] * 3
     polys = idx_count = verts = 0
@@ -210,19 +367,26 @@ def _measure_fbx(path: Path, rec: dict) -> None:
     uv_max = 0
     for props, kids in _walk(top, "Geometry"):
         uv_max = max(uv_max, sum(1 for _ in _walk(kids, "LayerElementUV")))
-    for props, _ in _walk(top, "Vertices"):
-        if not props or not isinstance(props[0], list) or len(props[0]) < 3:
-            continue
-        v = props[0]
-        got = True
-        verts += len(v) // 3
-        for i in range(0, len(v) - 2, 3):
+        gid = props[0] if props and isinstance(props[0], int) else None
+        gtype = _fbx_name(props[2]) if len(props) >= 3 else ""
+        if gtype == "Shape":
+            continue                 # blend-shape deltas: no object, no box
+        for vp, _ in _walk(kids, "Vertices"):
+            if not vp or not isinstance(vp[0], list) or len(vp[0]) < 3:
+                continue
+            v = vp[0]
+            got = True
+            verts += len(v) // 3
+            glo = [min(v[a::3]) for a in range(3)]
+            ghi = [max(v[a::3]) for a in range(3)]
             for a in range(3):
-                x = v[i + a]
-                if x < lo[a]:
-                    lo[a] = x
-                if x > hi[a]:
-                    hi[a] = x
+                lo[a] = min(lo[a], glo[a])
+                hi[a] = max(hi[a], ghi[a])
+            if gid is not None:
+                old = geoms.get(gid)
+                geoms[gid] = (glo, ghi) if old is None else \
+                    ([min(a, b) for a, b in zip(old[0], glo)], [max(a, b) for a, b in zip(old[1], ghi)])
+                gverts[gid] = v if old is None else gverts.get(gid, []) + list(v)
     for props, _ in _walk(top, "PolygonVertexIndex"):
         if props and isinstance(props[0], list):
             idx = props[0]
@@ -233,74 +397,142 @@ def _measure_fbx(path: Path, rec: dict) -> None:
         tris = idx_count - 2 * polys if idx_count >= 2 * polys else polys
         rec["triangles"], rec["vertices"] = tris, verts
         rec["uv_layers"] = uv_max
-    # ---- objects: models, materials, deformers
+    # ---- objects: models, their transforms, the connections
     models: dict = {}            # id -> (name, type)
-    rot90 = plain = 0
-    scales: list = []
+    xforms: dict = {}            # id -> the properties that place the node
     for props, kids in _walk(top, "Model"):
         if len(props) >= 3 and isinstance(props[0], int):
             typ = _fbx_name(props[2]) or (props[2].decode("latin-1")
                                           if isinstance(props[2], bytes) else "")
             models[props[0]] = (_fbx_name(props[1]), typ)
-            if typ == "Mesh":
-                rx = 0.0
-                for pr, _ in _walk(kids, "P"):
-                    if pr and pr[0] in (b"Lcl Rotation", b"PreRotation"):
-                        nums = [v for v in pr[1:] if isinstance(v, (int, float))
-                                and not isinstance(v, bool)]
-                        if nums:
-                            rx += float(nums[0])
-                    elif pr and pr[0] == b"Lcl Scaling":
-                        nums = [v for v in pr[1:] if isinstance(v, (int, float))
-                                and not isinstance(v, bool)]
-                        if nums and nums[0] > 0:
-                            scales.append(round(float(nums[0]), 6))
-                if abs(abs(rx) - 90.0) < 1.0 or abs(abs(rx) - 270.0) < 1.0:
-                    rot90 += 1
-                else:
-                    plain += 1
-    # a Mesh model's own scale is part of its size (Blender writes vertices
-    # in metres with Lcl Scaling 100 into a centimetre file): the most
-    # common scale of the mesh models applies to the file-level box
+            xforms[props[0]] = _fbx_xform_props(kids)
+    # the scene graph: a node's parent is the Model (or the root, 0) it is
+    # OO-linked to -- never its cluster or display layer, which the exporter
+    # lists after the parent (the last link once cut a sword off its rig);
+    # a geometry can hang under several models (linked duplicates)
+    parent_of: dict = {}
+    geo_models: dict = {}
+    skins = {props[0] for props, _k in _walk(top, "Deformer")
+             if len(props) >= 3 and isinstance(props[0], int) and _fbx_name(props[2]) == "Skin"}
+    skinned_geos: set = set()
+    had_conns = False
+    for _cp, conns_kids in _walk(top, "Connections"):
+        had_conns = True
+        for p, _ in _walk(conns_kids, "C"):
+            if len(p) >= 3 and p[0] == b"OO" and isinstance(p[1], int) and isinstance(p[2], int):
+                child, par = p[1], p[2]
+                if child in geoms and par in models:
+                    geo_models.setdefault(child, []).append(par)
+                elif child in models and (par == 0 or par in models):
+                    parent_of[child] = par
+                elif child in skins and par in geoms:
+                    skinned_geos.add(par)
+        break
+    # the template's RotationActive (Blender reads Pre/PostRotation only then)
+    rot_active = False
+    for _dp, dkids in _walk(top, "Definitions"):
+        for p2, k2 in _walk(dkids, "ObjectType"):
+            if p2 and p2[0] == b"Model":
+                for pr, _ in _walk(k2, "P"):
+                    if pr and pr[0] == b"RotationActive":
+                        nums = [v for v in pr[1:] if isinstance(v, (int, float)) and not isinstance(v, bool)]
+                        rot_active = bool(nums and nums[0])
+        break
+    bone_types = ("LimbNode", "Limb", "Root")
+    bone_ids = {mid for mid, (_n, t) in models.items() if t in bone_types}
+    mesh_ids = [mid for mid, (_n, t) in models.items() if t == "Mesh"]
+    # a Null (or Root) that holds the bones becomes Blender's armature
+    # object; loose bones become one too. A skinned mesh is parented under
+    # that armature by the importer, wherever the exporter put it (Blender
+    # writes it as a root sibling with its world transform baked)
+    arm_nulls = {parent_of[b] for b in bone_ids if parent_of.get(b, 0) in models
+                 and parent_of[b] not in bone_ids}
+    has_rig = bool(bone_ids)
+    skinned_models = {m for g in skinned_geos for m in geo_models.get(g, ())} if has_rig else set()
+    # the loose objects the importer makes: every parentless model of any
+    # type (a mesh beside an empty or a camera keeps its place in the
+    # builder, like two meshes do) plus the armature of loose bones
+    roots = [mid for mid, (_n, t) in models.items()
+             if mid not in bone_ids and mid not in skinned_models and parent_of.get(mid, 0) not in models]
+    loose_bones = has_rig and not arm_nulls
+    rec["mesh_models"] = (len(roots) + (1 if loose_bones else 0)) if had_conns else (len(mesh_ids) or 1)
+    rec["nested_mesh"] = any(parent_of.get(mid, 0) in models for mid in mesh_ids)
+    # ---- the box where the builder puts the file: every geometry taken
+    # through its node chain (a KitBash assembly's mesh sits under a Null
+    # scaled 100 and offset: its raw box was 100 times too small and in
+    # the wrong place), the one loose root's translation dropped as the
+    # builder drops it (several roots keep their layout)
+    placed = None
+    if got and geoms and had_conns:
+        single = len(roots) == 1 and not loose_bones
+        plo = [float("inf")] * 3
+        phi = [float("-inf")] * 3
+
+        def _full(node, zero_root=True):
+            # Blender folds a node's geometric offset into its matrix and
+            # passes it on to the children; the one loose root loses its
+            # whole translation column when the builder zeroes its location
+            m = _mat_mul(_fbx_node_matrix(xforms.get(node, {}), rot_active), _fbx_geometric(xforms.get(node, {})))
+            if zero_root and single and parent_of.get(node, 0) not in models and node not in skinned_models:
+                m = _zero_translation(m)      # a skinned root sibling is no loose object: it moves with the armature
+            return m
+
+        def _chain(mid, zero_root=True):
+            m = _mat_identity()
+            node, depth, through = mid, 0, set()
+            while node in models and depth < 64:
+                through.add(node)
+                m = _mat_mul(_full(node, zero_root), m)
+                node, depth = parent_of.get(node, 0), depth + 1
+            return m, through
+        # the armature's place: what the builder's zeroing takes off a
+        # skinned mesh that the importer re-parents under it
+        arm_t = [0.0, 0.0, 0.0]
+        if single and len(arm_nulls) == 1:
+            am, _ = _chain(next(iter(arm_nulls)), zero_root=False)
+            arm_t = [am[0][3], am[1][3], am[2][3]]
+        for gid, (glo, ghi) in geoms.items():
+            for mid in geo_models.get(gid, ()):       # no model: no object, no box
+                m, through = _chain(mid)
+                if mid in skinned_models and single and not (through & arm_nulls):
+                    m = _mat_mul(_mat_t([-v for v in arm_t]), m)
+                _box_through(m, glo, ghi, plo, phi, gverts.get(gid))
+        if plo[0] < float("inf"):
+            placed = (plo, phi)
+    # without connections (a bare file): the old reading -- the most common
+    # Mesh scale applies, and a Mesh model turned 90 degrees about X in a
+    # Y-up scene keeps Z-up geometry (the pivot follows that)
+    rot90 = plain = 0
+    scales: list = []
+    for mid in mesh_ids:
+        x = xforms.get(mid, {})
+        rx = (x.get("Lcl Rotation") or [0.0])[0] + (x.get("PreRotation") or [0.0])[0]
+        if abs(abs(rx) - 90.0) < 1.0 or abs(abs(rx) - 270.0) < 1.0:
+            rot90 += 1
+        else:
+            plain += 1
+        sc = x.get("Lcl Scaling")
+        if sc and sc[0] > 0:
+            scales.append(round(sc[0], 6))
     s_model = 1.0
-    if scales:
+    if placed is None and scales:
         s_model = max(set(scales), key=scales.count)
         if len(set(scales)) > 1:
             rec["scale_mixed"] = True
     if got:
+        blo, bhi = placed if placed is not None else (lo, hi)
         k = usf / 100.0 * s_model
-        rec["bbox_min_m"] = [round(x * k, 5) for x in lo]
-        rec["bbox_max_m"] = [round(x * k, 5) for x in hi]
-        rec["bbox_m"] = [round((hi[i] - lo[i]) * k, 5) for i in range(3)]
+        rec["bbox_min_m"] = [round(x * k, 5) for x in blo]
+        rec["bbox_max_m"] = [round(x * k, 5) for x in bhi]
+        rec["bbox_m"] = [round((bhi[i] - blo[i]) * k, 5) for i in range(3)]
         if s_model != 1.0:
             rec["model_scale"] = s_model
-    # the vertices' own vertical axis: a Mesh model turned 90 degrees
-    # about X in a Y-up scene keeps Z-up geometry (3ds Max, Blender,
-    # Character Creator exports); the box and the pivot follow that
-    geo_up = 2 if (up_i == 1 and rot90 > plain) else up_i
+    # the box's vertical axis: the file's once the node turns are applied;
+    # the vertex heuristic only for a file without connections
+    geo_up = up_i if placed is not None else (2 if (up_i == 1 and rot90 > plain) else up_i)
     rec["geo_up_axis"] = "XYZ"[geo_up] if geo_up is not None else None
     if got and geo_up is not None:
-        rec["pivot"] = pivot_class(lo, hi, geo_up)
-    # how many loose objects the file holds, and whether a mesh sits under
-    # a parent node: a file of one loose object is placed by its origin,
-    # the others keep their layout (the API's placed_bbox says so)
-    mesh_ids = [mid for mid, (_n, t) in models.items() if t == "Mesh"]
-    if mesh_ids:
-        parent_of: dict = {}
-        for conns_props, conns_kids in _walk(top, "Connections"):
-            for p, _ in _walk(conns_kids, "C"):
-                if len(p) >= 3 and p[0] == b"OO" and isinstance(p[1], int) and isinstance(p[2], int):
-                    parent_of[p[1]] = p[2]
-            break
-        # the loose objects the importer makes: every parentless model of
-        # any type (a mesh beside an empty or a camera keeps its place in
-        # the builder, like two meshes do) plus the armature of a rig
-        bone_types = ("LimbNode", "Limb", "Root")
-        roots = [mid for mid, (_n, t) in models.items()
-                 if t not in bone_types and parent_of.get(mid, 0) not in models]
-        has_rig = any(t in bone_types for _n, t in models.values())
-        rec["mesh_models"] = (len(roots) + (1 if has_rig else 0)) if parent_of else len(mesh_ids)
-        rec["nested_mesh"] = any(parent_of.get(mid, 0) in models for mid in mesh_ids)
+        rec["pivot"] = pivot_class(blo, bhi, geo_up)
     joints = [n for n, t in models.values() if t in ("LimbNode", "Limb", "Root")]
     if not joints:
         joints = [n for n, t in models.values() if t == "Null"] if not got else []
@@ -518,7 +750,8 @@ def _measure_gltf(path: Path, rec: dict) -> None:
     hi = [float("-inf")] * 3
     tris = verts = 0
     got = False
-    for mesh in doc.get("meshes") or []:
+    mesh_boxes: dict = {}          # mesh index -> (lo, hi) in the mesh's frame
+    for mi, mesh in enumerate(doc.get("meshes") or []):
         for prim in mesh.get("primitives") or []:
             pa = (prim.get("attributes") or {}).get("POSITION")
             if isinstance(pa, int) and pa < len(acc):
@@ -530,6 +763,9 @@ def _measure_gltf(path: Path, rec: dict) -> None:
                     for i in range(3):
                         lo[i] = min(lo[i], float(mn[i]))
                         hi[i] = max(hi[i], float(mx[i]))
+                    old = mesh_boxes.get(mi)
+                    mesh_boxes[mi] = ([float(v) for v in mn], [float(v) for v in mx]) if old is None else \
+                        ([min(o, float(v)) for o, v in zip(old[0], mn)], [max(o, float(v)) for o, v in zip(old[1], mx)])
             mode = prim.get("mode", 4)
             ia = prim.get("indices")
             n = (int(acc[ia].get("count") or 0) if isinstance(ia, int) and ia < len(acc)
@@ -542,18 +778,81 @@ def _measure_gltf(path: Path, rec: dict) -> None:
     nodes = doc.get("nodes") or []
     mesh_nodes = [i for i, n in enumerate(nodes) if isinstance(n, dict) and "mesh" in n]
     kids = {c for n in nodes if isinstance(n, dict) for c in (n.get("children") or []) if isinstance(c, int)}
-    # the loose objects the importer makes: the scenes' root nodes of any
-    # type (an empty beside the mesh counts, as in the builder)
-    scene_roots = [r for sc in (doc.get("scenes") or []) if isinstance(sc, dict)
-                   for r in (sc.get("nodes") or []) if isinstance(r, int)]
+    parent = {c: i for i, n in enumerate(nodes) if isinstance(n, dict)
+              for c in (n.get("children") or []) if isinstance(c, int)}
+    # the loose objects the importer shows: the DEFAULT scene's root nodes
+    # of any type (an empty beside the mesh counts, as in the builder);
+    # other scenes and orphan nodes land in excluded collections and the
+    # builder leaves them out
+    scenes = [sc for sc in (doc.get("scenes") or []) if isinstance(sc, dict)]
+    default = doc.get("scene") if isinstance(doc.get("scene"), int) else 0
+    scene_roots = [r for r in ((scenes[default] if 0 <= default < len(scenes) else {}).get("nodes") or [])
+                   if isinstance(r, int) and r < len(nodes)]
     roots = scene_roots or [i for i in range(len(nodes)) if i not in kids]
+    shown: set = set()
+    stack = list(roots)
+    while stack:
+        i = stack.pop()
+        if i in shown or not isinstance(nodes[i], dict):
+            continue
+        shown.add(i)
+        stack.extend(c for c in (nodes[i].get("children") or []) if isinstance(c, int) and c < len(nodes))
+    mesh_nodes = [i for i in mesh_nodes if i in shown]
     rec["mesh_models"] = len(roots) or len(mesh_nodes) or len(doc.get("meshes") or [])
     rec["nested_mesh"] = any(i in kids for i in mesh_nodes)
+
+    def node_matrix(n: dict, drop_translation: bool) -> list:
+        if isinstance(n.get("matrix"), list) and len(n["matrix"]) == 16:
+            c = n["matrix"]                      # column-major
+            m = [[float(c[j * 4 + i]) for j in range(4)] for i in range(4)]
+            if drop_translation:
+                m[0][3] = m[1][3] = m[2][3] = 0.0
+            return m
+        t = [0.0, 0.0, 0.0] if drop_translation else [float(v) for v in (n.get("translation") or [0, 0, 0])]
+        m = _mat_mul(_mat_t(t), _mat_quat(n.get("rotation") or [0, 0, 0, 1]))
+        return _mat_mul(m, _mat_s([float(v) for v in (n.get("scale") or [1, 1, 1])]))
+    # the box where the builder puts the file: each mesh node through its
+    # chain, the one loose root's translation dropped
+    placed = None
+    if got and mesh_nodes:
+        single = len(roots) == 1
+        plo = [float("inf")] * 3
+        phi = [float("-inf")] * 3
+        for i in mesh_nodes:
+            box = mesh_boxes.get(nodes[i].get("mesh"))
+            if box is None:
+                continue
+            if "skin" in nodes[i]:
+                # a skinned mesh is placed by its joints, not by its node
+                # chain: its vertices are written in bind (world) space; the
+                # importer parents it under the armature node, whose
+                # translation the builder zeroes when it is the one loose object
+                m = _mat_identity()
+                arm = parent.get(i)
+                if single and arm is not None:
+                    am = _mat_identity()
+                    node, depth = arm, 0
+                    while node is not None and depth < 64:
+                        am = _mat_mul(node_matrix(nodes[node], False), am)
+                        node, depth = parent.get(node), depth + 1
+                    m = _mat_t([-am[0][3], -am[1][3], -am[2][3]])
+                _box_through(m, box[0], box[1], plo, phi)
+                continue
+            m = _mat_identity()
+            node, depth = i, 0
+            while node is not None and depth < 64:
+                is_root = node not in parent
+                m = _mat_mul(node_matrix(nodes[node], is_root and single), m)
+                node, depth = parent.get(node), depth + 1
+            _box_through(m, box[0], box[1], plo, phi)
+        if plo[0] < float("inf"):
+            placed = (plo, phi)
     if got:
+        blo, bhi = placed if placed is not None else (lo, hi)
         rec.update(triangles=tris, vertices=verts,
-                   bbox_min_m=[round(x, 5) for x in lo], bbox_max_m=[round(x, 5) for x in hi],
-                   bbox_m=[round(hi[i] - lo[i], 5) for i in range(3)],
-                   pivot=pivot_class(lo, hi, 1))
+                   bbox_min_m=[round(x, 5) for x in blo], bbox_max_m=[round(x, 5) for x in bhi],
+                   bbox_m=[round(bhi[i] - blo[i], 5) for i in range(3)],
+                   pivot=pivot_class(blo, bhi, 1))
     elif rec["has_mesh"]:
         rec.update(triangles=tris or None, vertices=verts or None)
     rec["units"], rec["unit_scale"], rec["up_axis"] = "m", 100.0, "Y"
