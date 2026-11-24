@@ -262,14 +262,16 @@ ANIM_CLUSTERS = [
 ]
 
 
-def _foreign_share(p: Path) -> bool:
-    """A UNC path on a share none of the roots lives on. Resolving it would
-    open the share: a web page's <img> can carry such a path, and an SMB
-    connection hands out credentials. Refused before resolve()."""
+def _foreign_share(p: Path, extra=()) -> bool:
+    """A UNC path on a share none of the roots lives on (`extra`: a
+    section folder the config may put on a share of its own). Resolving it
+    would open the share: a web page's <img> can carry such a path, and an
+    SMB connection hands out credentials. Refused before resolve()."""
     drive = p.drive
     if not drive.startswith(("\\\\", "//")):
         return False
-    return not any(root.drive.lower() == drive.lower() for root in CANONICAL_ROOTS)
+    return not any(Path(root).drive.lower() == drive.lower()
+                   for root in (*CANONICAL_ROOTS, *extra))
 
 
 def _safe_asset_file(path_str: str, allowed: set) -> Optional[Path]:
@@ -295,6 +297,47 @@ def _safe_asset_file(path_str: str, allowed: set) -> Optional[Path]:
     else:
         return None
     return p if p.is_file() else None
+
+
+def _fullest_sheet() -> Optional[str]:
+    """The contact sheet with the most in it (the largest file) for the
+    home page's Models tile. The first one by name was two grey figures on
+    grey and the tile looked empty."""
+    best = None
+    try:
+        for p in sheets.sheets_dir().glob("*.png"):
+            if p.name.startswith("_"):
+                continue
+            try:
+                k = (p.stat().st_size, p.name)
+            except OSError:              # removed while listing
+                continue
+            if best is None or k > best:
+                best = k
+    except OSError:
+        return None
+    return best[1] if best else None
+
+
+def _texture_image(path_str: str) -> Optional[Path]:
+    """An image for /timg: anywhere in the library (the sets found inside
+    model packs), or in the textures folder when the config puts that
+    outside the library (an absolute or '..' section, a junction): the
+    route served that folder alone before 1.0.3. Never another file, and
+    never a network share the textures folder is not on."""
+    t = _safe_asset_file(path_str, TEX_DISPLAY_EXT)
+    if t is not None:
+        return t
+    p, root = Path(path_str), Path(TEXTURES_ROOT)
+    if not p.is_absolute() or _foreign_share(p, (root,)):
+        return None
+    try:
+        p = p.resolve()
+    except OSError:
+        return None
+    if p.suffix.lower() in TEX_DISPLAY_EXT and _jailed(p, root) and p.is_file():
+        return p
+    return None
 
 
 def _normalize_pack_id(raw: str) -> str:
@@ -540,8 +583,12 @@ def _res_index(folder: Path) -> dict:
         index = {}
         seen = 0
         for dirpath, dirnames, filenames in os.walk(folder):
-            dirnames[:] = [d for d in dirnames if not d.startswith((".", "_Agent_Files"))]
-            for fn in filenames:
+            # by name on every file system: Linux lists a folder in no
+            # order, and among same-named textures the first one found
+            # used to win (a 2k map served where Windows served the 1k)
+            dirnames[:] = sorted((d for d in dirnames if not d.startswith((".", "_Agent_Files"))),
+                                 key=str.lower)
+            for fn in sorted(filenames, key=str.lower):
                 if Path(fn).suffix.lower() in _NAMED_EXTS:
                     index.setdefault(fn.lower(), []).append(Path(dirpath) / fn)
             seen += len(filenames)
@@ -598,7 +645,11 @@ def _resource_by_name(rel: str) -> Optional[Path]:
             continue
         cands = _res_index(top).get(name.lower()) or []
         if cands:
-            best = max(cands, key=lambda c: _suffix_match(c, want))
+            # the best folder match; among equals the first by folder
+            # names (a path string sorts tex2 before tex on Windows, whose
+            # separator is a backslash, and after it elsewhere)
+            best = max(sorted(cands, key=lambda c: [x.lower() for x in c.parts]),
+                       key=lambda c: _suffix_match(c, want))
             if best.is_file() and _jailed(best, root):
                 return best
     return None
@@ -2646,9 +2697,10 @@ class Handler(BaseHTTPRequestHandler):
                         "SELECT COUNT(*) FROM folders WHERE meshes > 0 AND include = 1").fetchone()[0]
                 except sqlite3.OperationalError:
                     mcount = mfolders = 0
-                first_sheet = next((p.name for p in sorted(sheets.sheets_dir().glob("*.png"))
-                                    if not p.name.startswith("_")), None) \
-                    if sheets.sheets_dir().is_dir() else None
+                # the fullest sheet (the largest file), not the first by
+                # name: that one was two grey figures on grey, and the
+                # home page's first tile looked empty
+                first_sheet = _fullest_sheet()
                 tcount = conn.execute("SELECT COUNT(*) FROM textures").fetchone()[0]
                 acount = conn.execute("SELECT COUNT(*) FROM audio").fetchone()[0]
                 ahours = conn.execute(
@@ -2798,7 +2850,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not t.is_absolute():
                     t = AUDIO_ROOT / t
                 try:
-                    t = t.resolve()
+                    # a share none of the roots is on is never opened
+                    t = None if _foreign_share(t, (AUDIO_ROOT,)) else t.resolve()
                 except OSError:
                     t = None
                 if (t is None or not _jailed(t, AUDIO_ROOT)
@@ -2897,16 +2950,14 @@ class Handler(BaseHTTPRequestHandler):
                         subprocess.Popen(["xdg-open", str(t)])
                 return self._json({"ok": True, "abs": t.as_posix()})
             elif url.path.startswith("/timg"):
-                # texture previews/maps, jailed to Textures_Materials
-                target = (params.get("path") or [""])[0]
-                t = Path(target)
-                try:
-                    t = t.resolve()
-                except OSError:
-                    t = None
-                if (t is None or not _jailed(t, TEXTURES_ROOT)
-                        or t.suffix.lower() not in TEX_DISPLAY_EXT
-                        or not t.is_file()):
+                # texture previews and maps: an image anywhere in the
+                # library. It was the textures folder alone, and the sets
+                # the scanner finds inside model packs (a quarter of one
+                # library, and the first page of the Textures page) showed
+                # as broken images. Same jail as /file: under the library,
+                # never a network share.
+                t = _texture_image((params.get("path") or [""])[0])
+                if t is None:
                     return self._json({"error": "not found"}, 404)
                 data = t.read_bytes()
                 self.send_response(200)
@@ -2921,7 +2972,8 @@ class Handler(BaseHTTPRequestHandler):
                 target = (params.get("path") or [""])[0]
                 p = Path(target)
                 try:
-                    p = p.resolve()
+                    # a share none of the roots is on is never opened
+                    p = None if _foreign_share(p, (COLLECTION_ROOT,)) else p.resolve()
                 except OSError:
                     p = None
                 if (p is None or not _jailed(p, COLLECTION_ROOT)
@@ -3316,6 +3368,7 @@ def _startup_imports(db_path: str, force: bool = False) -> dict:
     conn = db.connect(db_path)
     served = db.get_meta(conn, "served_signature")
     conn.close()
+    failed = False
     if sig == served and not force and not scanned:
         conn = db.connect(db_path)
         for tbl in ("collection", "textures", "audio", "meshes"):
@@ -3328,7 +3381,6 @@ def _startup_imports(db_path: str, force: bool = False) -> dict:
               "config changed since the last start; python pharos.py serve --rebuild "
               "scans and imports everything again)", flush=True)
     else:
-        failed = False
         steps = (("collection", lambda: collection_import.import_collection(db_path), "assets"),
                  ("textures", lambda: textures_import.import_textures(db_path), "sets"),
                  ("audio", lambda: audio_import.import_audio(db_path), "files"),
@@ -3350,17 +3402,6 @@ def _startup_imports(db_path: str, force: bool = False) -> dict:
         except Exception as exc:  # noqa: BLE001
             print(f"folders skipped: {exc}", flush=True)
             failed = True
-        if not failed:
-            # the agent docs describe the code: whenever their stamp lags the
-            # code they are written again (agents read old docs after an
-            # upgrade; a failed first start must not leave them stale)
-            try:
-                from asset_service import agent_docs, doctor
-                if doctor.docs_version(config.AGENT_FILES / "AGENT_START_HERE.md") != _PHAROS_VERSION:
-                    written = agent_docs.generate(db_path)
-                    print(f"agent docs regenerated for Pharos {_PHAROS_VERSION}: {len(written)} file(s)", flush=True)
-            except Exception as exc:  # noqa: BLE001
-                print(f"agent docs not regenerated: {exc}", flush=True)
         try:
             conn = db.connect(db_path)
             # a pass with a failed step is not "served": the next start
@@ -3375,6 +3416,19 @@ def _startup_imports(db_path: str, force: bool = False) -> dict:
             conn.close()
         except Exception:                                 # noqa: BLE001
             pass
+    if not failed:
+        # the agent docs describe the code and the Blender in use: written
+        # again whenever they lag either, on a warm start too (a Blender
+        # upgrade changes no folder, so the importers are skipped and the
+        # pages kept the old build command)
+        try:
+            from asset_service import agent_docs, doctor
+            why = doctor.docs_stale(config.AGENT_FILES)
+            if why:
+                written = agent_docs.generate(db_path)
+                print(f"agent docs regenerated ({why}): {len(written)} file(s)", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"agent docs not regenerated: {exc}", flush=True)
     try:
         added = _sync_pack_tags()
         if added:

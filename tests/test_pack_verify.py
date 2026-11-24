@@ -132,8 +132,12 @@ def test_kb3d_index_absolutizes_relative_fbx_paths():
 def test_make_sandbox_creates_usable_uproject():
     """The conversion sandbox is generated locally, not shipped (its
     EngineAssociation must match the machine's UE). The generator must
-    produce a valid uproject with the Python plugin enabled, derive the
-    association from UE_EXE, and refuse to clobber without --force."""
+    produce a valid uproject with the Python plugin enabled and the store
+    plugins off, derive the association from UE_EXE, leave a current
+    sandbox alone, and bring an old one up to date without touching its
+    Content (a sandbox made for 5.7 ended every unattended run on 5.9:
+    the launcher had updated the Fab plugin past the engine, the engine
+    asked a question nobody answered, and exited)."""
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "sandbox"
         r = subprocess.run(
@@ -151,13 +155,64 @@ def test_make_sandbox_creates_usable_uproject():
         assert any(p.get("Name") == "PythonScriptPlugin" and p.get("Enabled")
                    for p in doc.get("Plugins") or []), doc
         assert (out / "Content").is_dir()
+        off = {p.get("Name") for p in doc["Plugins"] if p.get("Enabled") is False}
+        assert {"Fab", "Bridge"} <= off, doc["Plugins"]
         # idempotent: a second run must not clobber, and must say so
+        first = (out / "Sandbox.uproject").read_bytes()
         r2 = subprocess.run(
             [sys.executable, "-B",
              str(REPO / "pipeline" / "conversion" / "make_sandbox.py"),
              "--out", out],
-            capture_output=True, text=True, cwd=str(REPO), timeout=120)
-        assert r2.returncode == 0 and "already exists" in (r2.stdout or "")
+            capture_output=True, text=True, cwd=str(REPO), timeout=120,
+            env={**os.environ,      # the same engine (a machine's own UE_EXE is another)
+                 "UE_EXE": r"C:\Program Files\Epic Games\UE_5.7\Engine"
+                           r"\Binaries\Win64\UnrealEditor-Cmd.exe"})
+        assert r2.returncode == 0 and "already exists" in (r2.stdout or ""), r2.stdout
+        assert (out / "Sandbox.uproject").read_bytes() == first
+        # a sandbox from an earlier version, on a machine whose engine was
+        # upgraded: the project file is rewritten, a plugin somebody
+        # switched off by hand stays off, the synced Content stays
+        (out / "Content" / "Pack").mkdir()
+        (out / "Content" / "Pack" / "a.uasset").write_bytes(b"x")
+        (out / "Sandbox.uproject").write_text(json.dumps({
+            "FileVersion": 3, "EngineAssociation": "5.7",
+            "Plugins": [{"Name": "PythonScriptPlugin", "Enabled": True},
+                        {"Name": "SomethingElse", "Enabled": False}]}), encoding="utf-8")
+        r3 = subprocess.run(
+            [sys.executable, "-B",
+             str(REPO / "pipeline" / "conversion" / "make_sandbox.py"),
+             "--out", out],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120,
+            env={**os.environ,
+                 "UE_EXE": r"C:\Program Files\Epic Games\UE_5.9\Engine"
+                           r"\Binaries\Win64\UnrealEditor-Cmd.exe"})
+        assert r3.returncode == 0 and "sandbox updated" in (r3.stdout or "") \
+            and "5.7 -> 5.9" in r3.stdout and "Fab" in r3.stdout, r3.stdout
+        doc = json.loads((out / "Sandbox.uproject").read_text(encoding="utf-8"))
+        state = {p["Name"]: p["Enabled"] for p in doc["Plugins"]}
+        assert doc["EngineAssociation"] == "5.9" and state == {
+            "PythonScriptPlugin": True, "Fab": False, "Bridge": False, "SomethingElse": False}, doc
+        assert (out / "Content" / "Pack" / "a.uasset").read_bytes() == b"x"
+        # no engine named: the association already there is kept
+        r4 = subprocess.run(
+            [sys.executable, "-B",
+             str(REPO / "pipeline" / "conversion" / "make_sandbox.py"),
+             "--out", out],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "UE_EXE"})
+        assert r4.returncode == 0 and "already exists" in (r4.stdout or ""), r4.stdout
+        # a hand-edited file with odd plugin entries is rewritten, not a crash
+        (out / "Sandbox.uproject").write_text(json.dumps({
+            "FileVersion": 3, "EngineAssociation": "5.9", "Plugins": 5}), encoding="utf-8")
+        r5 = subprocess.run(
+            [sys.executable, "-B",
+             str(REPO / "pipeline" / "conversion" / "make_sandbox.py"),
+             "--out", out],
+            capture_output=True, text=True, cwd=str(REPO), timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "UE_EXE"})
+        assert r5.returncode == 0 and "sandbox updated" in (r5.stdout or ""), (r5.stdout, r5.stderr)
+        doc = json.loads((out / "Sandbox.uproject").read_text(encoding="utf-8"))
+        assert doc["EngineAssociation"] == "5.9" and len(doc["Plugins"]) == 3, doc
 
 
 def _find_usable_bash():
@@ -2855,6 +2910,39 @@ def test_speedtree_colour_with_alpha_and_the_docs_version():
         assert doctor.docs_version(Path(tmp) / "missing.md") == ""
 
 
+def test_agent_pages_follow_the_installed_blender():
+    """The generated build command names the Blender found when the pages
+    were written. After a Blender upgrade the pages kept the old path:
+    doctor now says so and the server rewrites them."""
+    from asset_service import doctor
+    from asset_service import __version__
+    with tempfile.TemporaryDirectory() as tmp:
+        af = Path(tmp)
+        old = af / "Blender 5.1" / "blender.exe"
+        new = af / "Blender 5.3" / "blender.exe"
+        for exe in (old, new):
+            exe.parent.mkdir(parents=True)
+            exe.write_bytes(b"")
+        (af / "AGENT_START_HERE.md").write_text(f"Generated by Pharos {__version__} on 2026-11-24 10:00; every count\n", encoding="utf-8")
+        (af / "SCENE_BUILD.md").write_text(f'    "{old}" --background --factory-startup --python "x/scene_builder.py" -- scene.json\n',
+                                           encoding="utf-8")
+        assert doctor.docs_blender(af / "SCENE_BUILD.md") == str(old)
+        saved = os.environ.get("BLENDER_EXE")
+        try:
+            os.environ["BLENDER_EXE"] = str(old)
+            assert doctor.docs_stale(af) == "", doctor.docs_stale(af)
+            os.environ["BLENDER_EXE"] = str(new)                 # Blender was upgraded
+            assert "Blender is now" in doctor.docs_stale(af), doctor.docs_stale(af)
+            (af / "AGENT_START_HERE.md").write_text("Generated by Pharos 0.9.0 on 2026-10-01 10:00\n", encoding="utf-8")
+            assert "the code is" in doctor.docs_stale(af)
+        finally:
+            if saved is None:
+                os.environ.pop("BLENDER_EXE", None)
+            else:
+                os.environ["BLENDER_EXE"] = saved
+        assert doctor.docs_blender(af / "missing.md") == ""
+
+
 def test_builder_imports_once_merges_and_reports_missing_textures():
     """With Blender: the same file twice is one import and a linked
     duplicate (one mesh) made with the data API, so a hidden part and a
@@ -3363,5 +3451,10 @@ if __name__ == "__main__":
                 print(f"SKIP {name}: {exc}")
             except AssertionError as exc:
                 failures += 1
-                print(f"FAIL {name}: {exc}")
+                import traceback
+                tb = traceback.extract_tb(exc.__traceback__)[-1]
+                where = f" [{Path(tb.filename).name}:{tb.lineno}: {(tb.line or '').strip()[:160]}]"
+                print(f"FAIL {name}: {exc}{where}")
+                if os.environ.get("GITHUB_ACTIONS"):      # readable on the run page
+                    print(f"::error title=FAIL {name}::{str(exc)[:300]}{where}".replace("\n", " "))
     raise SystemExit(1 if failures else 0)

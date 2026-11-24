@@ -218,9 +218,13 @@ def convert(argv: list) -> int:
               if not bash else ""))
         return 2
     conv = REPO / "pipeline" / "conversion"
-    if not (conv / "sandbox").is_dir() and not args.dry_run:
-        _say("one-time: creating the conversion sandbox project")
-        if _run([sys.executable, conv / "make_sandbox.py"], conv, False):
+    if not args.dry_run:
+        # before every run, not once: the sandbox names the engine it was
+        # made for and switches off the store plugins. A sandbox made for
+        # an older engine ended the run before the export script started
+        sandbox = Path(os.environ.get("PHAROS_SANDBOX_DIR") or conv / "sandbox")
+        if _run([sys.executable, conv / "make_sandbox.py", "--out", sandbox],
+                conv, False, {"UE_EXE": ue}):
             return 4
     failed = 0
     for r in todo:

@@ -11,9 +11,11 @@ triangle counts, pivots, units, materials, clip durations, what you own.
 Searching needs no engine; Blender and Unreal only do what they alone
 can do.
 
-| Dashboard | Textures |
+![dashboard](docs/screenshots/dashboard.png)
+
+| Models | Textures |
 |---|---|
-| ![dashboard](docs/screenshots/dashboard.png) | ![textures](docs/screenshots/textures.png) |
+| ![models](docs/screenshots/models.png) | ![textures](docs/screenshots/textures.png) |
 | **Animations** | **3D viewer** |
 | ![animations](docs/screenshots/animations.png) | ![viewer](docs/screenshots/viewer.png) |
 

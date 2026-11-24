@@ -248,6 +248,11 @@ def save(rows: dict, path=None) -> None:
         tmp.unlink(missing_ok=True)
         raise TagFileBusy(f"{p} is open in another program: close it "
                           f"there, then try again") from exc
+    # the read cache is keyed by size and timestamp: an edit that keeps the
+    # size (3d-assets -> textures plus one confirm mark) inside one clock
+    # tick was read back as the old rows
+    with _LOCK:
+        _cache["key"] = None
 
 
 def migrate(path=None) -> bool:

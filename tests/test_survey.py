@@ -7,6 +7,7 @@ clips. Run standalone: python -B tests/test_survey.py
 """
 
 import json
+import os
 import struct
 import sys
 import tempfile
@@ -313,6 +314,30 @@ def test_library_map_holds_kinds_decisions_and_tags():
             fresh = {"library_root": str(lib), "sections": {}}
             lm.apply_to_config(lm.load(), fresh, lib, lm.weights_of(res))
             assert fresh["sections"]["audio"] == "Audio2", fresh["sections"]
+        finally:
+            restore()
+
+
+def test_a_saved_map_is_read_back_at_once():
+    """The read cache is keyed by size and timestamp. An edit that keeps
+    the file's size (3d-assets -> textures, plus one confirm mark) inside
+    one clock tick was read back as the old rows: `map set` followed by a
+    read showed the old kind, and one CI job in nine failed on it."""
+    from asset_service import library_map as lm
+    with tempfile.TemporaryDirectory() as tmp:
+        lib, restore = _map_env(tmp)
+        try:
+            (lib / "Store" / "Lamp").mkdir(parents=True)
+            lm.sync([("Store/Lamp", "Lamp")])
+            lm.update("Store/Lamp", kind="3d-assets", confirmed=False)
+            before = lm.PATH.stat()
+            assert lm.load()["store/lamp"]["kind"] == "3d-assets"
+            lm.update("Store/Lamp", kind="textures", confirmed=True)
+            after = lm.PATH.stat()
+            assert after.st_size == before.st_size, (before.st_size, after.st_size)      # the size-preserving edit
+            os.utime(lm.PATH, ns=(before.st_atime_ns, before.st_mtime_ns))             # ...inside one tick
+            row = lm.load()["store/lamp"]
+            assert row["kind"] == "textures" and row["confirmed"], row
         finally:
             restore()
 
@@ -641,5 +666,10 @@ if __name__ == "__main__":
             except Exception as exc:       # noqa: BLE001
                 failures += 1
                 kind = "" if isinstance(exc, AssertionError) else f"{type(exc).__name__}: "
-                print(f"FAIL {name}: {kind}{exc}")
+                import traceback
+                tb = traceback.extract_tb(exc.__traceback__)[-1]
+                where = f" [{Path(tb.filename).name}:{tb.lineno}: {(tb.line or '').strip()[:160]}]"
+                print(f"FAIL {name}: {kind}{exc}{where}")
+                if os.environ.get("GITHUB_ACTIONS"):      # readable on the run page
+                    print(f"::error title=FAIL {name}::{kind}{str(exc)[:300]}{where}".replace("\n", " "))
     raise SystemExit(1 if failures else 0)

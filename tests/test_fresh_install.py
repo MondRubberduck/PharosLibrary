@@ -1137,6 +1137,56 @@ def main() -> int:
               and start_file.read_text(encoding="utf-8") != "stale",
               f"copies={baks}")
 
+        # 6a. a warm start (nothing changed, the importers skipped) still
+        # rewrites pages whose build command names a Blender that is gone:
+        # a Blender upgrade changes no folder, and the docs check used to
+        # run only behind the importers. One boot first to settle (the
+        # boot above added a folder to the map after stamping, so the next
+        # one runs the importers), then the page, then the warm boot.
+        import re as _re6
+
+        def _boot6(port, log_path):
+            with open(log_path, "w", encoding="utf-8") as fh:
+                proc = subprocess.Popen(
+                    [sys.executable, str(REPO / "pharos.py"), "serve",
+                     "--no-open", "--port", str(port)],
+                    cwd=str(REPO), stdout=fh, stderr=subprocess.STDOUT)
+                try:
+                    code = None
+                    for _ in range(90):
+                        _time.sleep(0.5)
+                        try:
+                            code = _ur.urlopen(f"http://127.0.0.1:{port}/api/stats", timeout=2).status
+                            break
+                        except Exception:
+                            continue
+                finally:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+            return code, log_path.read_text(encoding="utf-8", errors="replace")
+
+        def _starts(log):
+            return [ln.strip()[:120] for ln in log.splitlines()
+                    if any(k in ln for k in ("importers", "imported", "import skipped",
+                                             "agent docs", "scan", "folders"))][:8]
+
+        up_a, log_a = _boot6(8847, tmp / "boot_settle.log")
+        scene_page = config.AGENT_FILES / "SCENE_BUILD.md"
+        gone = (tmp / "gone" / "blender.exe").as_posix()
+        page6, n_sub = _re6.subn(r'"[^"\n]+" --background --factory-startup --python',
+                                 f'"{gone}" --background --factory-startup --python',
+                                 scene_page.read_text(encoding="utf-8"))
+        scene_page.write_text(page6, encoding="utf-8")
+        up_b, log_b = _boot6(8848, tmp / "boot_warm.log")
+        check("warm start rewrites agent pages that name a Blender which is gone",
+              n_sub == 1 and up_a == 200 and up_b == 200
+              and "importers skipped" in log_b and "agent docs regenerated" in log_b
+              and gone not in scene_page.read_text(encoding="utf-8"),
+              f"sub={n_sub} up={up_a},{up_b} settle={_starts(log_a)} warm={_starts(log_b)}")
+
         # 6b. doctor: the one-command setup check must parse, report live
         # section counts, and pass on a correctly-prepared fixture install
         r = subprocess.run(

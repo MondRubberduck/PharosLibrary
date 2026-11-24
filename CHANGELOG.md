@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.0.3 (2026-11-24)
+
+A check three weeks after 1.0.2, on a machine that had moved on to a
+newer Blender and a newer Unreal, and the first read of the CI logs.
+Nothing new to learn; five things that were wrong.
+
+- **Texture thumbnails.** The Textures page showed a broken image for
+  every texture set that lives inside a model pack (843 of 3,254 sets
+  in one library, and the whole first page): the image route served
+  the textures folder alone. It serves an image anywhere in the library
+  now, behind the jail the model files have.
+- **The same texture on every file system.** A texture a model names
+  without its folder was picked in the order the file system lists
+  folders: Windows served the 1k map, Linux whichever came first. The
+  search and the pick go by name. This was the red Ubuntu run.
+- **A saved library map is read back at once.** The read cache went by
+  the file's size and timestamp; an edit that keeps the size
+  (`3d-assets` to `textures` plus one confirm mark) inside one clock
+  tick was read back as the old rows. Saving clears the cache. This
+  was the one red Windows run.
+- **Unreal conversion survives an engine upgrade.** `convert` brings the
+  sandbox project up to date before every run: the engine in use, and
+  the store plugins (Fab, Bridge) switched off. The Epic launcher
+  updates those apart from the engine; one newer than the engine cannot
+  load, the engine asks a question nobody answers in an unattended run
+  and exits before the export script starts. A sandbox made for 5.7 did
+  exactly that on 5.9. The synced content is not touched. When the
+  engine does die before the export, the drivers print its last errors
+  instead of only the log's path. Checked on Unreal 5.9 with a real
+  pack: 141 models, 200 textures, no broken link.
+- **The agent pages follow the installed Blender.** The build command in
+  `SCENE_BUILD.md` names the Blender that was found when the page was
+  written. After a Blender upgrade it kept the old path, and stopped
+  working the day the old version was removed. `doctor` reports the
+  pages as stale, and the server rewrites them at its next start.
+- **Network shares stay closed.** The collection-image and audio routes
+  resolved a path before checking it was inside the library, so a web
+  page open in the same browser could make the server connect to a
+  network share of its choosing (on Windows that hands out the user's
+  login hash). They refuse such a path first now, as the model and
+  texture routes already did.
+- **Home page.** The Models tile shows the fullest contact sheet; the
+  first one by name was two grey figures on grey and looked empty.
+- **Tests say where.** The runners print file, line and source of a
+  failing assertion and mark it on the CI run page. Both red runs had
+  printed a test's name and nothing else.
+- README: screenshots of the pages as they are now.
+
 ## 1.0.2 (2026-11-02)
 
 The 1.0.1 test report: placement held on all 512 models (0.06 mm), the

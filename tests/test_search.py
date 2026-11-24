@@ -2886,7 +2886,8 @@ def test_viewer_sources_for_obj_and_gltf():
     with tempfile.TemporaryDirectory() as tmp:
         lib = Path(tmp) / "Lib"
         for d in ("Props/Models", "Props/tex", "Props/textures/ENV", "Env",
-                  "Kits/Trash/part1/models", "Kits/Trash/part3/textures/1k", "Kits/Trash/part3/textures/2k"):
+                  "Kits/Trash/part1/models", "Kits/Trash/part3/textures/1k", "Kits/Trash/part3/textures/2k",
+                  "Kits/Trash/part3/tex", "Kits/Trash/part3/tex2"):
             (lib / d).mkdir(parents=True)
         files = {"Props/Models/crate.obj": b"mtllib crate.mtl\nv 0 0 0\n",
                  "Props/Models/crate.mtl": b"newmtl a\nmap_Kd ../tex/a.png\n",
@@ -2898,7 +2899,8 @@ def test_viewer_sources_for_obj_and_gltf():
                  "Props/textures/ENV/Bricks.jpg": b"\xff\xd8bricks", "Env/Bricks.jpg": b"\xff\xd8other",
                  "Kits/Trash/part1/models/can.obj": b"v 0 0 0\n",
                  "Kits/Trash/part3/textures/1k/can.jpg": b"\xff\xd8can1k",
-                 "Kits/Trash/part3/textures/2k/can.jpg": b"\xff\xd8can2k", "Kits/lid.jpg": b"\xff\xd8lid"}
+                 "Kits/Trash/part3/textures/2k/can.jpg": b"\xff\xd8can2k", "Kits/lid.jpg": b"\xff\xd8lid",
+                 "Kits/Trash/part3/tex/cap.jpg": b"\xff\xd8cap", "Kits/Trash/part3/tex2/cap.jpg": b"\xff\xd8cap2"}
         for rel, data in files.items():
             (lib / rel).write_bytes(data)
         (Path(tmp) / "other.obj").write_bytes(b"v 0 0 0\n")        # outside the library
@@ -2932,7 +2934,9 @@ def test_viewer_sources_for_obj_and_gltf():
             # a UNC path is refused before anything resolves it (the last one
             # names a texture a model in Props has: served by name, from Props)
             for u in ("/file?path=//evil.example/s/a.obj", "/file?path=%5C%5Cevil.example%5Cs%5Ca.obj",
-                      "/res/%2F%2Fevil.example%2Fs/a.png"):
+                      "/res/%2F%2Fevil.example%2Fs/a.png", "/timg?path=//evil.example/s/a.png",
+                      "/cimg?path=//evil.example/s/a.png", "/cimg?path=%5C%5Cevil.example%5Cs%5Ca.jpg",
+                      "/audiofile?path=//evil.example/s/a.wav"):
                 assert _drive(u)[0] == 404, u
             assert _drive("/res/Props/%2F%2Fevil.example%2Fs%2Fa.png")[1] == files["Props/tex/a.png"]
             # a UNC path exists on Windows only; POSIX resolves '//x' as a plain path and refuses it anyway
@@ -2949,6 +2953,30 @@ def test_viewer_sources_for_obj_and_gltf():
                 st, body = _drive(url)
                 assert st == 200 and body == files[rel], (url, st)
             assert _drive("/res/Props/Models/notes.txt")[0] == 404
+            # texture thumbnails: an image anywhere in the library (a set
+            # inside a model pack showed as a broken image on the Textures
+            # page), by absolute path as the API hands it out; never a
+            # file outside, another kind of file, or a network share
+            st, body = _drive("/timg?path=" + quote((lib / "Kits/Trash/part3/textures/1k/can.jpg").as_posix()))
+            assert st == 200 and body == files["Kits/Trash/part3/textures/1k/can.jpg"], st
+            assert _drive("/timg?path=" + quote((Path(tmp) / "other.png").as_posix()))[0] == 404
+            assert _drive("/timg?path=" + quote((lib / "Props/Models/crate.obj").as_posix()))[0] == 404
+            assert _drive("/timg?path=//evil.example/s/a.png")[0] == 404
+            assert _drive("/timg?path=" + quote((lib / "Props/tex/missing.png").as_posix()))[0] == 404
+            # a textures folder the config puts outside the library is
+            # served too (it was the only folder before), nothing beside it
+            outside = Path(tmp) / "TexOut"
+            outside.mkdir()
+            (outside / "t.png").write_bytes(b"\x89PNGout")
+            old_tex = browse.TEXTURES_ROOT
+            browse.TEXTURES_ROOT = outside
+            try:
+                st, body = _drive("/timg?path=" + quote((outside / "t.png").as_posix()))
+                assert st == 200 and body == b"\x89PNGout", st
+                assert _drive("/timg?path=" + quote((Path(tmp) / "other.png").as_posix()))[0] == 404
+                assert _drive("/timg?path=" + quote((outside / "../other.png").as_posix()))[0] == 404
+            finally:
+                browse.TEXTURES_ROOT = old_tex
             # a texture the file names by a path that is not there: found by
             # its name under the model's map folder, not in another folder
             st, body = _drive("/res/Props/Models/D:/author/kit/Bricks.jpg")
@@ -2963,8 +2991,29 @@ def test_viewer_sources_for_obj_and_gltf():
             # variant; a top-level folder is never searched
             st, body = _drive("/res/Kits/Trash/part1/models/textures/2k/can.jpg")
             assert st == 200 and body == files["Kits/Trash/part3/textures/2k/can.jpg"], st
-            assert _drive("/res/Kits/Trash/part1/models/can.jpg")[1] == files["Kits/Trash/part3/textures/1k/can.jpg"]
-            assert _drive("/res/Kits/Trash/part1/models/lid.jpg")[0] == 404
+            assert _drive("/res/Kits/Trash/part1/models/can.jpg")[1] == files["Kits/Trash/part3/textures/1k/can.jpg"], \
+                "no folder named: the first variant by path"
+            assert _drive("/res/Kits/Trash/part1/models/lid.jpg")[0] == 404, "a top-level folder is never searched"
+            assert _drive("/res/Kits/Trash/part1/models/cap.jpg")[1] == files["Kits/Trash/part3/tex/cap.jpg"], \
+                "among equals the first by folder names (tex before tex2), whatever the separator"
+            # the same answer whatever order the file system lists folders
+            # in (Linux lists them in none: CI was red there for this line)
+            browse._RES_INDEX.clear()
+            real_walk = os.walk
+
+            def backwards(top, *a, **k):
+                for dp, dn, fn in real_walk(top, *a, **k):
+                    dn.sort(reverse=True)
+                    yield dp, dn, sorted(fn, reverse=True)
+            os.walk = backwards
+            try:
+                assert _drive("/res/Kits/Trash/part1/models/can.jpg")[1] == files["Kits/Trash/part3/textures/1k/can.jpg"], \
+                    "the pick depends on the folder listing order"
+                assert _drive("/res/Kits/Trash/part1/models/cap.jpg")[1] == files["Kits/Trash/part3/tex/cap.jpg"], \
+                    "the tie-break depends on the folder listing order"
+            finally:
+                os.walk = real_walk
+                browse._RES_INDEX.clear()
             # the page, the vendored loaders, the links
             st, page = _drive("/viewer?file=Props/Models/crate.obj")
             assert st == 200 and b"loaders/OBJLoader.js" in page and b"loaders/GLTFLoader.js" in page
@@ -3054,6 +3103,13 @@ if __name__ == "__main__":
                 print(f"PASS {name}")
             except Exception as exc:       # noqa: BLE001 -- report, go on
                 failures += 1
-                kind = "" if isinstance(exc, AssertionError) else                     f"{type(exc).__name__}: "
-                print(f"FAIL {name}: {kind}{exc}")
+                kind = "" if isinstance(exc, AssertionError) else f"{type(exc).__name__}: "
+                # which line: an assertion without a message once printed
+                # "FAIL name:" and nothing else, on a platform nobody had
+                import traceback
+                tb = traceback.extract_tb(exc.__traceback__)[-1]
+                where = f" [{Path(tb.filename).name}:{tb.lineno}: {(tb.line or '').strip()[:160]}]"
+                print(f"FAIL {name}: {kind}{exc}{where}")
+                if os.environ.get("GITHUB_ACTIONS"):      # readable on the run page
+                    print(f"::error title=FAIL {name}::{kind}{str(exc)[:300]}{where}".replace("\n", " "))
     raise SystemExit(1 if failures else 0)

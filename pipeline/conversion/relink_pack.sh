@@ -249,6 +249,8 @@ PY
     echo
     echo "FAIL: no relink report written -> engine died before finishing"
     grep -a "\[relink\]" "$UELOG" | tail -20
+    echo "the engine's last errors:"
+    grep -a "Error: " "$UELOG" | grep -av "\[relink\]" | tail -5 | cut -c1-400
     exit 5
   fi
   grep -a "\[relink\]" "$UELOG" | grep -av "WARN" | tail -8

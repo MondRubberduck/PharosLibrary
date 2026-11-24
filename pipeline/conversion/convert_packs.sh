@@ -286,6 +286,10 @@ if [[ ! -f "$MANIFEST" ]]; then
   echo
   echo "FAIL: no manifest written -> engine died before finishing"
   grep -a "\[amconv\]" "$UELOG" | tail -20
+  # the engine's own reason (a plugin that cannot load, a missing module):
+  # without it the log file had to be opened to learn why nothing ran
+  echo "the engine's last errors:"
+  grep -a "Error: " "$UELOG" | grep -av "\[amconv\]" | tail -5 | cut -c1-400
   exit 5
 fi
 grep -a "\[amconv\] " "$UELOG" | grep -av "WARN" | tail -6
